@@ -24,7 +24,7 @@ class Vehicle:
             self.human_vehicle = True
         else:
             self.human_vehicle = False
-        
+        self.max_velocity = self.params.max_velocity  # m/s
         # Initialize position
         self.state.x = initial_x
         self.state.y = initial_y
@@ -245,7 +245,7 @@ class Vehicle:
         
         # Calculate new velocity
         new_velocity = self.v + target_acceleration * dt
-        new_velocity = np.clip(new_velocity, 0, 250)  # velocity limits
+        new_velocity = np.clip(new_velocity, 0, self.max_velocity)  # velocity limits
         
         # Update state using kinematic model (with steering)
         delta_f = self.steering_input * self.params.max_steering_angle

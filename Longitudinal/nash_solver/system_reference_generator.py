@@ -75,6 +75,7 @@ class SystemReferenceGenerator:
             
         # 1. Copy convoy  
         pred_sim = self.create_prediction_simulation(current_simulation)
+        pred_sim.is_prediction_mode = True
         
         # ⚡ Calculate how many simulation steps per control step
         dt_sim = pred_sim.dt  # 0.02s

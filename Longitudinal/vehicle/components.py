@@ -39,7 +39,7 @@ class VehicleParameters:
     Iz: float = 2500.0  # kg⋅m²
     
     # Performance
-    max_velocity: float = 249.0 / 3.6  # m/s (249 km/h)
+    max_velocity: float = 250.0 / 3.6  # m/s (250 km/h)
     max_acceleration: float = 2.5  # m/s²
     
     # Steering

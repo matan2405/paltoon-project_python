@@ -42,6 +42,8 @@ class PlatoonSimulation:
         else:
             self.initial_velocity_platoon = initial_velocity_platoon
 
+        self.is_prediction_mode = False  # Placeholder for prediction mode
+        
         # Human vehicle initial conditions
         self.initial_x_human = initial_x_human
         self.initial_velocity_human = initial_velocity_human
@@ -71,8 +73,8 @@ class PlatoonSimulation:
         for i in range(self.num_cars_platoon):
             vehicle = Vehicle(initial_x=self.initial_x_platoon[i], initial_y=0.0, vehicle_id=f"Platoon_{i+1}", initial_velocity=self.initial_velocity_platoon[i])
             vehicle.autonomous_mode = True
-            vehicle.use_kinematic_model = True  # Platoon vehicles always use kinematic model
             vehicle.use_state_space_model = self.use_state_space  # Use state-space bicycle model if specified
+            vehicle.use_kinematic_model = not self.use_state_space  # Platoon vehicles always use kinematic model
             vehicle.use_kinematic = not self.use_state_space
             vehicle.target_velocity = 120.0 / 3.6  # 120 km/h in m/s
             self.platoon_vehicles.append(vehicle)
@@ -106,7 +108,7 @@ class PlatoonSimulation:
     def update(self):
         """Single simulation step"""
         # Update platoon using exact platoon_control.py algorithms
-        self.platoon_manager.update(self.dt)
+        self.platoon_manager.update(self.dt, self.is_prediction_mode)
         
         
         # Update human vehicle dynamics (only if not in platoon)

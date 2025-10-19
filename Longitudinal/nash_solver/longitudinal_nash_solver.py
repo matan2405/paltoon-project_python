@@ -35,7 +35,7 @@ class EnhancedLongitudinalNashSolver:
         
         # ELEGANT FIX: Proper cost function design
         # Lower Q means less aggressive tracking → smoother control
-        self.Q_output = np.diag([100, 400.0])  # [position, velocity]
+        self.Q_output = np.diag([100.0, 400.0])  # [position, velocity]
         
         # Control effort cost
         self.R1 = 2.0   # Significant control cost (smooth control)

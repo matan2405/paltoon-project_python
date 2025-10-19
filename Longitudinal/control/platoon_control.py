@@ -55,8 +55,9 @@ class PlatoonManager:
         # Set all vehicles to autonomous mode
         for vehicle in vehicles:
             vehicle.autonomous_mode = True
-    
-    def update(self, dt: float):
+
+
+    def update(self, dt: float, is_prediction_mode: bool = False):
         """Update platoon control - implementing exact algorithm from platoon_control.py"""
         if not self.vehicles:
             return
@@ -65,25 +66,26 @@ class PlatoonManager:
         Car_1 = self.vehicles[0]  # Lead vehicle
         
         # Check if leader has Nash acceleration override
-        if hasattr(Car_1, 'nash_acceleration') and Car_1.nash_acceleration is not None:
+        # if hasattr(Car_1, 'nash_acceleration') and Car_1.nash_acceleration is not None:
+        if not is_prediction_mode  and not Car_1.nash_acceleration is None:
             lead_acc = Car_1.nash_acceleration
             Car_1.nash_acceleration = None  # Reset for next iteration
             new_velocity_leader = Car_1.v + lead_acc * dt
-            new_velocity_leader = np.clip(new_velocity_leader, 0, 250)
+            new_velocity_leader = np.clip(new_velocity_leader, 0,  Car_1.max_velocity)
         else:
             # Normal free road acceleration (exactly like platoon_control.py)
             new_velocity_leader = odeint(free_road_acc, Car_1.v, [0, dt], args=(self.target_velocity, self.max_acceleration))[-1][0]
-            new_velocity_leader = np.clip(new_velocity_leader, 0, 250)  # velocity limits
+            new_velocity_leader = np.clip(new_velocity_leader, 0,  Car_1.max_velocity)  # velocity limits
             lead_acc = (new_velocity_leader - Car_1.v) / dt if dt > 0 else 0
-
+        Car_1.a_desired = lead_acc
         # Update leader using platoon kinematic model
-        if Car_1.use_state_space_model:
-            Car_1.a_desired = lead_acc
-            Car_1.update_dynamics_state_space(dt)
-        else:
-            delta_f = Car_1.state.delta_f  # front wheel steering angle (straight line)
-            delta_r = Car_1.state.delta_r  # rear wheel steering angle
-            Car_1.state_equation_platoon(delta_f, delta_r, new_velocity_leader, dt)
+        # if Car_1.use_state_space_model:
+        Car_1.update_dynamics(dt)
+            # Car_1.update_dynamics_state_space(dt)
+        # else:
+        #     delta_f = Car_1.state.delta_f  # front wheel steering angle (straight line)
+        #     delta_r = Car_1.state.delta_r  # rear wheel steering angle
+        #     Car_1.state_equation_platoon(delta_f, delta_r, new_velocity_leader, dt)
         
         # Following vehicles - Rajamani controller (exactly like platoon_control.py)
         for car_num in range(1, len(self.vehicles)):
@@ -102,7 +104,8 @@ class PlatoonManager:
             self.actual_gaps_history[car_num-1].append(actual_gap)
             
             # Check if follower has Nash acceleration override
-            if hasattr(follower, 'nash_acceleration') and follower.nash_acceleration is not None:
+            # if hasattr(follower, 'nash_acceleration') and follower.nash_acceleration is not None:
+            if not is_prediction_mode  and not follower.nash_acceleration is None:
                 a_des = follower.nash_acceleration
                 follower.nash_acceleration = None  # Reset for next iteration
                 # Calculate desired gap for history (even when using Nash)
@@ -113,18 +116,19 @@ class PlatoonManager:
                 a_des, s_des = rajamani(leader, follower)
                 self.desired_gaps_history[car_num-1].append(s_des)
             
+            follower.a_desired = a_des
             # Update follower vehicle
-            if follower.use_state_space_model:
-                follower.a_desired = a_des
-                follower.update_dynamics_state_space(dt)
-            else:
-                # Update velocity with acceleration constraint like platoon_control.py
-                delta_f = follower.state.delta_f  # front wheel steering angle (straight line)
-                delta_r = follower.state.delta_r  # rear wheel steering angle
-                new_velocity_follower = follower.v + a_des * dt
-                new_velocity_follower = np.clip(new_velocity_follower, 0, 250)  # velocity limits
-                # Update vehicle state using platoon kinematic model
-                follower.state_equation_platoon(delta_f, delta_r, new_velocity_follower, dt)
+            follower.update_dynamics(dt)
+            # if follower.use_state_space_model:
+            #     follower.update_dynamics_state_space(dt)
+            # else:
+            #     # Update velocity with acceleration constraint like platoon_control.py
+            #     delta_f = follower.state.delta_f  # front wheel steering angle (straight line)
+            #     delta_r = follower.state.delta_r  # rear wheel steering angle
+            #     new_velocity_follower = follower.v + a_des * dt
+            #     new_velocity_follower = np.clip(new_velocity_follower, 0, follower.max_velocity)  # velocity limits
+            #     # Update vehicle state using platoon kinematic model
+            #     follower.state_equation_platoon(delta_f, delta_r, new_velocity_follower, dt)
     
     def add_vehicle(self, vehicle):
         """Add a vehicle to the platoon"""
