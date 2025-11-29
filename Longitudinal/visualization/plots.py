@@ -21,7 +21,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
     try:
         import matplotlib.pyplot as plt
         
-        print(f"🎨 Creating comprehensive plots for: {scenario_name}")
+        print(f"[PALETTE] Creating comprehensive plots for: {scenario_name}")
         print(f"   📊 Data points: {len(simulation.time_history)}")
         print(f"   🚗 Vehicles: {len(simulation.all_vehicles)}")
         
@@ -173,7 +173,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
             if accelerations:
                 plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=2)
         plt.xlabel('Time [s]')
-        plt.ylabel('Acceleration [m/s²]')
+        plt.ylabel('Acceleration [m/s^2]')
         plt.title('Vehicle Accelerations')
         plt.legend()
         plt.grid(True)
@@ -290,7 +290,7 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     print(f"\n{'=' * 70}")
     print(f"✅ Simulation {scenario_name} completed!")
     print(f"⏱️ Execution time: {execution_time:.2f} seconds")
-    print(f"⚡ Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
+    print(f"[ZAP] Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
     print(f"{'=' * 70}")
     
     print(f"\n📊 === {scenario_name} Platoon Control Simulation Results ===")
@@ -298,11 +298,11 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     # Simulation performance summary  
     print(f"\n🎯 Simulation Performance:")
     print(f"   ⏱️ Total simulation time: {simulation.time_history[-1]:.1f} seconds")
-    print(f"   ⚡ Execution time: {execution_time:.2f} seconds")
+    print(f"   [ZAP] Execution time: {execution_time:.2f} seconds")
     print(f"   🚀 Speed factor: {simulation.time_history[-1]/execution_time:.1f}x real time")
     
     # platoon composition
-    print(f"\n🚛 platoon Composition:")
+    print(f"\n[TRUCK] platoon Composition:")
     print(f"   📊 Total platoon vehicles: {len(simulation.platoon_manager.vehicles)}")
     print(f"   🎯 Target velocity: {simulation.platoon_manager.target_velocity*3.6:.1f} km/h")
     
@@ -357,7 +357,7 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
 def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analysis"):
     """Create comprehensive 9-plot Nash equilibrium analysis for longitudinal control"""
     try:
-        print(f"🎨 Creating enhanced 9-grid Nash analysis plots for: {scenario_name}")
+        print(f"[PALETTE] Creating enhanced 9-grid Nash analysis plots for: {scenario_name}")
         
         # Check if Nash data exists
         if not hasattr(simulation, 'authority_history') or len(simulation.authority_history) == 0:
@@ -420,12 +420,12 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         plt.axhline(y=2.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
         plt.axhline(y=-3.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
         plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Acceleration [m/s²]', fontsize=10)
+        plt.ylabel('Acceleration [m/s^2]', fontsize=10)
         plt.title('Longitudinal Acceleration Components', fontsize=11, fontweight='bold')
         plt.grid(True, alpha=0.3)
         plt.legend(loc='best', fontsize=9)
         
-        # Plot 2: Authority Ratio λ(t) - LOG SCALE
+        # Plot 2: Authority Ratio lambda(t) - LOG SCALE
         plt.subplot(3, 3, 2)
         plt.semilogy(time, authority, 'm-', linewidth=2.5)
         plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Equal Authority')
@@ -434,7 +434,7 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         plt.fill_between(time, authority, 1.0, where=(authority < 1.0), 
                        color='green', alpha=0.3, label='Human Dominant')
         plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Authority Ratio λ(t)', fontsize=10)
+        plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
         plt.title('Authority Ratio (Log Scale)', fontsize=11, fontweight='bold')
         plt.grid(True, alpha=0.3, which='both')
         plt.legend(loc='best', fontsize=9)
@@ -490,7 +490,7 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
                                 cmap='viridis', s=20, alpha=0.6)
             plt.colorbar(scatter, label='Time [s]')
             plt.xlabel('Gap Error [m]', fontsize=10)
-            plt.ylabel('Authority Ratio λ(t)', fontsize=10)
+            plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
             plt.title('Gap Error vs Authority Correlation', fontsize=11, fontweight='bold')
             plt.yscale('log')
             plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1, alpha=0.5)
@@ -524,11 +524,11 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         values = []
         
         max_lambda = np.max(authority)
-        metrics.append('Max λ')
+        metrics.append('Max lambda')
         values.append(max_lambda)
         
         min_lambda = np.min(authority)
-        metrics.append('Min λ')
+        metrics.append('Min lambda')
         values.append(min_lambda)
         
         if len(safety_forces) > 0:

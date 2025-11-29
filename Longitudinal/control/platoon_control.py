@@ -26,9 +26,8 @@ def rajamani(Car_1, Car_2):
     return a_des, s_des
 
 
-def free_road_acc(v, t, v_target, a_max):
+def free_road_acc(v, t, v_target, a_max,delta=4):
     """Free road acceleration - identical to platoon_control.py"""
-    delta = 4  # exponent
 
     if (v_target >= v):
         dv_dt = a_max * (1 - (v/v_target)**delta)
@@ -44,7 +43,7 @@ class PlatoonManager:
         self.vehicles = vehicles
         self.target_velocity = 120.0 / 3.6  # 120 km/h in m/s (matching platoon_control)
         self.max_velocity = 250.0  # m/s (matching platoon_control.py)
-        self.max_acceleration = 2.5  # m/s² (matching platoon_control.py)
+        self.max_acceleration = 2.5  # m/s^2 (matching platoon_control.py)
         
         self.use_state_space = use_state_space  # Whether to use state-space model
         

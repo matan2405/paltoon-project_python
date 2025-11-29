@@ -40,7 +40,7 @@ def run_scenario_join_before():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_BEFORE", join_trigger_time=25.0)
@@ -65,7 +65,7 @@ def run_scenario_join_middle():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_MIDDLE", join_trigger_time=20.0)
@@ -90,7 +90,7 @@ def run_scenario_join_after():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_AFTER", join_trigger_time=15.0)
@@ -142,7 +142,7 @@ def run_single_simulation(sim, scenario_name, join_trigger_time=20.0):
 
             # Status report every 5 seconds
             if sim.time % 5.0 < sim.dt:
-                # print(f"\n⏰ Time: {sim.time:.1f}s")
+                # print(f"\n⏱️ Time: {sim.time:.1f}s")
                 # for vehicle in sim.all_vehicles:
                 #     # Determine correct status based on actual vehicle state
                 #     if vehicle.vehicle_id.startswith("Platoon"):
@@ -160,7 +160,7 @@ def run_single_simulation(sim, scenario_name, join_trigger_time=20.0):
                     
                 #     print(f"   {vehicle.vehicle_id}: position=({vehicle.state.x:.1f}, {vehicle.state.y:.1f}), "
                 #           f"speed={vehicle.state.vx*3.6:.0f}km/h ({status}), "
-                #           f"acceleration={vehicle.state.ax:.2f} m/s²")
+                #           f"acceleration={vehicle.state.ax:.2f} m/s^2")
                 sim.print_status()
 
         end_time = time.time()
@@ -237,7 +237,7 @@ def run_single_simulation(sim, scenario_name, join_trigger_time=20.0):
 
 def run_all_scenarios_separately():
     """Run all scenarios separately"""
-    print("🚛 platoon Joining Scenarios System")
+    print("[TRUCK] platoon Joining Scenarios System")
     print("=" * 60)
     
     scenarios = [

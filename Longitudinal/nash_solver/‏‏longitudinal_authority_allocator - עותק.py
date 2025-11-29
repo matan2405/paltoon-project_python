@@ -13,10 +13,10 @@ class LongitudinalAuthorityAllocator:
 
     def __init__(self):
         # Li et al. Table 2 - Force ranges and their corresponding ln(lambda) values.
-        # Original paper: Force=0 → ln(λ)=-1.78 → λ=0.169 (Human dominant!)
+        # Original paper: Force=0 -> ln(lambda)=-1.78 -> lambda=0.169 (Human dominant!)
         self.force_ranges = np.array([0, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 1000])
         
-        # Convert from ln(λ) to λ values from Table 2
+        # Convert from ln(lambda) to lambda values from Table 2
         ln_lambda = np.array([-1.78, -1.42, -0.83, -0.42, 0.00, 0.21, 0.63, 1.17, 1.61, 1.83, 2.21, 2.56, 3.34, 4.23, 4.67])
         self.lambda_values = np.exp(ln_lambda)
 
@@ -29,13 +29,13 @@ class LongitudinalAuthorityAllocator:
 
     def compute_authority_ratio(self, risk_force: float) -> float:
         """
-        Computes the authority ratio λ(k) based on the scalar longitudinal risk force.
+        Computes the authority ratio lambda(k) based on the scalar longitudinal risk force.
 
         Args:
             risk_force (float): The risk value from the LongitudinalSafetyField.
 
         Returns:
-            float: The calculated authority ratio λ(k).
+            float: The calculated authority ratio lambda(k).
         """
         # Improved: Enhanced lookup with interpolation
         force_mag = abs(risk_force)  # Use absolute value for scalar force
@@ -127,7 +127,7 @@ def longitudinal_control_example():
         human_weight, auto_weight = allocator.get_authority_weights(lambda_k)
         
         # Print results
-        print(f"⚖️  Authority Ratio (λ): {lambda_k:.3f}")
+        print(f"⚖️  Authority Ratio (lambda): {lambda_k:.3f}")
         print(f"👤 Human Weight: {human_weight:.3f} ({human_weight*100:.1f}%)")
         print(f"🤖 Autonomous Weight: {auto_weight:.3f} ({auto_weight*100:.1f}%)")
         
@@ -149,9 +149,9 @@ def longitudinal_control_example():
         
         final_command = human_weight * human_command + auto_weight * auto_command
         
-        print(f"🎛️  Driver Command: {human_command:.2f} m/s²")
-        print(f"🎛️  System Command: {auto_command:.2f} m/s²")
-        print(f"➡️  Final Command: {final_command:.2f} m/s²")
+        print(f"🎛️  Driver Command: {human_command:.2f} m/s^2")
+        print(f"🎛️  System Command: {auto_command:.2f} m/s^2")
+        print(f"➡️  Final Command: {final_command:.2f} m/s^2")
 
 
 def integration_example():

@@ -69,7 +69,7 @@ class VehicleParameters:
     
     # Aerodynamics
     drag_coefficient: float = 0.30
-    frontal_area: float = 2.09  # m²
+    frontal_area: float = 2.09  # m^2
     
     # Tire parameters
     wheel_radius: float = 0.3175  # m (225/50 R17)
@@ -80,11 +80,11 @@ class VehicleParameters:
     Car: float = 18000.0  # Rear tire cornering stiffness N/rad
     
     # Moment of inertia
-    Iz: float = 2500.0  # kg⋅m²
+    Iz: float = 2500.0  # kg⋅m^2
     
     # Performance
     max_velocity: float = 249.0 / 3.6  # m/s (249 km/h)
-    max_acceleration: float = 2.5  # m/s²
+    max_acceleration: float = 2.5  # m/s^2
     
     # Steering
     max_steering_angle: float = np.radians(30.0)  # rad
@@ -191,8 +191,8 @@ class VehicleState:
         self.psi_dot = 0.0  # yaw rate (rad/s)
         
         # Accelerations
-        self.ax = 0.0     # longitudinal acceleration (m/s²)
-        self.ay = 0.0     # lateral acceleration (m/s²)
+        self.ax = 0.0     # longitudinal acceleration (m/s^2)
+        self.ay = 0.0     # lateral acceleration (m/s^2)
 
 class Vehicle:
     """Main vehicle class implementing bicycle model dynamics"""
@@ -455,7 +455,7 @@ class PlatoonManager:
         self.vehicles = vehicles
         self.target_velocity = 120.0 / 3.6  # 120 km/h in m/s (matching platoon_control)
         self.max_velocity = 250.0  # m/s (matching platoon_control.py)
-        self.max_acceleration = 2.5  # m/s² (matching platoon_control.py)
+        self.max_acceleration = 2.5  # m/s^2 (matching platoon_control.py)
         
         # Data storage like platoon_control.py
         self.actual_gaps_history = [[] for _ in range(len(vehicles)-1)]
@@ -553,7 +553,7 @@ class HumanDriver:
         self.vehicle = vehicle
         # תיקון: הגברת מהירות המטרה ל-120 קמ"ש
         self.target_speed = 120.0 / 3.6  # 120 km/h במקום 20 km/h
-        self.max_acceleration = 2.0  # m/s²
+        self.max_acceleration = 2.0  # m/s^2
         self.max_velocity = 250.0  # m/s
         self.lane_change_progress = 0.0
         self.merging = False
@@ -576,8 +576,8 @@ class HumanDriver:
         # desired_accel = kp * speed_error
         
         # Limit acceleration to realistic values
-        max_accel = 2.0  # m/s²
-        max_decel = -3.0  # m/s²
+        max_accel = 2.0  # m/s^2
+        max_decel = -3.0  # m/s^2
         delta = 2  # exponent for smooth approach to target speed
         if (self.target_speed  >= self.vehicle.state.vx):
             desired_accel = max_accel * (1 - (self.vehicle.state.vx/self.target_speed)**delta)
@@ -1535,7 +1535,7 @@ def run_simulation():
 #                 if accelerations:
 #                     plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=2)
 #             plt.xlabel('Time [s]')
-#             plt.ylabel('Acceleration [m/s²]')
+#             plt.ylabel('Acceleration [m/s^2]')
 #             plt.title('Vehicle Accelerations')
 #             plt.legend()
 #             plt.grid(True)
@@ -1632,7 +1632,7 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     print(f"\n{'=' * 70}")
     print(f"✅ Simulation {scenario_name} completed!")
     print(f"⏱️ Execution time: {execution_time:.2f} seconds")
-    print(f"⚡ Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
+    print(f"[ZAP] Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
     print(f"{'=' * 70}")
     
     print(f"\n📊 === {scenario_name} Platoon Control Simulation Results ===")
@@ -1640,11 +1640,11 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     # Simulation performance summary  
     print(f"\n🎯 Simulation Performance:")
     print(f"   ⏱️ Total simulation time: {simulation.time_history[-1]:.1f} seconds")
-    print(f"   ⚡ Execution time: {execution_time:.2f} seconds")
+    print(f"   [ZAP] Execution time: {execution_time:.2f} seconds")
     print(f"   🚀 Speed factor: {simulation.time_history[-1]/execution_time:.1f}x real time")
     
     # platoon composition
-    print(f"\n🚛 platoon Composition:")
+    print(f"\n[TRUCK] platoon Composition:")
     print(f"   📊 Total platoon vehicles: {len(simulation.platoon_manager.vehicles)}")
     print(f"   🎯 Target velocity: {simulation.platoon_manager.target_velocity*3.6:.1f} km/h")
     
@@ -1734,7 +1734,7 @@ def run_scenario_join_before():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_BEFORE", join_trigger_time=25.0)
@@ -1758,7 +1758,7 @@ def run_scenario_join_middle():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_MIDDLE", join_trigger_time=20.0)
@@ -1782,7 +1782,7 @@ def run_scenario_join_after():
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial human vehicle position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Human vehicle target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
-    print(f"   🚛 platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
+    print(f"   [TRUCK] platoon target speed: {sim.platoon_manager.target_velocity*3.6:.0f} km/h")
     
     # Run simulation
     run_single_simulation(sim, "JOIN_AFTER", join_trigger_time=15.0)
@@ -1833,7 +1833,7 @@ def run_single_simulation(sim, scenario_name, join_trigger_time=20.0):
 
             # Status report every 20 seconds
             if sim.time % 20.0 < sim.dt:
-                print(f"\n⏰ Time: {sim.time:.1f}s")
+                print(f"\n⏱️ Time: {sim.time:.1f}s")
                 for vehicle in sim.all_vehicles:
                     # Determine correct status based on actual vehicle state
                     if vehicle.vehicle_id.startswith("Platoon"):
@@ -2125,7 +2125,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
             if accelerations:
                 plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=2)
         plt.xlabel('Time [s]')
-        plt.ylabel('Acceleration [m/s²]')
+        plt.ylabel('Acceleration [m/s^2]')
         plt.title('Vehicle Accelerations')
         plt.legend()
         plt.grid(True)
@@ -2335,7 +2335,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
 
 def run_all_scenarios_separately():
     """Run all scenarios separately"""
-    print("🚛 platoon Joining Scenarios System")
+    print("[TRUCK] platoon Joining Scenarios System")
     print("=" * 60)
     
     scenarios = [

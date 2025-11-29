@@ -59,7 +59,7 @@ setup_results_directory()
 
 # Global constants
 SIMULATION_DT = 0.02  # Default timestep
-DEFAULT_SIMULATION_TIME = 60 * 1.5  # Default simulation time in seconds
+DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time in seconds
 
 # Vehicle colors for plotting
 VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']

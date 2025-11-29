@@ -1,178 +1,226 @@
+# #!/usr/bin/env python3
+# """
+# File: system_reference_generator.py  
+# Description: Generates target trajectories for the System player (R1).
+# UPDATED: Robust logic for Join Before/After scenarios.
+# """
+# import numpy as np
+# import copy
+# import sys
+# import os
+
+# # Add parent directory to path to allow importing from control
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# from control.platoon_control import free_road_acc, rajamani
+
+# class SystemReferenceGenerator:
+#     def __init__(self, Np: int = 20, dt: float = 0.1):
+#         self.Np = Np
+#         self.dt = dt
+#         print(f"👍 System Reference Generator (Robust): dt={self.dt}s, Np={self.Np}")
+
+#     def get_system_acceleration_and_state_sequence(self, simulation):
+#         accel_sequence = np.zeros(self.Np)
+#         state_sequence = np.zeros((self.Np, 2))
+        
+#         human_vehicle = simulation.human_vehicle
+#         platoon_manager = simulation.platoon_manager
+        
+#         sim_vehicle = copy.deepcopy(human_vehicle)
+#         sim_x = sim_vehicle.state.x
+#         sim_v = sim_vehicle.state.vx
+        
+#         # Identify Leader
+#         leader = None
+#         if hasattr(simulation, 'safety_field'):
+#             leader = simulation.safety_field._get_leader(human_vehicle, platoon_manager)
+        
+#         leader_sim = copy.deepcopy(leader) if leader else None
+        
+#         target_platoon_speed = platoon_manager.target_velocity
+        
+#         # --- ROBUST MODE SELECTION ---
+#         # Mode 1: Cruise (No leader OR Leader very far)
+#         # Mode 2: Following (Leader close)
+        
+#         distance_to_leader = float('inf')
+#         if leader_sim:
+#             distance_to_leader = leader_sim.state.x - sim_x
+        
+#         # Threshold for switching to Following mode
+#         FOLLOWING_DISTANCE_THRESHOLD = 120.0 
+        
+#         for i in range(self.Np):
+#             # Update leader state
+#             if leader_sim:
+#                 leader_sim.state.x += leader_sim.state.vx * self.dt
+#                 distance_to_leader = leader_sim.state.x - sim_x
+            
+#             a_des = 0.0
+            
+#             # --- LOGIC ---
+#             if leader_sim and distance_to_leader < FOLLOWING_DISTANCE_THRESHOLD:
+#                 # === FOLLOWING MODE (Join Middle / Approaching) ===
+#                 h = 1.5
+#                 L = leader.params.length if hasattr(leader, 'params') else 5.0
+#                 desired_gap = L + h * sim_v
+                
+#                 gap_error = distance_to_leader - desired_gap
+                
+#                 if gap_error > 5.0:
+#                     # Gap Closing: Smoothly approach
+#                     # Max safe speed based on distance
+#                     v_safe = leader_sim.state.vx + np.sqrt(2 * 1.0 * gap_error)
+                    
+#                     # Target is slightly faster than leader, but limited by safety
+#                     v_target = min(target_platoon_speed * 1.15, v_safe)
+                    
+#                     a_des = free_road_acc(sim_v, 0, v_target, 2.5)
+#                 else:
+#                     # Stable Platoon (Rajamani)
+#                     # We need to pass the updated virtual vehicle to rajamani
+#                     virtual_follower = copy.deepcopy(simulation.human_vehicle)
+#                     virtual_follower.state.x = sim_x
+#                     virtual_follower.state.vx = sim_v
+#                     virtual_follower.state.ax = accel_sequence[i-1] if i > 0 else 0
+#                     a_des, _ = rajamani(leader_sim, virtual_follower)
+            
+#             else:
+#                 # === CRUISE MODE (Join Before / Join After far away) ===
+#                 # Just accelerate to target speed. Simple.
+                
+#                 # If we are in "Join Before" (leader is None), we just want target speed.
+#                 # If we are in "Join After" (leader far), we also just want target speed.
+                
+#                 # Allow slight overspeed to catch up if we know there is a platoon ahead
+#                 target_v = target_platoon_speed
+#                 if leader_sim: # We know there is a leader, just far away
+#                     target_v *= 1.1
+                
+#                 a_des = free_road_acc(
+#                     v=sim_v,
+#                     t=0,
+#                     v_target=target_v,
+#                     a_max=simulation.human_vehicle.params.max_acceleration
+#                 )
+
+#             # Constraints
+#             a_des = np.clip(a_des, -3.0, 2.5)
+            
+#             # Integrate
+#             sim_vehicle.a_desired = a_des
+#             sim_vehicle.update_dynamics(self.dt)
+            
+#             sim_x = sim_vehicle.state.x
+#             sim_v = sim_vehicle.state.vx
+            
+#             accel_sequence[i] = a_des
+#             state_sequence[i, 0] = sim_x
+#             state_sequence[i, 1] = sim_v
+            
+#         return accel_sequence, state_sequence
+
+# __all__ = ['SystemReferenceGenerator']
+
 #!/usr/bin/env python3
 """
 File: system_reference_generator.py  
-Description: Predicts human vehicle acceleration over Np steps using convoy simulation.
-Multi-rate: Uses control dt (0.1s), not simulation dt (0.02s)
+Description: Generates target trajectories for the System player (R1).
+UPDATED: Elegant switching between Free Flow and Rajamani Car-Following.
 """
-from typing import Optional, Tuple
 import numpy as np
+import copy
 import sys
 import os
-import copy
 
-# Add parent directory to path for imports
+# Add parent directory to path to allow importing from control
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation.simulator import PlatoonSimulation, run_simulation
+from control.platoon_control import free_road_acc, rajamani
 
 class SystemReferenceGenerator:
-    """Predicts human vehicle acceleration by running convoy simulation."""
-    
-    def __init__(self, Np: int = 20, dt: float = 0.1):  # ✅ dt=0.1 for control!
+    def __init__(self, Np: int = 20, dt: float = 0.1):
         self.Np = Np
-        self.dt = dt  # Control time step
-        print(f"📊 System Reference Generator: dt={self.dt:.3f}s, Np={self.Np}")
+        self.dt = dt
+        print(f"👍 System Reference Generator (Rajamani/FreeFlow): dt={self.dt}s, Np={self.Np}")
 
-    def create_prediction_simulation(self, current_sim: PlatoonSimulation) -> PlatoonSimulation:
-        """Create a deep copy of current simulation for prediction."""
-        try:
-            # Deep copy preserves everything
-            pred_sim = copy.deepcopy(current_sim)
-            
-            # ⚡ CRITICAL: Keep original simulation dt (0.02)
-            # We'll run multiple sim steps per control step
-            pred_sim.dt = current_sim.dt  # ✅ Keep 0.02 for accurate physics
-            
-            return pred_sim
-        except Exception as e:
-            print(f"Deep copy failed: {e}")
-            return self._manual_copy(current_sim)
-    
-    def _manual_copy(self, current_sim: PlatoonSimulation) -> PlatoonSimulation:
-        """Manual copy as fallback."""
-        platoon_positions = [v.state.x for v in current_sim.platoon_vehicles]
-        platoon_velocities = [v.state.vx for v in current_sim.platoon_vehicles]
-        
-        pred_sim = PlatoonSimulation(
-            Np=self.Np,
-            initial_x_platoon=platoon_positions.copy(),
-            initial_velocity_platoon=platoon_velocities.copy(),
-            num_cars_platoon=len(current_sim.platoon_vehicles),
-            initial_x_human=current_sim.human_vehicle.state.x,
-            initial_velocity_human=current_sim.human_vehicle.state.vx,
-            use_state_space=getattr(current_sim, 'use_state_space', False)
-        )
-        
-        pred_sim.time = current_sim.time
-        pred_sim.human_vehicle.joined_platoon = current_sim.human_vehicle.joined_platoon
-        
-        if current_sim.human_vehicle.joined_platoon:
-            pred_sim.human_driver.merging = True
-            pred_sim.platoon_manager.add_vehicle(pred_sim.human_vehicle)
-        
-        return pred_sim
-
-    def predict_system_acceleration_and_state_sequence(self, current_simulation: PlatoonSimulation) -> Tuple[np.ndarray, np.ndarray, bool]:
+    def get_system_acceleration_and_state_sequence(self, simulation):
         """
-        Predict system acceleration sequence for Np steps.
-
-        Multi-rate architecture:
-        - Each prediction step = dt_control (0.1s)
-        - Each step runs multiple simulation substeps (dt_sim = 0.02s)
+        Generates the target trajectory using 'free_road_acc' for cruising 
+        and 'rajamani' for car-following.
         """
-        if not current_simulation.human_vehicle.joined_platoon:
-            return np.zeros(self.Np), np.zeros((self.Np, 2)), False
+        accel_sequence = np.zeros(self.Np)
+        state_sequence = np.zeros((self.Np, 2))
+        
+        # Clone current state to simulate forward
+        sim_vehicle = copy.deepcopy(simulation.human_vehicle)
+        
+        # Identify Leader
+        leader = None
+        if hasattr(simulation, 'safety_field'):
+            leader = simulation.safety_field._get_leader(simulation.human_vehicle, simulation.platoon_manager)
+        
+        # Clone leader for prediction (simple constant velocity prediction)
+        sim_leader = copy.deepcopy(leader) if leader else None
+        
+        target_platoon_speed = simulation.platoon_manager.target_velocity
+        
+        # Logic Constants
+        # טווח הזיהוי שבו אנחנו מפסיקים להיות "לבד" ומתחילים להתייחס למוביל
+        DETECTION_RANGE = 120.0  
+        # פקטור שמאפשר לנסוע טיפה יותר מהר כדי לסגור פערים כשאנחנו במצב שיוט
+        CATCHUP_FACTOR = 1.1     
+        
+        for i in range(self.Np):
+            # 1. Update Leader Prediction (Constant Velocity assumption for short horizon)
+            if sim_leader:
+                sim_leader.state.x += sim_leader.state.vx * self.dt
             
-        # 1. Copy convoy  
-        pred_sim = self.create_prediction_simulation(current_simulation)
-        pred_sim.is_prediction_mode = True
-        
-        # ⚡ Calculate how many simulation steps per control step
-        dt_sim = pred_sim.dt  # 0.02s
-        dt_control = self.dt  # 0.1s
-        substeps_per_control = int(np.round(dt_control / dt_sim))  # 5 substeps
-        
-        print(f"   🔄 Multi-rate: {substeps_per_control} sim steps per control step")
-        
-        # 2. Predict Np steps with multi-rate
-        acceleration_sequence = np.zeros(self.Np)
-        state_sequence = np.zeros((self.Np, 2))  # Store position and velocity
-        
-        for step in range(self.Np):
-            # Run substeps to advance by dt_control
-            for substep in range(substeps_per_control):
-                pred_sim.update()  # Uses dt_sim internally
+            dist_to_leader = float('inf')
+            if sim_leader:
+                dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
+
+            # 2. Select Control Law (Elegant Switching)
+            a_ref = 0.0
             
-            # Save state after dt_control
-            acceleration_sequence[step] = pred_sim.human_vehicle.a_desired
-            state_sequence[step, :] = [
-                pred_sim.human_vehicle.state.x, 
-                pred_sim.human_vehicle.state.vx
-            ]
-        
-        return acceleration_sequence, state_sequence, True
+            # אם יש מוביל והוא בטווח הראייה שלנו (120 מטר) - תן לרג'אמני לנהוג
+            if sim_leader and 0 < dist_to_leader < DETECTION_RANGE:
+                # === FOLLOW MODE: Use Rajamani ===
+                # Rajamani controller calculates optimal accel to maintain gap 'h'
+                # We pass the simulated vehicles to it directly
+                a_ref, _ = rajamani(sim_leader, sim_vehicle)
+                
+            else:
+                # === CRUISE/CATCH-UP MODE: Use Free Road Acc ===
+                # אם אנחנו רחוקים או אין מוביל, נאיץ למהירות המטרה
+                target_v = target_platoon_speed
+                # אם יש מוביל אבל הוא רחוק, מותר לנסוע קצת יותר מהר כדי להתקרב
+                if sim_leader: 
+                    target_v *= CATCHUP_FACTOR
+                
+                a_ref = free_road_acc(
+                    v=sim_vehicle.state.vx,
+                    t=0,
+                    v_target=target_v,
+                    a_max=sim_vehicle.params.max_acceleration
+                )
 
-    def get_system_acceleration_and_state_prediction(self, simulation: PlatoonSimulation) -> Optional[float]:
-        """Get final predicted acceleration."""
-        accel_sequence, state_sequence, is_in_platoon = self.predict_system_acceleration_and_state_sequence(simulation)
-        if not is_in_platoon:
-            return None
-        return accel_sequence[-1]
-
-    def get_system_acceleration_and_state_sequence(self, simulation: PlatoonSimulation) -> Tuple[np.ndarray, np.ndarray]:
-        """Get complete acceleration sequence."""
-        accel_sequence, state_sequence, _ = self.predict_system_acceleration_and_state_sequence(simulation)
+            # 3. Apply Limits (Comfort constraints)
+            a_ref = np.clip(a_ref, -3.5, 2.0)
+            
+            # 4. Update Simulated Ego Vehicle (Kinematics) for the next prediction step
+            sim_vehicle.state.ax = a_ref  # Important for Rajamani in next step!
+            sim_vehicle.a = a_ref         # Sync for compatibility
+            
+            # Euler integration
+            sim_vehicle.state.x += sim_vehicle.state.vx * self.dt + 0.5 * a_ref * self.dt**2
+            sim_vehicle.state.vx += a_ref * self.dt
+            sim_vehicle.v = sim_vehicle.state.vx # Sync
+            
+            # Store prediction
+            accel_sequence[i] = a_ref
+            state_sequence[i, 0] = sim_vehicle.state.x
+            state_sequence[i, 1] = sim_vehicle.state.vx
+            
         return accel_sequence, state_sequence
-
-__all__ = ['SystemReferenceGenerator']
-# ================================
-# Example usage in platoon control
-# ================================
-
-# Test functionality
-if __name__ == "__main__":
-    print("🧪 Testing Human Acceleration Prediction")
-    os.system('cls' if os.name == 'nt' else 'clear')
-    
-    # Create simulation
-    test_sim = PlatoonSimulation()
-    generator = SystemReferenceGenerator(Np=10, dt=test_sim.dt)
-    
-    total_time = 60.0
-    print_interval = 20.0  # Print every 20 seconds
-    next_print_time = 0.0
-    time_steps = int(total_time / test_sim.dt)
-    prediction_interval = test_sim.dt  # Predict every dt seconds
-    prediction_steps = int(prediction_interval / test_sim.dt)
-    
-    prediction_errors = []
-    
-    # Main simulation loop
-    for step in range(time_steps):
-        current_time = test_sim.time
-        
-        # Run simulation step
-        human_acc = test_sim.update()
-        
-        # Join platoon at 20s
-        if current_time >= 20 and not test_sim.human_vehicle.joined_platoon:
-            test_sim.human_driver.merging = True
-            test_sim.human_vehicle.joined_platoon = True
-            test_sim.platoon_manager.add_vehicle(test_sim.human_vehicle)
-            print(f"🔄 Time {current_time:.1f}s: Human joined platoon")
-        
-        # Run prediction every second (only if in platoon)
-        if step % prediction_steps == 0 and test_sim.human_vehicle.joined_platoon:
-            actual_accel = test_sim.human_vehicle.state.ax
-            predicted_accel, predicted_state = generator.get_human_acceleration_and_state_prediction(test_sim)
-            
-            if predicted_accel is not None:
-                error = abs(predicted_accel - actual_accel)
-                prediction_errors.append(error)
-               
-         # Print status periodically
-        if test_sim.time >= next_print_time:
-            test_sim.print_status()
-            next_print_time += print_interval
-            if test_sim.human_vehicle.joined_platoon:
-                print(f"human acceleration at {test_sim.time:.4f}s: {human_acc}")
-                print(f"Predicted acceleration={predicted_accel:.4f}, "
-                      f"Actual acceleration={actual_accel:.4f}, Error={error:.4f}")
-
-    # Final results
-    if prediction_errors:
-        avg_error = np.mean(prediction_errors)
-        print(f"\n📊 Average prediction error: {avg_error:.4f} m/s²")
-        print(f"📈 Total predictions: {len(prediction_errors)}")
-    
-    print("✅ Test completed!")

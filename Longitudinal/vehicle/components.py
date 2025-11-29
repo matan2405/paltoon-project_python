@@ -25,7 +25,7 @@ class VehicleParameters:
     
     # Aerodynamics
     drag_coefficient: float = 0.30
-    frontal_area: float = 2.09  # m²
+    frontal_area: float = 2.09  # m^2
     
     # Tire parameters
     wheel_radius: float = 0.3175  # m (225/50 R17)
@@ -36,11 +36,11 @@ class VehicleParameters:
     Car: float = 18000.0  # Rear tire cornering stiffness N/rad
     
     # Moment of inertia
-    Iz: float = 2500.0  # kg⋅m²
+    Iz: float = 2500.0  # kg⋅m^2
     
     # Performance
     max_velocity: float = 250.0 / 3.6  # m/s (250 km/h)
-    max_acceleration: float = 2.5  # m/s²
+    max_acceleration: float = 2.5  # m/s^2
     
     # Steering
     max_steering_angle: float = np.radians(30.0)  # rad
@@ -152,8 +152,8 @@ class VehicleState:
         self.psi_dot = 0.0  # yaw rate (rad/s)
         
         # Accelerations
-        self.ax = 0.0     # longitudinal acceleration (m/s²)
-        self.ay = 0.0     # lateral acceleration (m/s²)
+        self.ax = 0.0     # longitudinal acceleration (m/s^2)
+        self.ay = 0.0     # lateral acceleration (m/s^2)
         
         self.steering_angle = 0.0  # steering angle (rad)
         self.wheel_speeds = [0.0, 0.0, 0.0, 0.0]  # wheel speeds (m/s) [FL, FR, RL, RR]
