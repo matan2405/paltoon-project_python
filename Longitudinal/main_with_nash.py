@@ -288,6 +288,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
     
     try:
         for iteration, t in enumerate(T):
+            sim.safety_field.set_current_time(sim.time)
             # Print progress every 2000 iterations
             if iteration % 2000 == 0:
                 progress = (iteration / max_iterations) * 100
@@ -311,6 +312,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
                           f"Leader={leader_force:.1f}N, Follower={follower_force:.1f}N")
                     print(f"   🤝 Coop={sim.nash_data['cooperation_moments']}, "
                           f"Opp={sim.nash_data['opposition_moments']}")
+                    
                 
             # Trigger joining at the right time
             if (sim.time >= join_trigger_time and 
@@ -329,7 +331,15 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
                 print(f"joining platoon at index {sim.platoon_manager.get_new_vehicle_index(sim.human_vehicle)}")
                 print(f"✅ Human vehicle started joining with Nash equilibrium control with target velocity {sim.human_driver.target_speed * 3.6:.1f} km/h")
                 
-        
+            if human_joined:  # Only after joining was triggered
+                current_phase = sim.safety_field.get_current_phase()
+                
+                if current_phase == "FOLLOWING":
+                    sim.human_driver.merging = False  # No longer actively merging
+                elif current_phase == "MERGING":
+                    sim.human_driver.merging = True   # Still merging (or returned to merging)
+                print(f"    Current phase: {current_phase}") if sim.time % 5.0 < sim.dt else None
+            
         end_time = time.time()
         execution_time = end_time - start_time
         
