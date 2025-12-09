@@ -1,178 +1,392 @@
 #!/usr/bin/env python3
 """
 File: system_reference_generator.py  
-Description: Predicts human vehicle acceleration over Np steps using convoy simulation.
-Multi-rate: Uses control dt (0.1s), not simulation dt (0.02s)
+Description: Generates target trajectories for the System player (R1).
+
+VERSION 2.0 - WITH TRANSITIONAL CONTROLLER
+============================================
+Based on Rajamani Chapter 6.7.1: "The need for a transitional controller"
+
+Key Insight: The regular CTG (Constant Time-Gap) control law cannot directly 
+be used to follow a newly encountered vehicle. A transitional trajectory 
+needs to be designed before the CTG control law can be used.
+
+This version adds THREE operating modes:
+1. CRUISE MODE: No leader or leader very far - accelerate to target speed
+2. GAP CLOSING MODE: Leader exists but gap is larger than desired - 
+   use transitional controller to close the gap safely
+3. FOLLOWING MODE: Gap is close to desired - use Rajamani CTG controller
+
+The Gap Closing Mode is the key addition that solves the "Join After Platoon"
+persistent gap error problem.
 """
-from typing import Optional, Tuple
 import numpy as np
+import copy
 import sys
 import os
-import copy
 
-# Add parent directory to path for imports
+# Add parent directory to path to allow importing from control
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation.simulator import PlatoonSimulation, run_simulation
+from control.platoon_control import free_road_acc, rajamani
+
 
 class SystemReferenceGenerator:
-    """Predicts human vehicle acceleration by running convoy simulation."""
+    """
+    Generates target trajectories for the System player (R1) in Nash equilibrium.
     
-    def __init__(self, Np: int = 20, dt: float = 0.1):  # ✅ dt=0.1 for control!
+    The generator uses three modes based on the situation:
+    - Cruise: Accelerate to platoon target speed
+    - Gap Closing: Transitional controller to close large gaps safely
+    - Following: Rajamani CTG controller for steady-state following
+    """
+    
+    def __init__(self, Np: int = 20, dt: float = 0.1):
+        """
+        Initialize the System Reference Generator.
+        
+        Args:
+            Np: Prediction horizon (number of steps)
+            dt: Time step for prediction [seconds]
+        """
         self.Np = Np
-        self.dt = dt  # Control time step
-        print(f"📊 System Reference Generator: dt={self.dt:.3f}s, Np={self.Np}")
+        self.dt = dt
+        
+        # === MODE THRESHOLDS ===
+        # Distance beyond which we consider ourselves "alone" (no leader influence)
+        self.DETECTION_RANGE = 150.0  # [m]
+        
+        # Gap error threshold for switching between Gap Closing and Following modes
+        # If gap_error > GAP_CLOSING_THRESHOLD, use transitional controller
+        self.GAP_CLOSING_THRESHOLD = 8.0  # [m] - increased from 5.0 for smoother transition
+        
+        # Minimum gap error below which we use pure Rajamani
+        self.STABLE_GAP_THRESHOLD = 3.0  # [m]
+        
+        # === GAP CLOSING PARAMETERS ===
+        # Maximum overspeed factor relative to leader when closing gap
+        self.MAX_OVERSPEED_FACTOR = 1.20  # Can go 20% faster than leader
+        
+        # Desired closing rate [m/s] - how fast we want to close the gap
+        self.DESIRED_CLOSING_RATE = 2.0  # [m/s]
+        
+        # Gain for proportional gap closing controller
+        self.GAP_CLOSING_GAIN = 0.15  # [1/s] - acceleration per meter of gap error
+        
+        # === CATCH-UP PARAMETERS (for cruise mode when leader exists but far) ===
+        self.CATCHUP_FACTOR = 1.10  # 10% overspeed when catching up
+        
+        # === COMFORT LIMITS ===
+        self.MAX_ACCEL = 2.0   # [m/s²]
+        self.MAX_DECEL = -3.5  # [m/s²]
+        
+        print(f"🚀 System Reference Generator V2.0 (Transitional Controller)")
+        print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
+        print(f"   🎯 Gap Closing Threshold: {self.GAP_CLOSING_THRESHOLD}m")
+        print(f"   ⚡ Max Overspeed Factor: {self.MAX_OVERSPEED_FACTOR}")
 
-    def create_prediction_simulation(self, current_sim: PlatoonSimulation) -> PlatoonSimulation:
-        """Create a deep copy of current simulation for prediction."""
-        try:
-            # Deep copy preserves everything
-            pred_sim = copy.deepcopy(current_sim)
-            
-            # ⚡ CRITICAL: Keep original simulation dt (0.02)
-            # We'll run multiple sim steps per control step
-            pred_sim.dt = current_sim.dt  # ✅ Keep 0.02 for accurate physics
-            
-            return pred_sim
-        except Exception as e:
-            print(f"Deep copy failed: {e}")
-            return self._manual_copy(current_sim)
-    
-    def _manual_copy(self, current_sim: PlatoonSimulation) -> PlatoonSimulation:
-        """Manual copy as fallback."""
-        platoon_positions = [v.state.x for v in current_sim.platoon_vehicles]
-        platoon_velocities = [v.state.vx for v in current_sim.platoon_vehicles]
-        
-        pred_sim = PlatoonSimulation(
-            Np=self.Np,
-            initial_x_platoon=platoon_positions.copy(),
-            initial_velocity_platoon=platoon_velocities.copy(),
-            num_cars_platoon=len(current_sim.platoon_vehicles),
-            initial_x_human=current_sim.human_vehicle.state.x,
-            initial_velocity_human=current_sim.human_vehicle.state.vx,
-            use_state_space=getattr(current_sim, 'use_state_space', False)
-        )
-        
-        pred_sim.time = current_sim.time
-        pred_sim.human_vehicle.joined_platoon = current_sim.human_vehicle.joined_platoon
-        
-        if current_sim.human_vehicle.joined_platoon:
-            pred_sim.human_driver.merging = True
-            pred_sim.platoon_manager.add_vehicle(pred_sim.human_vehicle)
-        
-        return pred_sim
-
-    def predict_system_acceleration_and_state_sequence(self, current_simulation: PlatoonSimulation) -> Tuple[np.ndarray, np.ndarray, bool]:
+    def get_system_acceleration_and_state_sequence(self, simulation):
         """
-        Predict system acceleration sequence for Np steps.
-
-        Multi-rate architecture:
-        - Each prediction step = dt_control (0.1s)
-        - Each step runs multiple simulation substeps (dt_sim = 0.02s)
+        Generates the target trajectory using appropriate controller based on situation.
+        
+        Three modes:
+        1. CRUISE: No leader or leader > DETECTION_RANGE → free_road_acc to target speed
+        2. GAP_CLOSING: gap_error > GAP_CLOSING_THRESHOLD → transitional controller
+        3. FOLLOWING: gap_error < GAP_CLOSING_THRESHOLD → Rajamani CTG
+        
+        Args:
+            simulation: The simulation object containing vehicle states
+            
+        Returns:
+            tuple: (accel_sequence, state_sequence) - predicted trajectory
         """
-        if not current_simulation.human_vehicle.joined_platoon:
-            return np.zeros(self.Np), np.zeros((self.Np, 2)), False
+        accel_sequence = np.zeros(self.Np)
+        state_sequence = np.zeros((self.Np, 2))  # [position, velocity]
+        
+        # Clone current state for forward simulation
+        sim_vehicle = copy.deepcopy(simulation.human_vehicle)
+        
+        # Identify Leader
+        leader = None
+        if hasattr(simulation, 'safety_field'):
+            leader = simulation.safety_field._get_leader(
+                simulation.human_vehicle, 
+                simulation.platoon_manager
+            )
+        
+        # Clone leader for prediction (constant velocity assumption)
+        sim_leader = copy.deepcopy(leader) if leader else None
+        
+        # Get target platoon speed
+        target_platoon_speed = simulation.platoon_manager.target_velocity
+        
+        # Time headway for desired gap calculation
+        h = 1.5  # [s] - constant time gap
+        
+        for i in range(self.Np):
+            # === Step 1: Update Leader Prediction ===
+            if sim_leader:
+                sim_leader.state.x += sim_leader.state.vx * self.dt
             
-        # 1. Copy convoy  
-        pred_sim = self.create_prediction_simulation(current_simulation)
-        pred_sim.is_prediction_mode = True
-        
-        # ⚡ Calculate how many simulation steps per control step
-        dt_sim = pred_sim.dt  # 0.02s
-        dt_control = self.dt  # 0.1s
-        substeps_per_control = int(np.round(dt_control / dt_sim))  # 5 substeps
-        
-        print(f"   🔄 Multi-rate: {substeps_per_control} sim steps per control step")
-        
-        # 2. Predict Np steps with multi-rate
-        acceleration_sequence = np.zeros(self.Np)
-        state_sequence = np.zeros((self.Np, 2))  # Store position and velocity
-        
-        for step in range(self.Np):
-            # Run substeps to advance by dt_control
-            for substep in range(substeps_per_control):
-                pred_sim.update()  # Uses dt_sim internally
+            # === Step 2: Calculate Distance and Gap Error ===
+            dist_to_leader = float('inf')
+            gap_error = 0.0
+            desired_gap = 50.0  # Default
             
-            # Save state after dt_control
-            acceleration_sequence[step] = pred_sim.human_vehicle.a_desired
-            state_sequence[step, :] = [
-                pred_sim.human_vehicle.state.x, 
-                pred_sim.human_vehicle.state.vx
-            ]
+            if sim_leader:
+                dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
+                
+                # Calculate desired gap (Rajamani formula)
+                L = sim_leader.L if hasattr(sim_leader, 'L') else 5.0
+                desired_gap = L + h * sim_vehicle.state.vx
+                
+                # Gap error: positive means we are too far behind
+                gap_error = dist_to_leader - desired_gap
+            
+            # === Step 3: Select Operating Mode and Calculate Acceleration ===
+            a_ref = 0.0
+            
+            if sim_leader is None or dist_to_leader > self.DETECTION_RANGE:
+                # =============================================
+                # MODE 1: CRUISE (No leader or leader very far)
+                # =============================================
+                target_v = target_platoon_speed
+                
+                # If we know there's a leader ahead (just far), allow overspeed
+                if sim_leader:
+                    target_v *= self.CATCHUP_FACTOR
+                
+                a_ref = free_road_acc(
+                    v=sim_vehicle.state.vx,
+                    t=0,
+                    v_target=target_v,
+                    a_max=sim_vehicle.params.max_acceleration if hasattr(sim_vehicle, 'params') else self.MAX_ACCEL
+                )
+                
+            elif gap_error > self.GAP_CLOSING_THRESHOLD:
+                # =============================================
+                # MODE 2: GAP CLOSING (Transitional Controller)
+                # =============================================
+                # This is the KEY addition for solving "Join After Platoon"
+                
+                a_ref = self._compute_gap_closing_acceleration(
+                    sim_vehicle=sim_vehicle,
+                    sim_leader=sim_leader,
+                    gap_error=gap_error,
+                    desired_gap=desired_gap,
+                    target_platoon_speed=target_platoon_speed
+                )
+                
+            elif gap_error > self.STABLE_GAP_THRESHOLD:
+                # =============================================
+                # MODE 2.5: TRANSITION ZONE (Blend between modes)
+                # =============================================
+                # Smooth transition between gap closing and following
+                
+                # Calculate both accelerations
+                a_closing = self._compute_gap_closing_acceleration(
+                    sim_vehicle=sim_vehicle,
+                    sim_leader=sim_leader,
+                    gap_error=gap_error,
+                    desired_gap=desired_gap,
+                    target_platoon_speed=target_platoon_speed
+                )
+                
+                a_following, _ = rajamani(sim_leader, sim_vehicle)
+                
+                # Blend factor: 1.0 at GAP_CLOSING_THRESHOLD, 0.0 at STABLE_GAP_THRESHOLD
+                blend = (gap_error - self.STABLE_GAP_THRESHOLD) / \
+                        (self.GAP_CLOSING_THRESHOLD - self.STABLE_GAP_THRESHOLD)
+                blend = np.clip(blend, 0.0, 1.0)
+                
+                a_ref = blend * a_closing + (1 - blend) * a_following
+                
+            else:
+                # =============================================
+                # MODE 3: FOLLOWING (Rajamani CTG Controller)
+                # =============================================
+                # Steady-state car following
+                
+                a_ref, _ = rajamani(sim_leader, sim_vehicle)
+            
+            # === Step 4: Apply Comfort Constraints ===
+            a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
+            
+            # === Step 5: Update Simulated Vehicle State ===
+            sim_vehicle.state.ax = a_ref
+            if hasattr(sim_vehicle, 'a'):
+                sim_vehicle.a = a_ref
+            
+            # Euler integration
+            sim_vehicle.state.x += sim_vehicle.state.vx * self.dt + 0.5 * a_ref * self.dt**2
+            sim_vehicle.state.vx += a_ref * self.dt
+            sim_vehicle.state.vx = max(0.0, sim_vehicle.state.vx)  # No reverse
+            
+            if hasattr(sim_vehicle, 'v'):
+                sim_vehicle.v = sim_vehicle.state.vx
+            
+            # Store prediction
+            accel_sequence[i] = a_ref
+            state_sequence[i, 0] = sim_vehicle.state.x
+            state_sequence[i, 1] = sim_vehicle.state.vx
         
-        return acceleration_sequence, state_sequence, True
-
-    def get_system_acceleration_and_state_prediction(self, simulation: PlatoonSimulation) -> Optional[float]:
-        """Get final predicted acceleration."""
-        accel_sequence, state_sequence, is_in_platoon = self.predict_system_acceleration_and_state_sequence(simulation)
-        if not is_in_platoon:
-            return None
-        return accel_sequence[-1]
-
-    def get_system_acceleration_and_state_sequence(self, simulation: PlatoonSimulation) -> Tuple[np.ndarray, np.ndarray]:
-        """Get complete acceleration sequence."""
-        accel_sequence, state_sequence, _ = self.predict_system_acceleration_and_state_sequence(simulation)
         return accel_sequence, state_sequence
 
-__all__ = ['SystemReferenceGenerator']
-# ================================
-# Example usage in platoon control
-# ================================
-
-# Test functionality
-if __name__ == "__main__":
-    print("🧪 Testing Human Acceleration Prediction")
-    os.system('cls' if os.name == 'nt' else 'clear')
-    
-    # Create simulation
-    test_sim = PlatoonSimulation()
-    generator = SystemReferenceGenerator(Np=10, dt=test_sim.dt)
-    
-    total_time = 60.0
-    print_interval = 20.0  # Print every 20 seconds
-    next_print_time = 0.0
-    time_steps = int(total_time / test_sim.dt)
-    prediction_interval = test_sim.dt  # Predict every dt seconds
-    prediction_steps = int(prediction_interval / test_sim.dt)
-    
-    prediction_errors = []
-    
-    # Main simulation loop
-    for step in range(time_steps):
-        current_time = test_sim.time
+    def _compute_gap_closing_acceleration(self, sim_vehicle, sim_leader, 
+                                          gap_error, desired_gap, target_platoon_speed):
+        """
+        Transitional Controller for closing large gaps.
         
-        # Run simulation step
-        human_acc = test_sim.update()
+        Based on Rajamani Chapter 6.7.1, this controller:
+        1. Computes a safe approach speed based on distance
+        2. Uses proportional control to achieve desired closing rate
+        3. Limits overspeed for safety and comfort
         
-        # Join platoon at 20s
-        if current_time >= 20 and not test_sim.human_vehicle.joined_platoon:
-            test_sim.human_driver.merging = True
-            test_sim.human_vehicle.joined_platoon = True
-            test_sim.platoon_manager.add_vehicle(test_sim.human_vehicle)
-            print(f"🔄 Time {current_time:.1f}s: Human joined platoon")
+        The key insight is that we want to approach the leader at a controlled
+        relative velocity, not just match speeds.
         
-        # Run prediction every second (only if in platoon)
-        if step % prediction_steps == 0 and test_sim.human_vehicle.joined_platoon:
-            actual_accel = test_sim.human_vehicle.state.ax
-            predicted_accel, predicted_state = generator.get_human_acceleration_and_state_prediction(test_sim)
+        Args:
+            sim_vehicle: Simulated ego vehicle
+            sim_leader: Simulated leader vehicle
+            gap_error: Current gap error (positive = too far)
+            desired_gap: Target gap distance
+            target_platoon_speed: Platoon target speed
             
-            if predicted_accel is not None:
-                error = abs(predicted_accel - actual_accel)
-                prediction_errors.append(error)
-               
-         # Print status periodically
-        if test_sim.time >= next_print_time:
-            test_sim.print_status()
-            next_print_time += print_interval
-            if test_sim.human_vehicle.joined_platoon:
-                print(f"human acceleration at {test_sim.time:.4f}s: {human_acc}")
-                print(f"Predicted acceleration={predicted_accel:.4f}, "
-                      f"Actual acceleration={actual_accel:.4f}, Error={error:.4f}")
+        Returns:
+            float: Desired acceleration for gap closing
+        """
+        ego_v = sim_vehicle.state.vx
+        leader_v = sim_leader.state.vx
+        
+        # === Method 1: Safe Approach Speed ===
+        # Maximum safe speed based on being able to stop before collision
+        # v_safe = v_leader + sqrt(2 * a_comfortable * gap_error)
+        # This ensures we can always decelerate to leader's speed
+        comfortable_decel = 1.5  # [m/s²] - comfortable deceleration
+        v_safe = leader_v + np.sqrt(2 * comfortable_decel * max(gap_error, 0.1))
+        
+        # === Method 2: Desired Closing Rate ===
+        # We want to approach at a steady rate, faster when gap is larger
+        # Proportional controller: closing_rate = K * gap_error
+        desired_closing_rate = self.GAP_CLOSING_GAIN * gap_error
+        desired_closing_rate = np.clip(desired_closing_rate, 0.5, self.DESIRED_CLOSING_RATE * 2)
+        
+        # Target velocity to achieve this closing rate
+        v_closing = leader_v + desired_closing_rate
+        
+        # === Combine Methods ===
+        # Take minimum of safe speed and closing speed
+        v_target = min(v_safe, v_closing)
+        
+        # Also limit by overspeed factor relative to platoon speed
+        v_max_overspeed = target_platoon_speed * self.MAX_OVERSPEED_FACTOR
+        v_target = min(v_target, v_max_overspeed)
+        
+        # === Calculate Required Acceleration ===
+        # Simple proportional control to reach target velocity
+        velocity_error = v_target - ego_v
+        
+        # Gain for velocity tracking (higher = faster response)
+        K_v = 0.8  # [1/s]
+        
+        a_ref = K_v * velocity_error
+        
+        # Add small feedforward based on leader acceleration if available
+        if hasattr(sim_leader.state, 'ax') and sim_leader.state.ax is not None:
+            a_ref += 0.3 * sim_leader.state.ax
+        
+        return a_ref
 
-    # Final results
-    if prediction_errors:
-        avg_error = np.mean(prediction_errors)
-        print(f"\n📊 Average prediction error: {avg_error:.4f} m/s²")
-        print(f"📈 Total predictions: {len(prediction_errors)}")
+
+# Export
+__all__ = ['SystemReferenceGenerator']
+
+
+# === UNIT TEST ===
+if __name__ == "__main__":
+    print("\n" + "="*60)
+    print("System Reference Generator V2.0 - Unit Test")
+    print("="*60)
     
-    print("✅ Test completed!")
+    # Create mock objects for testing
+    class MockState:
+        def __init__(self, x, vx, ax=0):
+            self.x = x
+            self.vx = vx
+            self.ax = ax
+    
+    class MockParams:
+        def __init__(self):
+            self.max_acceleration = 2.5
+            self.length = 5.0
+    
+    class MockVehicle:
+        def __init__(self, x, v):
+            self.state = MockState(x, v)
+            self.params = MockParams()
+            self.L = 5.0
+            self.v = v
+            self.a = 0
+    
+    class MockPlatoonManager:
+        def __init__(self):
+            self.target_velocity = 33.33  # 120 km/h
+    
+    class MockSafetyField:
+        def __init__(self, leader):
+            self.leader = leader
+        def _get_leader(self, ego, pm):
+            return self.leader
+    
+    class MockSimulation:
+        def __init__(self, ego_x, ego_v, leader_x, leader_v):
+            self.human_vehicle = MockVehicle(ego_x, ego_v)
+            self.platoon_manager = MockPlatoonManager()
+            if leader_x is not None:
+                leader = MockVehicle(leader_x, leader_v)
+                self.safety_field = MockSafetyField(leader)
+            else:
+                self.safety_field = MockSafetyField(None)
+    
+    # Initialize generator
+    gen = SystemReferenceGenerator(Np=20, dt=0.1)
+    
+    print("\n--- Test 1: Cruise Mode (No Leader) ---")
+    sim1 = MockSimulation(ego_x=0, ego_v=25, leader_x=None, leader_v=None)
+    accel1, states1 = gen.get_system_acceleration_and_state_sequence(sim1)
+    print(f"Initial velocity: 25 m/s, Target: 33.33 m/s")
+    print(f"Accelerations: {accel1[:5].round(2)}")
+    print(f"Final velocity: {states1[-1, 1]:.2f} m/s")
+    
+    print("\n--- Test 2: Gap Closing Mode (Large Gap) ---")
+    # Ego at x=0, v=30. Leader at x=80, v=30. Desired gap ~50m. Gap error = 30m
+    sim2 = MockSimulation(ego_x=0, ego_v=30, leader_x=80, leader_v=30)
+    accel2, states2 = gen.get_system_acceleration_and_state_sequence(sim2)
+    print(f"Initial gap: 80m, Desired: ~50m, Gap error: ~30m")
+    print(f"Accelerations: {accel2[:5].round(2)}")
+    print(f"Should be POSITIVE to close gap")
+    
+    print("\n--- Test 3: Following Mode (Small Gap) ---")
+    # Ego at x=0, v=30. Leader at x=52, v=30. Desired gap ~50m. Gap error = 2m
+    sim3 = MockSimulation(ego_x=0, ego_v=30, leader_x=52, leader_v=30)
+    accel3, states3 = gen.get_system_acceleration_and_state_sequence(sim3)
+    print(f"Initial gap: 52m, Desired: ~50m, Gap error: ~2m")
+    print(f"Accelerations: {accel3[:5].round(2)}")
+    print(f"Should be near ZERO (steady state)")
+    
+    print("\n--- Test 4: Join After Platoon Scenario ---")
+    # Simulating the problematic scenario
+    # Ego behind platoon, just joined, gap error = +20m
+    sim4 = MockSimulation(ego_x=0, ego_v=33, leader_x=70, leader_v=33)
+    accel4, states4 = gen.get_system_acceleration_and_state_sequence(sim4)
+    h = 1.5
+    desired = 5 + h * 33  # ~55m
+    actual = 70
+    gap_err = actual - desired  # ~15m
+    print(f"Initial gap: 70m, Desired: {desired:.1f}m, Gap error: {gap_err:.1f}m")
+    print(f"Accelerations: {accel4[:5].round(2)}")
+    print(f"Should show POSITIVE acceleration to close gap!")
+    
+    print("\n" + "="*60)
+    print("✅ Unit tests complete")
+    print("="*60)

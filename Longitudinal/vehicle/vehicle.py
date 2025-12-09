@@ -34,7 +34,7 @@ class Vehicle:
         # Control inputs
         self.direct_force = 0.0      # Direct longitudinal force [N]
         self.steering_input = 0.0    # -1 to 1
-        self.a_desired = 0.0         # Desired acceleration [m/s²]
+        self.a_desired = 0.0         # Desired acceleration [m/s^2]
         
         # For compatibility with human driver
         self.throttle_input = 0.0    # 0 to 1
@@ -281,7 +281,7 @@ class Vehicle:
             u_acceleration = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
         
         # Apply acceleration limits
-        max_accel = 2.5  # m/s²
+        max_accel = 2.5  # m/s^2
         u_acceleration = np.clip(u_acceleration, -max_accel, max_accel)
         self.a = u_acceleration  # Update acceleration for logging
         self.state.ax = self.a  # Store desired acceleration
@@ -356,7 +356,7 @@ class Vehicle:
             # A_d = exp(A*dt) = [1  dt]
             #                   [0   1]
             #
-            # B_d = ∫[0 to dt] exp(A*τ) dτ * B = [dt²/2]
+            # B_d = ∫[0 to dt] exp(A*τ) dτ * B = [dt^2/2]
             #                                     [dt  ]
         
             from scipy.linalg import expm
@@ -386,7 +386,7 @@ class Vehicle:
                 A_discrete = np.array([[1.0, dt],      # x[k+1] = x[k] + vx[k]*dt
                                       [0.0, 1.0]])     # vx[k+1] = vx[k] + ax[k]*dt
             
-                B_discrete = np.array([[0.5*dt*dt],    # x[k+1] += 0.5*ax*dt² (ZOH effect)
+                B_discrete = np.array([[0.5*dt*dt],    # x[k+1] += 0.5*ax*dt^2 (ZOH effect)
                                       [dt]])           # vx[k+1] += ax*dt
             self.A=A_discrete
             self.B1=B_discrete

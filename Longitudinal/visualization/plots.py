@@ -7,6 +7,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 import sys
+import time
+from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -19,8 +21,13 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
     try:
         import matplotlib.pyplot as plt
         
+        print(f"[PALETTE] Creating comprehensive plots for: {scenario_name}")
+        print(f"   📊 Data points: {len(simulation.time_history)}")
+        print(f"   🚗 Vehicles: {len(simulation.all_vehicles)}")
+        
         # Create figure with proper cleanup
         fig = plt.figure(figsize=(16, 12))
+        print(f"   ✅ Figure created: {fig.number}")
         
         # Plot 1: Vehicle positions
         plt.subplot(3, 3, 1)
@@ -166,7 +173,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
             if accelerations:
                 plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=2)
         plt.xlabel('Time [s]')
-        plt.ylabel('Acceleration [m/s²]')
+        plt.ylabel('Acceleration [m/s^2]')
         plt.title('Vehicle Accelerations')
         plt.legend()
         plt.grid(True)
@@ -212,18 +219,30 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
         plt.suptitle(f'{scenario_name} - Comprehensive Analysis', fontsize=16, y=0.98)
         
         # Always save plot to results directory
-        filename = os.path.join(RESULTS_DIR, f'{scenario_name.replace(" ", "_").replace(":", "")}_results.png')
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_scenario_name = scenario_name.replace(" ", "_").replace(":", "")
+        filename = f'{safe_scenario_name}_results_{timestamp}.png'
+        
+        # Ensure results directory exists
+        if not os.path.exists(RESULTS_DIR):
+            os.makedirs(RESULTS_DIR)
+            print(f"📁 Created results directory: {RESULTS_DIR}")
+        
+        filepath = os.path.join(RESULTS_DIR, filename)
+        
         try:
-            plt.savefig(filename, dpi=150, bbox_inches='tight')
-            abs_path = os.path.abspath(filename)
-            print(f"📁 Results saved to {filename}")
-            print(f"📁 Full path: {abs_path}")
-            
-            # Keep a global reference to prevent garbage collection
-            global _static_plots_figure
-            _static_plots_figure = fig
+            # Save with explicit figure reference
+            fig.savefig(filepath, dpi=150, bbox_inches='tight')
+            abs_path = os.path.abspath(filepath)
+            file_size = os.path.getsize(filepath) / 1024  # KB
+            print(f"✅ Comprehensive plot saved successfully!")
+            print(f"   📄 File: {filename}")
+            print(f"   📁 Path: {abs_path}")
+            print(f"   💾 Size: {file_size:.1f} KB")
         except Exception as save_error:
-            print(f"⚠️ Could not save plot: {save_error}")
+            print(f"❌ Could not save plot: {save_error}")
+            import traceback
+            traceback.print_exc()
         
         # Display plots
         try:
@@ -247,7 +266,6 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
                 plt.draw()
                 fig.canvas.flush_events()
                 print("✅ Interactive plots displayed successfully!")
-                import time
                 time.sleep(2)
         except Exception as show_error:
             print(f"⚠️ Could not display plots interactively: {show_error}")
@@ -256,6 +274,14 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
         
     except Exception as plot_error:
         print(f"Could not create comprehensive plots: {plot_error}")
+        import traceback
+        traceback.print_exc()
+        # Clean up figure if it was created
+        if 'fig' in locals():
+            try:
+                plt.close(fig)
+            except:
+                pass
         return None
 
 
@@ -264,7 +290,7 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     print(f"\n{'=' * 70}")
     print(f"✅ Simulation {scenario_name} completed!")
     print(f"⏱️ Execution time: {execution_time:.2f} seconds")
-    print(f"⚡ Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
+    print(f"[ZAP] Speed: {simulation.time_history[-1]/execution_time:.1f}x real time")
     print(f"{'=' * 70}")
     
     print(f"\n📊 === {scenario_name} Platoon Control Simulation Results ===")
@@ -272,11 +298,11 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     # Simulation performance summary  
     print(f"\n🎯 Simulation Performance:")
     print(f"   ⏱️ Total simulation time: {simulation.time_history[-1]:.1f} seconds")
-    print(f"   ⚡ Execution time: {execution_time:.2f} seconds")
+    print(f"   [ZAP] Execution time: {execution_time:.2f} seconds")
     print(f"   🚀 Speed factor: {simulation.time_history[-1]/execution_time:.1f}x real time")
     
     # platoon composition
-    print(f"\n🚛 platoon Composition:")
+    print(f"\n[TRUCK] platoon Composition:")
     print(f"   📊 Total platoon vehicles: {len(simulation.platoon_manager.vehicles)}")
     print(f"   🎯 Target velocity: {simulation.platoon_manager.target_velocity*3.6:.1f} km/h")
     
@@ -328,7 +354,252 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     print(f"{'=' * 70}")
 
 
+def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analysis"):
+    """Create comprehensive 9-plot Nash equilibrium analysis for longitudinal control"""
+    try:
+        print(f"[PALETTE] Creating enhanced 9-grid Nash analysis plots for: {scenario_name}")
+        
+        # Check if Nash data exists
+        if not hasattr(simulation, 'authority_history') or len(simulation.authority_history) == 0:
+            print(f"⚠️ No Nash control data available")
+            return None
+        
+        # Extract data
+        time = np.array(simulation.time_history)
+        system_acc_attr = 'system_desired_acc_history' if hasattr(simulation, 'system_desired_acc_history') else 'system_control_history'
+        human_acc_attr = 'human_desired_acc_history' if hasattr(simulation, 'human_desired_acc_history') else 'human_control_history'
+        
+        min_length = min(len(time), 
+                        len(simulation.authority_history),
+                        len(getattr(simulation, system_acc_attr, [])),
+                        len(getattr(simulation, human_acc_attr, [])))
+        
+        if min_length < 2:
+            print(f"⚠️ Insufficient data points ({min_length})")
+            return None
+        
+        # Truncate arrays
+        time = time[:min_length]
+        authority = np.array(simulation.authority_history[:min_length])
+        u_system = np.array(getattr(simulation, system_acc_attr)[:min_length])
+        u_human = np.array(getattr(simulation, human_acc_attr)[:min_length])
+        
+        # Calculate shared control
+        alpha = authority / (1.0 + authority)
+        u_shared = alpha * u_system + (1.0 - alpha) * u_human
+        
+        # Get additional data
+        safety_forces = simulation.safety_force_history[:min_length] if hasattr(simulation, 'safety_force_history') else []
+        gap_errors = simulation.gap_error_history[:min(len(simulation.gap_error_history), min_length)] if hasattr(simulation, 'gap_error_history') else []
+        
+        # Velocity data
+        velocity_history = []
+        if hasattr(simulation, 'human_vehicle'):
+            for i in range(min_length):
+                if i < len(simulation.velocity_history):
+                    vel_data = simulation.velocity_history[i]
+                    # Get human vehicle velocity (last one if it exists)
+                    if len(vel_data) > len(simulation.platoon_manager.vehicles):
+                        velocity_history.append(vel_data[-1])
+                    elif len(vel_data) > 0:
+                        velocity_history.append(vel_data[0])
+                    else:
+                        velocity_history.append(0)
+        
+        # Create figure
+        fig = plt.figure(figsize=(20, 14))
+        fig.suptitle(f'{scenario_name} - Nash Equilibrium Analysis', fontsize=16, fontweight='bold')
+        
+        # ========== Row 1 ==========
+        # Plot 1: Longitudinal Acceleration Components
+        plt.subplot(3, 3, 1)
+        plt.plot(time, u_shared, 'r-', linewidth=2.5, label='Shared (Applied)', alpha=0.8)
+        plt.plot(time, u_system, 'g--', linewidth=1.5, label='System Desired', alpha=0.7)
+        plt.plot(time, u_human, 'b--', linewidth=1.5, label='Human Desired', alpha=0.7)
+        plt.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
+        plt.axhline(y=2.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
+        plt.axhline(y=-3.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
+        plt.xlabel('Time [s]', fontsize=10)
+        plt.ylabel('Acceleration [m/s^2]', fontsize=10)
+        plt.title('Longitudinal Acceleration Components', fontsize=11, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best', fontsize=9)
+        
+        # Plot 2: Authority Ratio lambda(t) - LOG SCALE
+        plt.subplot(3, 3, 2)
+        plt.semilogy(time, authority, 'm-', linewidth=2.5)
+        plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Equal Authority')
+        plt.fill_between(time, authority, 1.0, where=(authority >= 1.0), 
+                       color='blue', alpha=0.3, label='System Dominant')
+        plt.fill_between(time, authority, 1.0, where=(authority < 1.0), 
+                       color='green', alpha=0.3, label='Human Dominant')
+        plt.xlabel('Time [s]', fontsize=10)
+        plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
+        plt.title('Authority Ratio (Log Scale)', fontsize=11, fontweight='bold')
+        plt.grid(True, alpha=0.3, which='both')
+        plt.legend(loc='best', fontsize=9)
+        
+        # Plot 3: Longitudinal Safety Field Force
+        plt.subplot(3, 3, 3)
+        if len(safety_forces) > 0:
+            plt.plot(time[:len(safety_forces)], safety_forces, 'm-', linewidth=2.5, label='Safety Force')
+            plt.axhline(y=300, color='orange', linestyle='--', linewidth=1.5, alpha=0.7, label='Warning Level')
+            plt.axhline(y=600, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Danger Level')
+            plt.fill_between(time[:len(safety_forces)], 0, 300, color='orange', alpha=0.15)
+            plt.fill_between(time[:len(safety_forces)], 300, 600, color='red', alpha=0.15)
+            plt.xlabel('Time [s]', fontsize=10)
+            plt.ylabel('Field Force Magnitude [N]', fontsize=10)
+            plt.title('Longitudinal Safety Field Force', fontsize=11, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.legend(loc='best', fontsize=9)
+        else:
+            plt.text(0.5, 0.5, 'No safety force data', ha='center', va='center', transform=plt.gca().transAxes)
+        
+        # ========== Row 2 ==========
+        # Plot 4: Control Authority Distribution
+        plt.subplot(3, 3, 4)
+        plt.fill_between(time, 0, alpha, color='blue', alpha=0.6, label='System Authority')
+        plt.fill_between(time, alpha, 1.0, color='green', alpha=0.6, label='Human Authority')
+        plt.axhline(y=0.5, color='k', linestyle='--', linewidth=1, alpha=0.5, label='Equal (50%)')
+        plt.xlabel('Time [s]', fontsize=10)
+        plt.ylabel('Authority Fraction', fontsize=10)
+        plt.title('Control Authority Distribution', fontsize=11, fontweight='bold')
+        plt.ylim([0, 1])
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best', fontsize=9)
+        
+        # Plot 5: Velocity Profile
+        plt.subplot(3, 3, 5)
+        if len(velocity_history) > 0:
+            target_velocity = simulation.platoon_manager.target_speed * 3.6 if hasattr(simulation.platoon_manager, 'target_speed') else 120.0
+            plt.plot(time[:len(velocity_history)], velocity_history, 'b-', linewidth=2.5, label='Human Vehicle Velocity')
+            plt.axhline(y=target_velocity, color='k', linestyle='--', linewidth=1.5, alpha=0.7, label='Target Velocity')
+            plt.xlabel('Time [s]', fontsize=10)
+            plt.ylabel('Velocity [km/h]', fontsize=10)
+            plt.title('Velocity Profile Under Nash Control', fontsize=11, fontweight='bold')
+            plt.grid(True, alpha=0.3)
+            plt.legend(loc='best', fontsize=9)
+        else:
+            plt.text(0.5, 0.5, 'No velocity data', ha='center', va='center', transform=plt.gca().transAxes)
+        
+        # Plot 6: Gap Error vs Authority Correlation
+        plt.subplot(3, 3, 6)
+        if len(gap_errors) > 0:
+            auth_for_gap = authority[:len(gap_errors)]
+            scatter = plt.scatter(gap_errors, auth_for_gap, c=time[:len(gap_errors)], 
+                                cmap='viridis', s=20, alpha=0.6)
+            plt.colorbar(scatter, label='Time [s]')
+            plt.xlabel('Gap Error [m]', fontsize=10)
+            plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
+            plt.title('Gap Error vs Authority Correlation', fontsize=11, fontweight='bold')
+            plt.yscale('log')
+            plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1, alpha=0.5)
+            plt.axvline(x=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
+            plt.grid(True, alpha=0.3)
+        else:
+            plt.text(0.5, 0.5, 'No gap data', ha='center', va='center', transform=plt.gca().transAxes)
+        
+        # ========== Row 3 ==========
+        # Plot 7: Nash Equilibrium Cost Functions (placeholder)
+        plt.subplot(3, 3, 7)
+        plt.text(0.5, 0.5, 'Nash Equilibrium\nCost Functions\n(Future Implementation)', 
+                ha='center', va='center', transform=plt.gca().transAxes, fontsize=11)
+        plt.title('Nash Equilibrium Cost Functions', fontsize=11, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        
+        # Plot 8: Control Effort Analysis
+        plt.subplot(3, 3, 8)
+        dt = time[1] - time[0] if len(time) > 1 else 0.1
+        cumulative_effort = np.cumsum(np.abs(u_shared) * dt)
+        plt.plot(time, cumulative_effort, 'orange', linewidth=2.5, label='Cumulative Control Effort')
+        plt.xlabel('Time [s]', fontsize=10)
+        plt.ylabel('Cumulative ∫|a| dt [m/s]', fontsize=10)
+        plt.title('Control Effort Analysis', fontsize=11, fontweight='bold')
+        plt.grid(True, alpha=0.3)
+        plt.legend(loc='best', fontsize=9)
+        
+        # Plot 9: Nash Performance Metrics
+        plt.subplot(3, 3, 9)
+        metrics = []
+        values = []
+        
+        max_lambda = np.max(authority)
+        metrics.append('Max lambda')
+        values.append(max_lambda)
+        
+        min_lambda = np.min(authority)
+        metrics.append('Min lambda')
+        values.append(min_lambda)
+        
+        if len(safety_forces) > 0:
+            max_force = np.max(safety_forces)
+            metrics.append('Max Force')
+            values.append(max_force)
+        
+        if len(gap_errors) > 0:
+            max_gap_err = np.max(np.abs(gap_errors))
+            metrics.append('Max Gap Err')
+            values.append(max_gap_err)
+        
+        colors = ['magenta', 'blue', 'red', 'orange'][:len(metrics)]
+        bars = plt.bar(metrics, values, color=colors, alpha=0.7)
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val:.2f}', ha='center', va='bottom', fontsize=9)
+        plt.ylabel('Metric Value', fontsize=10)
+        plt.title('Nash Performance Metrics', fontsize=11, fontweight='bold')
+        plt.xticks(rotation=15, ha='right', fontsize=9)
+        plt.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        
+        # Save
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = scenario_name.replace(" ", "_").replace(":", "")
+        filename = f"{safe_name}_nash_analysis_{timestamp}.png"
+        
+        if not os.path.exists(RESULTS_DIR):
+            os.makedirs(RESULTS_DIR)
+        
+        filepath = os.path.join(RESULTS_DIR, filename)
+        
+        try:
+            fig.savefig(filepath, dpi=150, bbox_inches='tight')
+            
+            abs_path = os.path.abspath(filepath)
+            file_size = os.path.getsize(filepath) / 1024
+            print(f"✅ Enhanced Nash 9-grid plot saved!")
+            print(f"   📄 File: {filename}")
+            print(f"   📁 Path: {abs_path}")
+            print(f"   💾 Size: {file_size:.1f} KB")
+            
+            if not HEADLESS_MODE:
+                plt.show(block=False)
+                plt.pause(0.1)
+            
+            return fig
+            
+        except Exception as save_error:
+            print(f"❌ Could not save Nash plot: {save_error}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+    except Exception as e:
+        print(f"❌ Failed to create enhanced Nash plots: {e}")
+        import traceback
+        traceback.print_exc()
+        if 'fig' in locals():
+            try:
+                plt.close(fig)
+            except:
+                pass
+        return None
+
+
 __all__ = [
     'create_comprehensive_plots', 
-    'create_detailed_scenario_summary'
+    'create_detailed_scenario_summary',
+    'create_nash_analysis_plots'
 ]

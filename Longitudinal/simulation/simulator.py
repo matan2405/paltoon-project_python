@@ -226,7 +226,7 @@ class PlatoonSimulation:
     
     def print_status(self):
         """Print current simulation status"""
-        print(f"\n⏰Time: {self.time:.1f}s")
+        print(f"\n⏱️Time: {self.time:.1f}s")
         for vehicle in self.all_vehicles:
             if vehicle.use_state_space_model:
                 model_type = "state-space"
@@ -252,7 +252,7 @@ class PlatoonSimulation:
                 
             print(f"{vehicle.vehicle_id} ({model_type}, {status}): "
                   f"Pos=({vehicle.state.x:.1f}, {vehicle.state.y:.1f}), "
-                  f"Speed={vehicle.state.vx*3.6:.1f} km/h",f"acceleration={vehicle.state.ax:.2f} m/s²")
+                  f"Speed={vehicle.state.vx*3.6:.1f} km/h",f"acceleration={vehicle.state.ax:.2f} m/s^2")
 
 def run_simulation():
     """Run the basic simulation"""

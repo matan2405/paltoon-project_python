@@ -30,7 +30,7 @@ def simple_vehicle_example():
     print(f"Initial state: x={vehicle.x:.2f}m, y={vehicle.y:.2f}m, v={vehicle.v:.2f}m/s")
     
     # Set acceleration
-    vehicle.a_desired = 2.0  # 2 m/s²
+    vehicle.a_desired = 2.0  # 2 m/s^2
     
     # Update dynamics for several steps
     dt = 0.1  # 0.1 seconds

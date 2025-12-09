@@ -2,8 +2,8 @@
 """
 File: main_with_nash.py
 Description: Platoon joining simulation with Nash equilibrium control integration.
-Combines the platoon simulation from main_without_nash with Nash equilibrium solver from lateral application.
-Updated to use bidirectional safety field with platoon integration.
+Combines the platoon simulation from main_without_nash with Nash equilibrium solver.
+Updated with Low-Pass Filters for stability and Velocity Error Safety Check.
 """
 
 import os
@@ -16,262 +16,244 @@ from typing import List, Dict
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import platoon simulation modules
-from config import setup_matplotlib, HEADLESS_MODE
+from config import setup_matplotlib, HEADLESS_MODE, RESULTS_DIR, SIMULATION_DT, DEFAULT_SIMULATION_TIME
 from simulation.simulator import PlatoonSimulation, run_simulation
 from visualization.animation import create_platoon_animation
-from visualization.plots import create_comprehensive_plots, create_detailed_scenario_summary
+from visualization.plots import create_comprehensive_plots, create_detailed_scenario_summary, create_nash_analysis_plots
 from vehicle import Vehicle
 from control.human_driver import HumanDriver
 from control.platoon_control import PlatoonManager
 
 # Import Nash solver modules
 from nash_solver.longitudinal_authority_allocator import LongitudinalAuthorityAllocator
-from nash_solver.longitudinal_safety_field import LongitudinalSafetyField
+from nash_solver.longitudinal_safety_field import (
+    EllipseLongitudinalSafetyField,
+    EllipseLongitudinalParams,
+    PlatoonContext
+)
 from nash_solver import longitudinal_nash_solver, system_reference_generator
 
 os.system('cls' if os.name == 'nt' else 'clear')
 
+class LowPassFilter:
+    """Simple First-Order Low Pass Filter for smoothing signals."""
+    def __init__(self, alpha=0.1):
+        self.alpha = alpha
+        self.last_val = None
+        
+    def filter(self, val):
+        if self.last_val is None:
+            self.last_val = val
+            return val
+        filtered = self.alpha * val + (1 - self.alpha) * self.last_val
+        self.last_val = filtered
+        return filtered
 
 class PlatoonNashSimulation(PlatoonSimulation):
     """Extended platoon simulation with Nash equilibrium control"""
     
     def __init__(self):
-        # Initialize parent platoon simulation
         super().__init__()
         
         # Initialize Nash control components
-        self.safety_field = LongitudinalSafetyField()
+        self.safety_field = EllipseLongitudinalSafetyField()
+        self.safety_field.params = EllipseLongitudinalParams()
         self.authority_allocator = LongitudinalAuthorityAllocator()
         
-        # Nash control parameters
         self.Np = 20  # Prediction horizon
         self.Nu = 10  # Control horizon
         self.dt_nash = 0.1  # Time step
-        # Initialize system reference generator (for controller trajectory planning)
+        
         self.system_ref_generator = system_reference_generator.SystemReferenceGenerator(
             Np=self.Np, dt=self.dt_nash
         )
         
-        # Initialize Nash solver with human vehicle instance
-        # Note: Nash solver needs a vehicle instance, not the class
+        # Initialize Nash solver
         try:
-            self.nash_solver = longitudinal_nash_solver.LongitudinalNashSolver(
-                vehicle=self.human_vehicle, Np=self.Np, Nu=self.Nu, dt=self.dt_nash  # Pass the vehicle instance
+            self.nash_solver = longitudinal_nash_solver.EnhancedNashSolver(
+                vehicle=self.human_vehicle, 
+                platoon_manager=self.platoon_manager, 
+                human_driver=self.human_driver, 
+                Np=self.Np, Nu=self.Nu, dt=self.dt_nash
             )
             self.nash_solver_available = True
         except Exception as e:
-            print(f"⚠️  Nash solver initialization issue: {e}")
-            print("    Using simplified Nash approach")
+            print(f"⚠️ Nash solver initialization issue: {e}")
             self.nash_solver_available = False
         
-        # Additional data storage for Nash analysis
+        # Initialize Low Pass Filters
+        self.force_filter = LowPassFilter(alpha=0.2)  # Smoothing for Field Force
+        self.control_filter = LowPassFilter(alpha=0.05) # Smoothing for Final Control
+        
+        # Data storage
         self.nash_data = {
-            'controller_inputs': [],
-            'human_inputs': [],
-            'shared_inputs': [],
-            'authority_ratios': [],
-            'field_forces': [],
-            'leader_forces': [],      # New: track leader risk
-            'follower_forces': [],    # New: track follower risk
-            'cooperation_moments': 0,
-            'opposition_moments': 0
+            'controller_inputs': [], 'human_inputs': [], 'shared_inputs': [],
+            'authority_ratios': [], 'field_forces': [],
+            'leader_forces': [], 'follower_forces': [],
+            'cooperation_moments': 0, 'opposition_moments': 0
         }
         
-        # Corrected weights and costs for Nash control (same as lateral)
-        self.Q_output = np.diag([50.0, 200.0])  # Reasonable position/velocity weights
-        self.R1 = 50.0   # Significant control cost (smooth control)
-        self.R2 = 60.0   # Slightly higher for human (prefer less aggressive)
+        self.system_desired_acc_history = []
+        self.human_desired_acc_history = []
+        self.authority_history = []
+        self.safety_force_history = []
+        self.gap_error_history = []
+        self.nash_cost_history = []
         
-        print("🚗 Platoon Nash Simulation Initialized")
-        print("🧠 Nash Equilibrium Control Active")
-        print(f"   System Reference Generator: ✅")
-        print(f"   Nash Solver: {'✅' if self.nash_solver_available else '⚠️ Simplified'}")
-        print(f"   Safety Field: ✅ Bidirectional (Leader + Follower)")
-        print("="*60)
+        print("🚗 Platoon Nash Simulation Initialized (With Filters)")
 
     def nash_control_step(self, human_vehicle: Vehicle, leader_vehicle: Vehicle = None) -> Dict:
-        """
-        Execute one Nash equilibrium control step for the human vehicle.
-        Now uses bidirectional safety field with platoon integration.
-        """
-        # Get current state from vehicle - [position, velocity]
-        current_state = np.array([
-            human_vehicle.state.x,   # position in x direction
-            human_vehicle.state.vx   # velocity in x direction
-        ])
+        # Get current state
+        current_state = np.array([human_vehicle.state.x, human_vehicle.state.vx])
         
-        # Get leader and follower using the new platoon integration
-        leader, follower = self.safety_field.get_leader_and_follower(
-            human_vehicle, self.platoon_manager
-        )
+        leader = self.safety_field._get_leader(human_vehicle, self.platoon_manager)
+        follower = self.safety_field._get_follower(human_vehicle, self.platoon_manager)
+
+        # --- 1. Calculate Gap Error & Velocity Error ---
+        current_gap_error = 0.0
+        velocity_error = 0.0
+        desired_gap = 50.0
         
-        # Calculate desired gap - prioritize leader, but use follower if no leader
-        if leader is not None:
+        # Calculate Velocity Error (Target - Current)
+        # If result is negative (e.g. -10), it means we are 10 m/s FASTER than target (Overspeeding)
+        target_vel = self.platoon_manager.target_velocity
+        velocity_error = target_vel - human_vehicle.state.vx
+        
+        if leader:
             from control.platoon_control import rajamani
             _, desired_gap = rajamani(leader, human_vehicle)
-        elif follower is not None:
-            # No leader but have follower - calculate gap based on follower
-            from control.platoon_control import rajamani
-            # Use Rajamani with reversed roles (follower becomes "leader" for calculation)
-            _, desired_gap = rajamani(human_vehicle, follower)
-            print(f"   ℹ️  No leader - using follower-based gap: {desired_gap:.1f}m")
-        else:
-            # No leader and no follower - use default
-            desired_gap = 50.0  # large default gap
-            print(f"   ℹ️  No leader or follower - using default gap: {desired_gap:.1f}m")
+            current_gap = leader.state.x - human_vehicle.state.x
+            current_gap_error = current_gap - desired_gap # Positive = Behind
         
-        # 1. Safety field evaluation - NOW BIDIRECTIONAL!
-        # Compute risk from both leader and follower
-        field_force = self.safety_field.compute_risk_force_from_platoon(
+        # --- 2. Safety Field Calculation ---
+        raw_field_force = self.safety_field.compute_risk_force_from_platoon(
             ego_vehicle=human_vehicle,
             platoon_manager=self.platoon_manager,
             desired_gap=desired_gap
         )
         
-        # Get detailed breakdown for analysis
+        # FILTER 1: Smooth the field force
+        field_force = self.force_filter.filter(raw_field_force)
+        
         breakdown = self.safety_field.get_force_breakdown_from_platoon(
             ego_vehicle=human_vehicle,
             platoon_manager=self.platoon_manager,
             desired_gap=desired_gap
         )
-        print(f"   🛡️  Field Force Breakdown: "
-              f"Leader={breakdown['leader']['total_force']:.1f}N, "
-              f"Headway={breakdown['leader']['headway_force']:.1f}N, "
-              f"GapError={breakdown['leader']['gap_error_force']:.1f}N, "
-              f"RelVel={breakdown['leader']['rel_vel_force']:.1f}N, "
-              f"TTC={breakdown['leader']['ttc']:.2f}, "
-              f"HeadwayTime={breakdown['leader']['headway']:.2f}, "
-              f"GapErrorVal={breakdown['leader']['gap_error']:.2f}, "
-              f"RelVelVal={breakdown['leader']['relative_vel']:.2f}")
-        # 2. Authority allocation
-        lambda_k = self.authority_allocator.compute_authority_ratio(field_force)
+
+        # --- 3. Authority Allocation ---
+        # Includes Risk, Performance (Gap Error), and Safety (Velocity Error) logic
+        lambda_k = self.authority_allocator.compute_authority_ratio(
+            field_force, 
+            gap_error=current_gap_error,
+            velocity_error=velocity_error
+        )
         
-        # Print authority split
-        alpha = lambda_k / (1.0 + lambda_k)
-        print(f"   🎛️  Authority: λ={lambda_k:.2f}, α={alpha:.2%} system, {(1-alpha):.2%} human")
-        print(f"      Risk: {field_force:.1f}N → {'SYSTEM TAKES CONTROL' if alpha > 0.5 else 'Human dominant'}")
+        # --- 4. Generate Reference Trajectories ---
+        # System Reference (R1) - With Kinematic Limits & Boosting
+        accel_seq_sys, state_seq_sys = self.system_ref_generator.get_system_acceleration_and_state_sequence(self)
+        R1_ref = state_seq_sys
         
-        # 3. Plan reference trajectories using existing functions
-        # Controller reference: system reference generator returns [acceleration_sequence, state_sequence]
-        # state_sequence is [Np, 2] with columns [position, velocity]
-        accel_seq_controller, state_seq_controller = self.system_ref_generator.get_system_acceleration_and_state_sequence(self)
-        
-        # Human reference: human driver model returns [acceleration_sequence, state_sequence]
-        # state_sequence is [Np, 2] with columns [position, velocity]
+        # Human Reference (R2) - With IDM
         accel_seq_human, state_seq_human = self.human_driver.get_human_acceleration_and_state_sequence(
             dt=self.dt_nash, Np=self.Np, vehicle=human_vehicle
         )
+        R2_ref = state_seq_human
         
-        # Get human desired acceleration
-        if not self.human_driver.merging and not human_vehicle.joined_platoon:
-            human_desired_accel = self.human_driver.update(self, self.platoon_vehicles)
+        # --- 5. Solve Nash Equilibrium ---
+        u1_opt = 0.0
+        u2_opt = 0.0
+        
+        if self.nash_solver_available:
+            try:
+                u1_opt, u2_opt = self.nash_solver.solve_nash_equilibrium(
+                    x0=current_state, R1_ref=R1_ref, R2_ref=R2_ref,
+                    lambda_k=lambda_k, field_force=field_force
+                )
+            except Exception as e:
+                print(f"⚠️ Nash solver error: {e}")
+                u1_opt = 0.0
+                u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
         else:
-            human_desired_accel = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
+             u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
         
-        # 4. Format REFERENCE TRAJECTORIES
-        R1_ref_trajectory = np.zeros((self.Np, 2)) # Controller reference: [desired_position, desired_velocity]
-        R2_ref_trajectory = np.zeros((self.Np, 2)) # Human reference: [planned_position, planned_velocity]
-        
-        for i in range(self.Np):
-            # Controller reference: use the system's planned trajectory
-            R1_ref_trajectory[i, 0] = state_seq_controller[i, 0]  # desired position
-            R1_ref_trajectory[i, 1] = state_seq_controller[i, 1]  # desired velocity
-            
-            # Human reference: use human's planned trajectory
-            R2_ref_trajectory[i, 0] = state_seq_human[i, 0]  # planned position
-            R2_ref_trajectory[i, 1] = state_seq_human[i, 1]  # planned velocity
-        
-        # Flatten for Nash solver: (Np * 2, 1) = (40, 1) format
-        R1_ref = R1_ref_trajectory.reshape(self.Np * 2, 1)
-        R2_ref = R2_ref_trajectory.reshape(self.Np * 2, 1)
-        
-        # 5. Solve Nash equilibrium
-        try:
-            u1_opt, u2_opt = self.nash_solver.solve_nash_equilibrium(
-                current_state, R1_ref, R2_ref, lambda_k
-            )
-                    
-        except Exception as e:
-            print(f"⚠️  Nash solver error: {e}, using fallback control")
-            u1_opt = 0.0
-            u2_opt = human_desired_accel
-        
-        # 6. Calculate shared control
+        # --- 6. Shared Control ---
         alpha = lambda_k / (1.0 + lambda_k)
-        u_shared = alpha * u1_opt + (1 - alpha) * u2_opt
-        print(f"   🤝 Shared Control: u_shared={u_shared:.2f} m/s²")
+        u_raw = alpha * u1_opt + (1 - alpha) * u2_opt
         
-        # Store data - NOW INCLUDING BIDIRECTIONAL BREAKDOWN
+        # FILTER 2: Smooth the final control input
+        u_shared = self.control_filter.filter(u_raw)
+        
+        # Apply hard constraints
+        u_shared = self.safety_field.apply_hard_constraint(
+            u_shared, self.human_vehicle, self.platoon_manager
+        )
+
+        # --- 7. Logging ---
         self.nash_data['controller_inputs'].append(u1_opt)
         self.nash_data['human_inputs'].append(u2_opt)
         self.nash_data['shared_inputs'].append(u_shared)
         self.nash_data['authority_ratios'].append(lambda_k)
         self.nash_data['field_forces'].append(field_force)
-        self.nash_data['leader_forces'].append(breakdown['leader']['total_force'])
-        self.nash_data['follower_forces'].append(breakdown['follower']['total_force'])
         
-        # Analyze cooperation vs opposition
+        leader_force = breakdown.get('leader', {}).get('total_force', 0.0) if breakdown else 0.0
+        follower_force = breakdown.get('follower', {}).get('total_force', 0.0) if breakdown else 0.0
+        self.nash_data['leader_forces'].append(leader_force)
+        self.nash_data['follower_forces'].append(follower_force)
+        
+        self.system_desired_acc_history.append(u1_opt)
+        self.human_desired_acc_history.append(u2_opt)
+        self.authority_history.append(lambda_k)
+        self.safety_force_history.append(field_force)
+        self.gap_error_history.append(current_gap_error)
+
+        if self.nash_solver_available and hasattr(self.nash_solver, 'last_costs'):
+            self.nash_cost_history.append(self.nash_solver.last_costs)
+        else:
+            self.nash_cost_history.append([0.0, 0.0])
+            
         if abs(u1_opt) > 0.01 and abs(u2_opt) > 0.01:
-            if u1_opt * u2_opt > 0:  # Same direction -> cooperation
-                self.nash_data['cooperation_moments'] += 1
-            else:  # Opposing directions -> opposition
-                self.nash_data['opposition_moments'] += 1
-        
+            if u1_opt * u2_opt > 0: self.nash_data['cooperation_moments'] += 1
+            else: self.nash_data['opposition_moments'] += 1
+
         return {
             'controller_input': u1_opt,
             'human_input': u2_opt,
             'shared_input': u_shared,
             'authority_ratio': lambda_k,
             'field_force': field_force,
-            'leader_force': breakdown['leader']['total_force'],
-            'follower_force': breakdown['follower']['total_force'],
-            'breakdown': breakdown  # Full breakdown for detailed analysis
+            'breakdown': breakdown
         }
-    
+
     def update_with_nash(self):
         """Override update method to include Nash control"""
-        # Apply Nash control to human vehicle if it's in merging phase or joined
         if self.human_driver.merging or self.human_vehicle.joined_platoon:
             nash_result = self.nash_control_step(self.human_vehicle)
-            
-            # Apply shared control input as acceleration
             shared_accel = nash_result['shared_input']
-            u_sys = nash_result['controller_input']
-            u_human = nash_result['human_input']
-            
-            # Store Nash acceleration for platoon manager to use
             self.human_vehicle.nash_acceleration = shared_accel
             self.human_vehicle.a_desired = shared_accel
             self.human_vehicle.state.ax = shared_accel
             
-            # Debug info every second - NOW WITH BIDIRECTIONAL INFO
-            if int(self.time) != int(self.time - self.dt):
-                gap_to_leader = "N/A"
-                gap_to_follower = "N/A"
+            # Periodic prints
+            if int(self.time) % 2.5 == 0 and int(self.time) != int(self.time - self.dt):
+                leader = self.safety_field._get_leader(self.human_vehicle, self.platoon_manager)
+                follower = self.safety_field._get_follower(self.human_vehicle, self.platoon_manager)
                 
-                # Get leader and follower info
-                leader, follower = self.safety_field.get_leader_and_follower(
-                    self.human_vehicle, self.platoon_manager
-                )
+                gap_leader = leader.state.x - self.human_vehicle.state.x if leader else 0.0
+                gap_follower = self.human_vehicle.state.x - follower.state.x if follower else 0.0
+                if self.safety_field.ignoring_follower:
+                     print(f"   🚨 HUGE leader gap ({self.safety_field.leader_gap_error:.0f}m) - ignoring follower")
                 
-                if leader is not None:
-                    gap_to_leader = leader.state.x - self.human_vehicle.state.x
-                    
-                if follower is not None:
-                    gap_to_follower = self.human_vehicle.state.x - follower.state.x
-                
-                print(f"   🎯 Nash: u_sh={shared_accel:.2f} m/s², "
-                      f"u_sys={u_sys:.2f}, u_human={u_human:.2f}")
-                print(f"      📍 Gap_L={gap_to_leader if isinstance(gap_to_leader, str) else f'{gap_to_leader:.1f}m'}, "
-                      f"Gap_F={gap_to_follower if isinstance(gap_to_follower, str) else f'{gap_to_follower:.1f}m'}, "
-                      f"v={self.human_vehicle.state.vx*3.6:.1f}km/h")
-                print(f"      🛡️ Risk_L={nash_result['leader_force']:.1f}N, "
-                      f"Risk_F={nash_result['follower_force']:.1f}N, "
-                      f"Total={nash_result['field_force']:.1f}N")
-        
-        # Call parent update - this will use nash_acceleration in platoon manager
-        super().update()
+                print(f"🎯 Nash: u_sh={shared_accel:.2f} m/s², u_sys={nash_result['controller_input']:.2f}, u_human={nash_result['human_input']:.2f}")
+                print(f"   📍 Gap_L={gap_leader:.1f}m, Gap_F={gap_follower:.1f}m, v={self.human_vehicle.state.vx*3.6:.1f}km/h")
+                print(f"   🛡️ Risk_L={nash_result['breakdown'].get('leader', {}).get('total_force', 0.0):.1f}N, "
+                      f"Risk_F={nash_result['breakdown'].get('follower', {}).get('total_force', 0.0):.1f}N, "
+                      f"Total={nash_result['field_force']:.1f}N"
+                      f", λ={nash_result['authority_ratio']:.2f}"
+                      f", alpha={nash_result['authority_ratio']/(1+nash_result['authority_ratio']):.2f}")
+                time.sleep(3)  # Small delay for readability
 
+        super().update()
 
 def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashSimulation:
     """Run a single scenario with Nash control"""
@@ -306,10 +288,11 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
     
     try:
         for iteration, t in enumerate(T):
+            sim.safety_field.set_current_time(sim.time)
             # Print progress every 2000 iterations
             if iteration % 2000 == 0:
                 progress = (iteration / max_iterations) * 100
-                print(f"📈 Progress: {progress:5.1f}% (t={sim.time:6.1f}s)")
+                print(f"👍 Progress: {progress:5.1f}% (t={sim.time:6.1f}s)")
             
             # Update simulation with Nash control
             sim.update_with_nash()
@@ -317,35 +300,46 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
             # Status report every 5 seconds
             if sim.time % 5.0 < sim.dt:
                 sim.print_status()
-                time.sleep(3)  # Small delay for readability
+                # time.sleep(5)  # Small delay for readability
                 if human_joined and len(sim.nash_data['shared_inputs']) > 0:
-                    leader_force = sim.nash_data['leader_forces'][-1]
-                    follower_force = sim.nash_data['follower_forces'][-1]
-                    print(f"🧠 Nash Data: λ={sim.nash_data['authority_ratios'][-1]:.2f}, "
+                    # Safely get last forces
+                    leader_force = sim.nash_data['leader_forces'][-1] if sim.nash_data['leader_forces'] else 0.0
+                    follower_force = sim.nash_data['follower_forces'][-1] if sim.nash_data['follower_forces'] else 0.0
+                    
+                    print(f"🧠 Nash Data: lambda={sim.nash_data['authority_ratios'][-1]:.2f}, "
                           f"Shared={sim.nash_data['shared_inputs'][-1]:.2f}")
-                    print(f"   🛡️ Risks: Leader={leader_force:.1f}N, "
-                          f"Follower={follower_force:.1f}N, "
-                          f"Total={sim.nash_data['field_forces'][-1]:.1f}N")
+                    print(f"   🛡️ Risks: Total={sim.nash_data['field_forces'][-1]:.1f}N, "
+                          f"Leader={leader_force:.1f}N, Follower={follower_force:.1f}N")
                     print(f"   🤝 Coop={sim.nash_data['cooperation_moments']}, "
                           f"Opp={sim.nash_data['opposition_moments']}")
+                    
                 
             # Trigger joining at the right time
             if (sim.time >= join_trigger_time and 
                 not human_joined and not sim.human_driver.merging):
                 
-                print(f"\n🚨 Activating joining with Nash control at t={sim.time:.1f}s")
-                print(f"📍 Human vehicle position: x={sim.human_vehicle.state.x:.1f}m")
-                print(f"📍 platoon positions: {[f'{v.state.x:.1f}m' for v in sim.platoon_vehicles]}")
+                print(f"\n👍 Activating joining with Nash control at t={sim.time:.1f}s")
+                print(f"👍 Human vehicle position: x={sim.human_vehicle.state.x:.1f}m")
+                print(f"👍 platoon positions: {[f'{v.state.x:.1f}m' for v in sim.platoon_vehicles]}")
                 sim.human_driver.merging = True
                 human_joined = True
                 sim.human_vehicle.joined_platoon = True
                 sim.platoon_manager.add_vehicle(sim.human_vehicle)
                 sim.human_vehicle.target_velocity = sim.platoon_manager.target_velocity
-                sim.human_driver.target_speed = sim.human_driver.target_speed + 30.0 / 3.6  # Slightly higher to facilitate merging
+                sim.human_driver.target_speed = sim.platoon_manager.target_velocity
                 # sim.human_driver.delta_IDM += 1.0  # More aggressive gap closing
                 print(f"joining platoon at index {sim.platoon_manager.get_new_vehicle_index(sim.human_vehicle)}")
                 print(f"✅ Human vehicle started joining with Nash equilibrium control with target velocity {sim.human_driver.target_speed * 3.6:.1f} km/h")
-        
+                
+            if human_joined:  # Only after joining was triggered
+                current_phase = sim.safety_field.get_current_phase()
+                
+                if current_phase == "FOLLOWING":
+                    sim.human_driver.merging = False  # No longer actively merging
+                elif current_phase == "MERGING":
+                    sim.human_driver.merging = True   # Still merging (or returned to merging)
+                print(f"    Current phase: {current_phase}") if sim.time % 5.0 < sim.dt else None
+            
         end_time = time.time()
         execution_time = end_time - start_time
         
@@ -353,9 +347,41 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
         print_nash_analysis(sim)
         
         # Create visualizations
-        print(f"\n📊 Displaying results for {scenario_name}...")
-        static_plots_fig = create_comprehensive_plots(sim, scenario_name)
+        print(f"\n👍 Displaying results for {scenario_name}...")
+        print(f"   👍“ Results will be saved to: {os.path.abspath(RESULTS_DIR)}")
         
+        # 1. Create comprehensive plots (always works)
+        try:
+            print(f"\n👍 Creating comprehensive plots...")
+            static_plots_fig = create_comprehensive_plots(sim, scenario_name)
+            if static_plots_fig:
+                print(f"✅ Comprehensive plots created and saved successfully")
+            else:
+                print(f"⚠️ Comprehensive plots returned None")
+        except Exception as comp_error:
+            print(f"❌ Failed to create comprehensive plots: {comp_error}")
+            import traceback
+            traceback.print_exc()
+            static_plots_fig = None
+        
+        # 2. Create Nash analysis plots (9-grid layout)
+        try:
+            if hasattr(sim, 'authority_history') and len(sim.authority_history) > 0:
+                print(f"\n👍Ž¨ Creating Nash analysis plots (9-grid)...")
+                nash_fig = create_nash_analysis_plots(sim, scenario_name)
+                if nash_fig:
+                    print(f"✅ Nash analysis plots (9-grid) created and saved successfully")
+                else:
+                    print(f"⚠️ Nash analysis plots returned None")
+            else:
+                print(f"⚠️ No Nash control data - skipping Nash plots")
+                nash_fig = None
+        except Exception as nash_error:
+            print(f"❌ Failed to create Nash analysis plots: {nash_error}")
+            import traceback
+            traceback.print_exc()
+            nash_fig = None
+
         time.sleep(2)
         
         # Create animation
@@ -374,6 +400,55 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
             print(f"⚠️ Animation skipped: {anim_error}")
         
         create_detailed_scenario_summary(sim, scenario_name, execution_time)
+        
+        # Final confirmation of saved files
+        print(f"\n{'=' * 70}")
+        print(f"👍“ SAVED FILES SUMMARY")
+        print(f"{'=' * 70}")
+        abs_results_dir = os.path.abspath(RESULTS_DIR)
+        print(f"👍“‚ Directory: {abs_results_dir}")
+        try:
+            all_files = os.listdir(RESULTS_DIR)
+            safe_scenario = scenario_name.replace(" ", "_").replace(":", "")
+            saved_files = [f for f in all_files if safe_scenario in f]
+            
+            if saved_files:
+                print(f"✅ Files created for this scenario ({len(saved_files)}):")
+                for f in sorted(saved_files):
+                    full_path = os.path.join(RESULTS_DIR, f)
+                    size_kb = os.path.getsize(full_path) / 1024
+                    print(f"   👍“„ {f}")
+                    print(f"      👍’¾ Size: {size_kb:.1f} KB")
+            else:
+                print(f"⚠️ No files found matching scenario: {safe_scenario}")
+                print(f" Total files in directory: {len(all_files)}")
+                if all_files:
+                    print(f"   Recent files:")
+                    for f in sorted(all_files, key=lambda x: os.path.getmtime(os.path.join(RESULTS_DIR, x)), reverse=True)[:5]:
+                        print(f"   • {f}")
+        except Exception as list_error:
+            print(f"❌ Could not list saved files: {list_error}")
+            import traceback
+            traceback.print_exc()
+        print(f"{'=' * 70}")
+        
+        # Clean up figures to prevent memory issues when running multiple scenarios
+        print(f"\n👍 Cleaning up matplotlib figures...")
+        try:
+            import matplotlib.pyplot as plt
+            # Close specific figures if they exist
+            if static_plots_fig is not None:
+                plt.close(static_plots_fig)
+            if 'nash_fig' in locals() and nash_fig is not None:
+                plt.close(nash_fig)
+            # Close all remaining figures
+            plt.close('all')
+            # Force garbage collection
+            import gc
+            gc.collect()
+            print(f"✅ Figures cleaned up successfully")
+        except Exception as cleanup_error:
+            print(f"⚠️ Could not clean up figures: {cleanup_error}")
         
     except Exception as e:
         print(f"❌ Error in simulation: {e}")
@@ -425,7 +500,7 @@ def print_nash_analysis(sim: PlatoonNashSimulation):
         if avg_total_force > 0:
             leader_contribution = (avg_leader_force / avg_total_force) * 100
             follower_contribution = (avg_follower_force / avg_total_force) * 100
-            print(f"\n  📊 Risk Contribution:")
+            print(f"\n  👍 Risk Contribution:")
             print(f"     Leader:   {leader_contribution:.1f}%")
             print(f"     Follower: {follower_contribution:.1f}%")
     
@@ -434,7 +509,7 @@ def print_nash_analysis(sim: PlatoonNashSimulation):
 
 def run_all_scenarios_with_nash():
     """Run all three scenarios with Nash equilibrium control"""
-    print("🚛 Platoon Joining with Nash Equilibrium Control (Bidirectional)")
+    print("👍š› Platoon Joining with Nash Equilibrium Control (Bidirectional)")
     print("=" * 60)
     
     scenarios = [
@@ -452,16 +527,16 @@ def run_all_scenarios_with_nash():
             'params': {
                 'initial_x': -10.0,
                 'initial_y': -2.0,
-                'target_speed': 70.0,
+                'target_speed': 110.0,
                 'join_trigger_time': 20.0
             }
         },
         {
             'name': 'Scenario 3: Join After Platoon (Nash)',
             'params': {
-                'initial_x': -100.0,
+                'initial_x': -200.0,
                 'initial_y': -2.0,
-                'target_speed': 70.0,
+                'target_speed': 110.0,
                 'join_trigger_time': 15.0
             }
         }
@@ -470,9 +545,9 @@ def run_all_scenarios_with_nash():
     results = []
     
     for i, scenario in enumerate(scenarios, 1):
-        print(f"\n{'🎬' * 20}")
+        print(f"\n{'👍Ž¬' * 20}")
         print(f"Starting {scenario['name']} [{i}/3]")
-        print(f"{'🎬' * 20}")
+        print(f"{'👍Ž¬' * 20}")
         
         try:
             result = run_scenario_with_nash(scenario['name'], scenario['params'])
@@ -487,12 +562,12 @@ def run_all_scenarios_with_nash():
             results.append((scenario['name'], None))
     
     # Overall summary
-    print(f"\n{'🏁' * 25}")
+    print(f"\n{'👍' * 25}")
     print("Nash Control Scenarios Summary (Bidirectional Safety)")
-    print(f"{'🏁' * 25}")
+    print(f"{'👍' * 25}")
     
     successful = sum(1 for _, r in results if r is not None)
-    print(f"📊 Completed: {successful}/3 scenarios")
+    print(f"👍 Completed: {successful}/3 scenarios")
     
     return results
 
@@ -519,11 +594,11 @@ if __name__ == "__main__":
         elif choice == "2":
             run_scenario_with_nash("Join Middle of Platoon", {
                 'initial_x': -10.0, 'initial_y': -2.0,
-                'target_speed': 70.0, 'join_trigger_time': 20.0
+                'target_speed': 110.0, 'join_trigger_time': 20.0
             })
         elif choice == "3":
             run_scenario_with_nash("Join After Platoon", {
-                'initial_x': -300.0, 'initial_y': -2.0,
+                'initial_x': -200.0, 'initial_y': -2.0,
                 'target_speed': 110.0, 'join_trigger_time': 15.0
             })
         elif choice == "4":
@@ -531,7 +606,7 @@ if __name__ == "__main__":
         elif choice == "5":
             print("🚗 Running original simulation without Nash...")
             simulation = run_simulation()
-            print("\n📊 Original simulation completed!")
+            print("\n👍 Original simulation completed!")
         else:
             print("❌ Invalid choice")
     
