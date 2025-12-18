@@ -427,17 +427,26 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         
         # Plot 2: Authority Ratio lambda(t) - LOG SCALE
         plt.subplot(3, 3, 2)
-        plt.semilogy(time, authority, 'm-', linewidth=2.5)
-        plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Equal Authority')
+        plt.semilogy(time, authority, 'm-', linewidth=2.5, label='Final Authority')
+        
+        # Plot Safety and Performance authority if available
+        if hasattr(simulation, 'authority_safety_history') and len(simulation.authority_safety_history) >= min_length:
+            auth_safety = np.array(simulation.authority_safety_history[:min_length])
+            plt.semilogy(time, auth_safety, 'r--', linewidth=1.5, alpha=0.7, label='Safety Authority')
+        if hasattr(simulation, 'authority_performance_history') and len(simulation.authority_performance_history) >= min_length:
+            auth_perf = np.array(simulation.authority_performance_history[:min_length])
+            plt.semilogy(time, auth_perf, 'g--', linewidth=1.5, alpha=0.7, label='Performance Authority')
+        
+        plt.axhline(y=1.0, color='k', linestyle=':', linewidth=1.5, alpha=0.7, label='Equal Authority')
         plt.fill_between(time, authority, 1.0, where=(authority >= 1.0), 
-                       color='blue', alpha=0.3, label='System Dominant')
+                       color='blue', alpha=0.2, label='System Dominant')
         plt.fill_between(time, authority, 1.0, where=(authority < 1.0), 
-                       color='green', alpha=0.3, label='Human Dominant')
+                       color='green', alpha=0.2, label='Human Dominant')
         plt.xlabel('Time [s]', fontsize=10)
         plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
         plt.title('Authority Ratio (Log Scale)', fontsize=11, fontweight='bold')
         plt.grid(True, alpha=0.3, which='both')
-        plt.legend(loc='best', fontsize=9)
+        plt.legend(loc='best', fontsize=8)
         
         # Plot 3: Longitudinal Safety Field Force
         plt.subplot(3, 3, 3)

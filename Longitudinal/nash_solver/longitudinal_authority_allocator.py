@@ -90,6 +90,10 @@ class LongitudinalAuthorityAllocator:
 
         self.prev_lambda = self.lambda_min
         self.alpha_smoothing = 0.05 
+        
+        # Store last computed authority values for logging
+        self.last_lambda_safety = 0.0
+        self.last_lambda_performance = 0.0
 
         print(f"🛡️ Authority Allocator V3 (Risk + Gap Performance) Initialized")
 
@@ -123,6 +127,10 @@ class LongitudinalAuthorityAllocator:
         # --- 3. Fusion: Take the MAX urgency ---
         # המערכת לוקחת שליטה אם יש סכנה או אם הביצועים גרועים
         target_lambda = max(lambda_safety, lambda_performance)
+        
+        # Store for logging
+        self.last_lambda_safety = lambda_safety
+        self.last_lambda_performance = lambda_performance
 
         # --- 4. Smoothing ---
         # מניעת קפיצות פתאומיות

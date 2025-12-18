@@ -96,6 +96,8 @@ class PlatoonNashSimulation(PlatoonSimulation):
         self.system_desired_acc_history = []
         self.human_desired_acc_history = []
         self.authority_history = []
+        self.authority_safety_history = []  # Authority by safety
+        self.authority_performance_history = []  # Authority by performance
         self.safety_force_history = []
         self.gap_error_history = []
         self.nash_cost_history = []
@@ -124,6 +126,11 @@ class PlatoonNashSimulation(PlatoonSimulation):
             _, desired_gap = rajamani(leader, human_vehicle)
             current_gap = leader.state.x - human_vehicle.state.x
             current_gap_error = current_gap - desired_gap # Positive = Behind
+        elif follower:
+            from control.platoon_control import rajamani
+            _, desired_gap = rajamani(human_vehicle, follower)
+            current_gap = human_vehicle.state.x - follower.state.x
+            current_gap_error = desired_gap - current_gap # Positive = Behind
         
         # --- 2. Safety Field Calculation ---
         raw_field_force = self.safety_field.compute_risk_force_from_platoon(
@@ -204,6 +211,8 @@ class PlatoonNashSimulation(PlatoonSimulation):
         self.system_desired_acc_history.append(u1_opt)
         self.human_desired_acc_history.append(u2_opt)
         self.authority_history.append(lambda_k)
+        self.authority_safety_history.append(self.authority_allocator.last_lambda_safety)
+        self.authority_performance_history.append(self.authority_allocator.last_lambda_performance)
         self.safety_force_history.append(field_force)
         self.gap_error_history.append(current_gap_error)
 
