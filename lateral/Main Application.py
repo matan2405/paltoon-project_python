@@ -357,7 +357,7 @@ def run_convoy_scenarios():
             ],
             'initial_state': np.array([0.0, 0.0, 3.5, 0.0]),  # Start in right lane
             'target_lane': 0.0,  # Merge into left lane
-            'simulation_time': 40.0
+            'simulation_time': 120.0
         },
         {
             'name': 'Join Middle of Convoy',
@@ -369,7 +369,7 @@ def run_convoy_scenarios():
             ],
             'initial_state': np.array([0.0, 0.0, 3.5, 0.0]),
             'target_lane': 0.0,
-            'simulation_time': 35.0
+            'simulation_time': 120.0
         },
         {
             'name': 'Join After Convoy',
@@ -382,7 +382,7 @@ def run_convoy_scenarios():
             ],
             'initial_state': np.array([0.0, 0.0, 3.5, 0.0]),
             'target_lane': 0.0,
-            'simulation_time': 30.0
+            'simulation_time': 120.0
         }
     ]
     
