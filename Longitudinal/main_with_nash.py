@@ -12,6 +12,8 @@ import time
 import numpy as np
 from typing import List, Dict
 
+from nash_solver import longitudinal_constrained_nash_solver
+
 # Add current directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -32,6 +34,7 @@ from nash_solver.longitudinal_safety_field import (
     PlatoonContext
 )
 from nash_solver import longitudinal_nash_solver, system_reference_generator
+from nash_solver.longitudinal_constrained_nash_solver import ConstrainedLongitudinalNashSolver
 
 os.system('cls' if os.name == 'nt' else 'clear')
 
@@ -52,7 +55,7 @@ class LowPassFilter:
 class PlatoonNashSimulation(PlatoonSimulation):
     """Extended platoon simulation with Nash equilibrium control"""
     
-    def __init__(self):
+    def __init__(self, Constrained_Nash=True):
         super().__init__()
         
         # Initialize Nash control components
@@ -67,15 +70,23 @@ class PlatoonNashSimulation(PlatoonSimulation):
         self.system_ref_generator = system_reference_generator.SystemReferenceGenerator(
             Np=self.Np, dt=self.dt_nash
         )
-        
+        self.Constrained_Nash = Constrained_Nash
         # Initialize Nash solver
         try:
-            self.nash_solver = longitudinal_nash_solver.EnhancedNashSolver(
-                vehicle=self.human_vehicle, 
-                platoon_manager=self.platoon_manager, 
-                human_driver=self.human_driver, 
-                Np=self.Np, Nu=self.Nu, dt=self.dt_nash
-            )
+            if Constrained_Nash==True:
+                self.nash_solver = longitudinal_constrained_nash_solver.ConstrainedLongitudinalNashSolver(
+                    vehicle=self.human_vehicle, 
+                    platoon_manager=self.platoon_manager, 
+                    human_driver=self.human_driver, 
+                    Np=self.Np, Nu=self.Nu, dt=self.dt_nash
+                )
+            else:
+                self.nash_solver = longitudinal_nash_solver.LongitudinalNashSolver(
+                    vehicle=self.human_vehicle, 
+                    platoon_manager=self.platoon_manager, 
+                    human_driver=self.human_driver, 
+                    Np=self.Np, dt=self.dt_nash
+                )
             self.nash_solver_available = True
         except Exception as e:
             print(f"⚠️ Nash solver initialization issue: {e}")
@@ -189,7 +200,7 @@ class PlatoonNashSimulation(PlatoonSimulation):
         u_raw = alpha * u1_opt + (1 - alpha) * u2_opt
         
         # FILTER 2: Smooth the final control input
-        u_shared = self.control_filter.filter(u_raw)
+        u_shared = u_raw#self.control_filter.filter(u_raw)
         
         # Apply hard constraints
         u_shared = self.safety_field.apply_hard_constraint(
@@ -512,6 +523,11 @@ def print_nash_analysis(sim: PlatoonNashSimulation):
             print(f"\n  👍 Risk Contribution:")
             print(f"     Leader:   {leader_contribution:.1f}%")
             print(f"     Follower: {follower_contribution:.1f}%")
+    
+    # === CONSTRAINT ACTIVITY SUMMARY ===
+    if hasattr(sim, 'nash_solver') and sim.nash_solver_available:
+        if hasattr(sim.nash_solver, 'get_constraint_summary'):
+            print(sim.nash_solver.get_constraint_summary())
     
     print(f"{'='*60}")
 

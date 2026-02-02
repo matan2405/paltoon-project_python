@@ -442,7 +442,7 @@ def run_convoy_scenarios():
             visualize_results(results, title)
             
             # Create animated visualization
-            anim = create_animated_visualization(results, f"{title} Animation")
+            # anim = create_animated_visualization(results, f"{title} Animation")
     
     # Overall summary with enhanced insights
     _generate_enhanced_overall_summary(all_results)

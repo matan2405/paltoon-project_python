@@ -58,23 +58,23 @@ class SystemReferenceGenerator:
         
         # Gap error threshold for switching between Gap Closing and Following modes
         # If gap_error > GAP_CLOSING_THRESHOLD, use transitional controller
-        self.GAP_CLOSING_THRESHOLD = 8.0  # [m] - increased from 5.0 for smoother transition
+        self.GAP_CLOSING_THRESHOLD = 3.0  # [m] - increased from 5.0 for smoother transition
         
         # Minimum gap error below which we use pure Rajamani
-        self.STABLE_GAP_THRESHOLD = 3.0  # [m]
+        self.STABLE_GAP_THRESHOLD = 1.0  # [m]
         
         # === GAP CLOSING PARAMETERS ===
         # Maximum overspeed factor relative to leader when closing gap
         self.MAX_OVERSPEED_FACTOR = 1.20  # Can go 20% faster than leader
         
         # Desired closing rate [m/s] - how fast we want to close the gap
-        self.DESIRED_CLOSING_RATE = 2.0  # [m/s]
+        self.DESIRED_CLOSING_RATE = 3.0  # [m/s]
         
         # Gain for proportional gap closing controller
-        self.GAP_CLOSING_GAIN = 0.15  # [1/s] - acceleration per meter of gap error
+        self.GAP_CLOSING_GAIN = 0.25  # [1/s] - acceleration per meter of gap error
         
         # === CATCH-UP PARAMETERS (for cruise mode when leader exists but far) ===
-        self.CATCHUP_FACTOR = 1.10  # 10% overspeed when catching up
+        self.CATCHUP_FACTOR = 1.15  # 10% overspeed when catching up
         
         # === COMFORT LIMITS ===
         self.MAX_ACCEL = 2.0   # [m/s²]
