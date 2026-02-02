@@ -33,6 +33,8 @@ class HumanDriver:
         self.dt = dt
         self.merging = False
         self.lane_change_progress = 0.0
+        self.ignore_platoon_before_merge = True
+
         
     def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False):
         self.vehicle.set_motion_model(use_kinematic, use_state_space)
@@ -55,7 +57,12 @@ class HumanDriver:
         Update using IDM logic.
         mode: 'execution' (real driving) or 'planning' (prediction)
         """
-        leader = self._get_leader(platoon_vehicles)
+        if self.ignore_platoon_before_merge and not self.merging:
+            # Before t_merge: drive as if alone
+            leader = None
+        else:
+            # After t_merge: normal IDM with platoon awareness
+            leader = self._get_leader(platoon_vehicles)
         v = self.vehicle.state.vx
         v0 = self.target_speed
         

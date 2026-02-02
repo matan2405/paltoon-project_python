@@ -312,8 +312,24 @@ class EllipseLongitudinalSafetyField:
         context.current_phase = self._current_phase
         self._last_context = context
         
-        leader = self._get_leader(ego_vehicle, platoon_manager)
-        follower = self._get_follower(ego_vehicle, platoon_manager)
+        # ========================================================================
+        # USE LOCKED TARGETS if available (after t_merge)
+        # ========================================================================
+        if self._has_locked_targets(ego_vehicle):
+            # After merge trigger - use LOCKED positions
+            leader = self._get_locked_leader(ego_vehicle, platoon_manager)
+            follower = self._get_locked_follower(ego_vehicle, platoon_manager)
+            
+            # Debug logging (first time only)
+            if not hasattr(self, '_locked_targets_logged'):
+                self._locked_targets_logged = True
+                print(f"🔒 Safety Field using LOCKED targets:")
+                print(f"   Leader:   {leader.vehicle_id if leader else 'None'}")
+                print(f"   Follower: {follower.vehicle_id if follower else 'None'}")
+        else:
+            # Before merge trigger - use DYNAMIC closest detection
+            leader = self._get_leader(ego_vehicle, platoon_manager)
+            follower = self._get_follower(ego_vehicle, platoon_manager)
         
         # Calculate gap error and relative velocity for phase detection
         gap_error = 0.0
@@ -511,6 +527,71 @@ class EllipseLongitudinalSafetyField:
         if context.high_risk_situation:
             DRi_target *= self.params.high_risk_multiplier
         return self._apply_lowpass_filter(DRi_target, self._DRi_filtered)
+
+
+    # ========================================================================
+    # TARGET POSITION LOCKING SUPPORT
+    # ========================================================================
+    def _get_locked_leader(self, ego_vehicle: 'Vehicle', 
+                           platoon_manager: 'PlatoonManager') -> Optional['Vehicle']:
+        """
+        Get the LOCKED leader vehicle (determined at t_merge).
+        
+        If no lock exists (before merge trigger), falls back to closest leader.
+        """
+        # Check if target is locked
+        if not hasattr(ego_vehicle, 'target_leader_id'):
+            # No lock yet - use dynamic detection (before t_merge)
+            return self._get_leader(ego_vehicle, platoon_manager)
+        
+        target_id = ego_vehicle.target_leader_id
+        
+        # Special case: No leader (merging at front of platoon)
+        if target_id is None:
+            return None
+        
+        # Find the locked leader by ID
+        for vehicle in platoon_manager.vehicles:
+            if vehicle.vehicle_id == target_id:
+                return vehicle
+        
+        # Target vehicle not found - this is a problem!
+        print(f"⚠️  WARNING: Locked leader '{target_id}' not found in platoon!")
+        print(f"   Falling back to closest leader detection")
+        return self._get_leader(ego_vehicle, platoon_manager)
+
+    def _get_locked_follower(self, ego_vehicle: 'Vehicle',
+                             platoon_manager: 'PlatoonManager') -> Optional['Vehicle']:
+        """
+        Get the LOCKED follower vehicle (determined at t_merge).
+        
+        If no lock exists (before merge trigger), falls back to closest follower.
+        """
+        # Check if target is locked
+        if not hasattr(ego_vehicle, 'target_follower_id'):
+            # No lock yet - use dynamic detection (before t_merge)
+            return self._get_follower(ego_vehicle, platoon_manager)
+        
+        target_id = ego_vehicle.target_follower_id
+        
+        # Special case: No follower (merging at back of platoon)
+        if target_id is None:
+            return None
+        
+        # Find the locked follower by ID
+        for vehicle in platoon_manager.vehicles:
+            if vehicle.vehicle_id == target_id:
+                return vehicle
+        
+        # Target vehicle not found - this is a problem!
+        print(f"⚠️  WARNING: Locked follower '{target_id}' not found in platoon!")
+        print(f"   Falling back to closest follower detection")
+        return self._get_follower(ego_vehicle, platoon_manager)
+
+    def _has_locked_targets(self, ego_vehicle: 'Vehicle') -> bool:
+        """Check if the ego vehicle has locked merge targets."""
+        return (hasattr(ego_vehicle, 'target_leader_id') or 
+                hasattr(ego_vehicle, 'target_follower_id'))
 
     def _get_leader(self, ego: 'Vehicle', 
                     platoon_mgr: 'PlatoonManager') -> Optional['Vehicle']:

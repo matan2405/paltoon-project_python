@@ -31,28 +31,32 @@ class ConstrainedNashParams:
     Parameters for constrained Nash MPC solver.
     
     API COMPATIBLE with original ConstrainedNashParams.
-    Key changes:
-    - Np: 20 → 10 (reduced for speed)
-    - Nu: 10 → 5 (reduced for speed)
-    - Weights adjusted for shorter horizon
+    DPP-Compliant with ORIGINAL horizons for best tracking performance.
+    
+    V5.2 MAXIMUM COMFORT TUNING:
+    - S1, S2 = R1, R2 for maximum cooperation (1:1 ratio)
+    - Tighter jerk limits for smooth ride
+    - Lower alpha in Authority Allocator
     """
     
-    # Prediction horizons - REDUCED for speed
-    Np: int = 20              # Prediction horizon (was 20)
-    Nu: int = 10               # Control horizon (was 10)
+    # Prediction horizons - ORIGINAL VALUES for best tracking
+    Np: int = 20              # Prediction horizon (ORIGINAL)
+    Nu: int = 10              # Control horizon (ORIGINAL)
     dt: float = 0.1           # Time step [s]
     
-    # Cost weights - TUNED for shorter horizon
-    Q_pos: float = 4000.0     # Position tracking (increased for shorter horizon)
-    Q_vel: float = 100.0      # Velocity tracking
+    # Cost weights - ORIGINAL VALUES
+    Q_pos: float = 2500.0     # Position tracking (ORIGINAL)
+    Q_vel: float = 50.0       # Velocity tracking (ORIGINAL)
     
-    # Control effort weights
-    R1: float = 600.0         # System control effort
-    R2: float = 600.0         # Human control effort
+    # Control effort weights - ORIGINAL
+    R1: float = 800.0         # System control effort (ORIGINAL)
+    R2: float = 800.0         # Human control effort (ORIGINAL)
     
-    # Cross-coupling weights (Li et al. 2019)
-    S1: float = 150.0         # System penalty on human control
-    S2: float = 150.0         # Human penalty on system control
+    # Cross-coupling weights - MAXIMUM COOPERATION
+    # S = R means each controller penalizes disagreement as much as its own effort
+    # This forces the Nash equilibrium toward cooperative solutions
+    S1: float = 800.0         # System penalty on human control (was 200, now = R1)
+    S2: float = 800.0         # Human penalty on system control (was 200, now = R2)
     
     # Input constraints [m/s²]
     u1_min: float = -3.5      # System min acceleration
@@ -60,9 +64,9 @@ class ConstrainedNashParams:
     u2_min: float = -4.0      # Human min acceleration
     u2_max: float = 3.0       # Human max acceleration
     
-    # Rate constraints [m/s³] - jerk limits
-    du1_max: float = 2.5      # System max jerk
-    du2_max: float = 3.5      # Human max jerk
+    # Rate constraints [m/s³] - VERY TIGHT for maximum comfort
+    du1_max: float = 1.0      # System max jerk (was 2.5) - very smooth
+    du2_max: float = 1.5      # Human max jerk (was 3.5) - very smooth
     
     # State constraints (for reference, not enforced in QP)
     v_min: float = 0.0        # Min velocity [m/s]
@@ -73,9 +77,9 @@ class ConstrainedNashParams:
     solver: str = 'OSQP'
     warm_start: bool = True
     verbose: bool = False
-    max_iter: int = 1000       # Reduced (was 4000)
-    eps_abs: float = 1e-3     # Relaxed (was 1e-5)
-    eps_rel: float = 1e-3     # Relaxed (was 1e-5)
+    max_iter: int = 1000      # Increased from 100 to prevent "Solution may be inaccurate"
+    eps_abs: float = 1e-4     # Tightened slightly for better accuracy
+    eps_rel: float = 1e-4     # Tightened slightly for better accuracy
     
     # Regularization
     regularization: float = 1e-5

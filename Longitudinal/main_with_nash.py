@@ -301,6 +301,11 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
     max_iterations = len(T)
     human_joined = False
     
+    # === TARGET POSITION LOCKING VARIABLES ===
+    target_leader_id = None
+    target_follower_id = None
+    merge_position_locked = False
+    
     print(f"⏱️ Simulation time: {max_time:.0f} seconds")
     print(f"   total steps: {max_iterations} (dt={sim.dt:.2f} seconds)")
     
@@ -334,22 +339,121 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
                           f"Opp={sim.nash_data['opposition_moments']}")
                     
                 
-            # Trigger joining at the right time
+            # Trigger joining at the right time - WITH POSITION LOCKING
             if (sim.time >= join_trigger_time and 
                 not human_joined and not sim.human_driver.merging):
                 
-                print(f"\n👍 Activating joining with Nash control at t={sim.time:.1f}s")
-                print(f"👍 Human vehicle position: x={sim.human_vehicle.state.x:.1f}m")
-                print(f"👍 platoon positions: {[f'{v.state.x:.1f}m' for v in sim.platoon_vehicles]}")
+                print(f"{'='*70}")
+                print(f"🔒 MERGE DECISION POINT at t={sim.time:.1f}s")
+                print(f"{'='*70}")
+                
+                # ============================================================
+                # STEP 1: Determine WHERE the human wants to merge
+                # ============================================================
+                human_x = sim.human_vehicle.state.x
+                human_v = sim.human_vehicle.state.vx
+                
+                print(f"📍 Human vehicle state:")
+                print(f"   Position: x={human_x:.1f}m")
+                print(f"   Velocity: v={human_v:.1f}m/s ({human_v*3.6:.1f} km/h)")
+                
+                # Get platoon vehicle positions sorted by x (front to back)
+                platoon_positions = [(v.vehicle_id, v.state.x, v.state.vx) 
+                                     for v in sim.platoon_vehicles]
+                platoon_positions.sort(key=lambda p: p[1], reverse=True)  # Sort by x (descending)
+                
+                print(f"📋 Current platoon configuration:")
+                for i, (vid, x, v) in enumerate(platoon_positions):
+                    print(f"   {i+1}. {vid}: x={x:.1f}m, v={v:.1f}m/s")
+                
+                # ============================================================
+                # STEP 2: Lock the target position based on current location
+                # ============================================================
+                # Find the closest vehicle ahead (leader) and behind (follower)
+                leader_candidates = [(i, vid, x) for i, (vid, x, v) in enumerate(platoon_positions) if x > human_x]
+                follower_candidates = [(i, vid, x) for i, (vid, x, v) in enumerate(platoon_positions) if x < human_x]
+                
+                # Find closest leader (vehicle ahead with smallest gap)
+                if leader_candidates:
+                    leader_candidates.sort(key=lambda t: t[2])  # Sort by x (ascending)
+                    leader_idx, target_leader_id, leader_x = leader_candidates[0]
+                else:
+                    target_leader_id = None
+                    leader_idx = -1
+                
+                # Find closest follower (vehicle behind with largest x)
+                if follower_candidates:
+                    follower_candidates.sort(key=lambda t: t[2], reverse=True)  # Sort by x (descending)
+                    follower_idx, target_follower_id, follower_x = follower_candidates[0]
+                else:
+                    target_follower_id = None
+                    follower_idx = -1
+                
+                # Determine merge position index
+                if target_leader_id is None:
+                    # Human is ahead of all vehicles - merge at front
+                    merge_position_index = 0
+                elif target_follower_id is None:
+                    # Human is behind all vehicles - merge at back
+                    merge_position_index = len(platoon_positions)
+                else:
+                    # Human is between leader and follower
+                    merge_position_index = leader_idx + 1
+                
+                print(f"🎯 LOCKED MERGE POSITION:")
+                print(f"   Target Leader:   {target_leader_id if target_leader_id else 'None (merge at front)'}")
+                print(f"   Target Follower: {target_follower_id if target_follower_id else 'None (merge at back)'}")
+                print(f"   Position Index:  {merge_position_index} (0=front, {len(platoon_positions)}=back)")
+                
+                # Calculate initial gaps
+                if target_leader_id:
+                    leader_x = next(x for vid, x, v in platoon_positions if vid == target_leader_id)
+                    gap_to_leader = leader_x - human_x
+                    print(f"   Gap to Leader:   {gap_to_leader:.1f}m")
+                
+                if target_follower_id:
+                    follower_x = next(x for vid, x, v in platoon_positions if vid == target_follower_id)
+                    gap_to_follower = human_x - follower_x
+                    print(f"   Gap to Follower: {gap_to_follower:.1f}m")
+                
+                # ============================================================
+                # STEP 3: Store locked positions in vehicle state
+                # ============================================================
+                sim.human_vehicle.target_leader_id = target_leader_id
+                sim.human_vehicle.target_follower_id = target_follower_id
+                sim.human_vehicle.merge_position_index = merge_position_index
+                sim.human_vehicle.merge_trigger_time = sim.time
+                
+                # ============================================================
+                # STEP 4: Activate Nash control
+                # ============================================================
+                print(f"✅ Activating Nash Equilibrium Control:")
+                sim.human_driver.ignore_platoon_before_merge = False
                 sim.human_driver.merging = True
                 human_joined = True
+                merge_position_locked = True
+                
                 sim.human_vehicle.joined_platoon = True
                 sim.platoon_manager.add_vehicle(sim.human_vehicle)
+                
                 sim.human_vehicle.target_velocity = sim.platoon_manager.target_velocity
                 sim.human_driver.target_speed = sim.platoon_manager.target_velocity
-                # sim.human_driver.delta_IDM += 1.0  # More aggressive gap closing
-                print(f"joining platoon at index {sim.platoon_manager.get_new_vehicle_index(sim.human_vehicle)}")
-                print(f"✅ Human vehicle started joining with Nash equilibrium control with target velocity {sim.human_driver.target_speed * 3.6:.1f} km/h")
+                
+                print(f"   Nash game:       ACTIVE")
+                print(f"   Target velocity: {sim.human_driver.target_speed * 3.6:.1f} km/h")
+                print(f"   Position locked: YES")
+                
+                # Safety check
+                min_gap = 10.0  # meters
+                if target_leader_id and gap_to_leader < min_gap:
+                    print(f"⚠️  WARNING: Gap to leader ({gap_to_leader:.1f}m) is below safe threshold ({min_gap}m)")
+                    print(f"   Nash solver will work to prevent collision!")
+                
+                if target_follower_id and gap_to_follower < min_gap:
+                    print(f"⚠️  WARNING: Gap to follower ({gap_to_follower:.1f}m) is below safe threshold ({min_gap}m)")
+                    print(f"   Nash solver will work to prevent collision!")
+                
+                print(f"{'='*70}")
                 
             if human_joined:  # Only after joining was triggered
                 current_phase = sim.safety_field.get_current_phase()
@@ -618,7 +722,7 @@ if __name__ == "__main__":
             })
         elif choice == "2":
             run_scenario_with_nash("Join Middle of Platoon", {
-                'initial_x': -10.0, 'initial_y': -2.0,
+                'initial_x': -5.0, 'initial_y': -2.0,
                 'target_speed': 110.0, 'join_trigger_time': 20.0
             })
         elif choice == "3":

@@ -67,8 +67,18 @@ class SystemReferenceGenerator:
         # Maximum overspeed factor relative to leader when closing gap
         self.MAX_OVERSPEED_FACTOR = 1.20  # Can go 20% faster than leader
         
+        # === NEW: Adaptive parameters for large gaps ===
+        # For "Join After Platoon" scenario with initial gap > 15m
+        self.LARGE_GAP_THRESHOLD = 15.0  # [m] - threshold for "large gap"
+        self.MAX_OVERSPEED_FACTOR_LARGE_GAP = 1.30  # More aggressive for large gaps
+        
         # Desired closing rate [m/s] - how fast we want to close the gap
         self.DESIRED_CLOSING_RATE = 3.0  # [m/s]
+        
+        # === NEW: Adaptive closing rates based on gap size ===
+        self.CLOSING_RATE_LARGE_GAP = 1.5   # [m/s] - slower for large gaps (>15m)
+        self.CLOSING_RATE_MEDIUM_GAP = 2.5  # [m/s] - medium for gaps (10-15m)
+        self.CLOSING_RATE_SMALL_GAP = 3.0   # [m/s] - fast for small gaps (<10m)
         
         # Gain for proportional gap closing controller
         self.GAP_CLOSING_GAIN = 0.25  # [1/s] - acceleration per meter of gap error
@@ -79,11 +89,16 @@ class SystemReferenceGenerator:
         # === COMFORT LIMITS ===
         self.MAX_ACCEL = 2.0   # [m/s²]
         self.MAX_DECEL = -3.5  # [m/s²]
+        self.MAX_JERK = 1.5    # [m/s³] - limits rate of change of acceleration
         
-        print(f"🚀 System Reference Generator V2.0 (Transitional Controller)")
+        # === RATE LIMITING STATE ===
+        self.prev_a_ref = 0.0  # Previous acceleration reference for jerk limiting
+        
+        print(f"🚀 System Reference Generator V2.1 (Smoothstep + Jerk Limiting)")
         print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
         print(f"   🎯 Gap Closing Threshold: {self.GAP_CLOSING_THRESHOLD}m")
         print(f"   ⚡ Max Overspeed Factor: {self.MAX_OVERSPEED_FACTOR}")
+        print(f"   🎢 Max Jerk: {self.MAX_JERK} m/s³")
 
     def get_system_acceleration_and_state_sequence(self, simulation):
         """
@@ -106,13 +121,57 @@ class SystemReferenceGenerator:
         # Clone current state for forward simulation
         sim_vehicle = copy.deepcopy(simulation.human_vehicle)
         
-        # Identify Leader
+        # ========================================================================
+        # Identify Leader - USE LOCKED if available
+        # ========================================================================
         leader = None
-        if hasattr(simulation, 'safety_field'):
-            leader = simulation.safety_field._get_leader(
-                simulation.human_vehicle, 
-                simulation.platoon_manager
-            )
+        
+        # Check if we have locked targets (after t_merge)
+        if hasattr(simulation.human_vehicle, 'target_leader_id'):
+            # === POST-MERGE: Use LOCKED leader ===
+            target_id = simulation.human_vehicle.target_leader_id
+            
+            if target_id is not None:
+                # Find the locked leader by ID
+                for v in simulation.platoon_manager.vehicles:
+                    if v.vehicle_id == target_id:
+                        leader = v
+                        break
+                
+                if leader is None:
+                    # Locked leader not found - this shouldn't happen!
+                    print(f"⚠️  WARNING (RefGen): Locked leader '{target_id}' not found!")
+                    
+                    # Fallback to dynamic detection
+                    if hasattr(simulation, 'safety_field'):
+                        leader = simulation.safety_field._get_leader(
+                            simulation.human_vehicle, 
+                            simulation.platoon_manager
+                        )
+            else:
+                # Locked target is None - merging at front of platoon
+                leader = None
+                
+        else:
+            # === PRE-MERGE: Use DYNAMIC closest leader ===
+            if hasattr(simulation, 'safety_field'):
+                leader = simulation.safety_field._get_leader(
+                    simulation.human_vehicle, 
+                    simulation.platoon_manager
+                )
+        
+        # Debug logging (only once)
+        if not hasattr(self, '_leader_mode_logged'):
+            self._leader_mode_logged = True
+            
+            if hasattr(simulation.human_vehicle, 'target_leader_id'):
+                target_id = simulation.human_vehicle.target_leader_id
+                print(f"🎯 System Reference Generator: LOCKED mode")
+                print(f"   Target: {target_id if target_id else 'None (front)'}")
+                print(f"   Found:  {leader.vehicle_id if leader else 'None'}")
+            else:
+                print(f"🎯 System Reference Generator: DYNAMIC mode (pre-merge)")
+                print(f"   Closest: {leader.vehicle_id if leader else 'None'}")
         
         # Clone leader for prediction (constant velocity assumption)
         sim_leader = copy.deepcopy(leader) if leader else None
@@ -195,9 +254,13 @@ class SystemReferenceGenerator:
                 a_following, _ = rajamani(sim_leader, sim_vehicle)
                 
                 # Blend factor: 1.0 at GAP_CLOSING_THRESHOLD, 0.0 at STABLE_GAP_THRESHOLD
-                blend = (gap_error - self.STABLE_GAP_THRESHOLD) / \
+                # Using SMOOTHSTEP instead of linear for smoother transition (zero derivative at endpoints)
+                t = (gap_error - self.STABLE_GAP_THRESHOLD) / \
                         (self.GAP_CLOSING_THRESHOLD - self.STABLE_GAP_THRESHOLD)
-                blend = np.clip(blend, 0.0, 1.0)
+                t = np.clip(t, 0.0, 1.0)
+                
+                # Smoothstep function: 3t² - 2t³
+                blend = t * t * (3.0 - 2.0 * t)
                 
                 a_ref = blend * a_closing + (1 - blend) * a_following
                 
@@ -211,6 +274,15 @@ class SystemReferenceGenerator:
             
             # === Step 4: Apply Comfort Constraints ===
             a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
+            
+            # === Step 4.5: Apply Jerk Limiting ===
+            # Limit rate of change of acceleration for smoother transitions
+            if i == 0:
+                # First step uses actual previous acceleration
+                max_delta_a = self.MAX_JERK * self.dt
+                a_ref = np.clip(a_ref, 
+                               self.prev_a_ref - max_delta_a,
+                               self.prev_a_ref + max_delta_a)
             
             # === Step 5: Update Simulated Vehicle State ===
             sim_vehicle.state.ax = a_ref
@@ -230,20 +302,30 @@ class SystemReferenceGenerator:
             state_sequence[i, 0] = sim_vehicle.state.x
             state_sequence[i, 1] = sim_vehicle.state.vx
         
+        # Update previous acceleration for next call (jerk limiting)
+        if len(accel_sequence) > 0:
+            self.prev_a_ref = accel_sequence[0]
+        
         return accel_sequence, state_sequence
 
     def _compute_gap_closing_acceleration(self, sim_vehicle, sim_leader, 
                                           gap_error, desired_gap, target_platoon_speed):
         """
-        Transitional Controller for closing large gaps.
+        Adaptive Transitional Controller for closing gaps of any size.
+        
+        VERSION 2.1 - ADAPTIVE FOR LARGE GAPS
+        =====================================
+        This enhanced version adapts its behavior based on gap size:
+        - Large gaps (>15m): Conservative approach with slow closing
+        - Medium gaps (10-15m): Moderate closing rate
+        - Small gaps (5-10m): Standard closing rate
+        - Tiny gaps (<5m): Fast convergence
         
         Based on Rajamani Chapter 6.7.1, this controller:
         1. Computes a safe approach speed based on distance
-        2. Uses proportional control to achieve desired closing rate
+        2. Uses adaptive closing rate based on gap size
         3. Limits overspeed for safety and comfort
-        
-        The key insight is that we want to approach the leader at a controlled
-        relative velocity, not just match speeds.
+        4. Uses adaptive gain to prevent oscillations
         
         Args:
             sim_vehicle: Simulated ego vehicle
@@ -258,6 +340,31 @@ class SystemReferenceGenerator:
         ego_v = sim_vehicle.state.vx
         leader_v = sim_leader.state.vx
         
+        # === ADAPTIVE PARAMETERS BASED ON GAP SIZE ===
+        if gap_error > 15.0:
+            # LARGE GAP: Very conservative approach
+            max_overspeed = self.MAX_OVERSPEED_FACTOR_LARGE_GAP
+            base_closing_rate = self.CLOSING_RATE_LARGE_GAP
+            K_v = 0.3  # Low gain to prevent oscillations
+            
+        elif gap_error > 10.0:
+            # MEDIUM GAP: Moderate approach
+            max_overspeed = 1.25  # Interpolated
+            base_closing_rate = self.CLOSING_RATE_MEDIUM_GAP
+            K_v = 0.4
+            
+        elif gap_error > 5.0:
+            # SMALL GAP: Standard approach
+            max_overspeed = self.MAX_OVERSPEED_FACTOR
+            base_closing_rate = self.CLOSING_RATE_SMALL_GAP
+            K_v = 0.6
+            
+        else:
+            # TINY GAP: Fast convergence
+            max_overspeed = self.MAX_OVERSPEED_FACTOR
+            base_closing_rate = self.CLOSING_RATE_SMALL_GAP
+            K_v = 0.8  # Original high gain
+        
         # === Method 1: Safe Approach Speed ===
         # Maximum safe speed based on being able to stop before collision
         # v_safe = v_leader + sqrt(2 * a_comfortable * gap_error)
@@ -267,9 +374,16 @@ class SystemReferenceGenerator:
         
         # === Method 2: Desired Closing Rate ===
         # We want to approach at a steady rate, faster when gap is larger
-        # Proportional controller: closing_rate = K * gap_error
+        # But with adaptive rate based on gap size
         desired_closing_rate = self.GAP_CLOSING_GAIN * gap_error
-        desired_closing_rate = np.clip(desired_closing_rate, 0.5, self.DESIRED_CLOSING_RATE * 2)
+        
+        # Adaptive clipping based on gap size
+        if gap_error > 15.0:
+            desired_closing_rate = np.clip(desired_closing_rate, 0.5, base_closing_rate)
+        elif gap_error > 10.0:
+            desired_closing_rate = np.clip(desired_closing_rate, 1.0, base_closing_rate)
+        else:
+            desired_closing_rate = np.clip(desired_closing_rate, 1.5, base_closing_rate * 1.5)
         
         # Target velocity to achieve this closing rate
         v_closing = leader_v + desired_closing_rate
@@ -278,16 +392,13 @@ class SystemReferenceGenerator:
         # Take minimum of safe speed and closing speed
         v_target = min(v_safe, v_closing)
         
-        # Also limit by overspeed factor relative to platoon speed
-        v_max_overspeed = target_platoon_speed * self.MAX_OVERSPEED_FACTOR
+        # Also limit by adaptive overspeed factor relative to platoon speed
+        v_max_overspeed = target_platoon_speed * max_overspeed
         v_target = min(v_target, v_max_overspeed)
         
-        # === Calculate Required Acceleration ===
-        # Simple proportional control to reach target velocity
+        # === Calculate Required Acceleration with Adaptive Gain ===
+        # Use adaptive gain K_v based on gap size
         velocity_error = v_target - ego_v
-        
-        # Gain for velocity tracking (higher = faster response)
-        K_v = 0.8  # [1/s]
         
         a_ref = K_v * velocity_error
         

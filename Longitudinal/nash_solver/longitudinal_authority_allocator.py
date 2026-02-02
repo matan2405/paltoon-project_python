@@ -3,12 +3,15 @@
 File: longitudinal_authority_allocator.py
 Description: Dynamic authority allocation based on Safety and Performance.
 
-VERSION 4.0 - IMPROVED GAP CLOSING
-==================================
-Key changes from V3:
-1. Lower threshold for gap-based authority (2m instead of 10m)
-2. Both positive AND negative gap errors activate system authority
-3. Higher gain for catching up (positive gap error)
+VERSION 5.0 - WITH HYSTERESIS
+=============================
+Key changes from V4:
+1. HYSTERESIS: Different thresholds for entering/exiting gap-based authority
+   - Enter system control when |gap_error| > 3.0m
+   - Exit system control when |gap_error| < 1.0m
+   - This prevents oscillations at the boundary
+2. SMOOTHER transitions with adaptive smoothing
+3. CONTINUOUS function instead of hard threshold
 """
 
 import numpy as np
@@ -16,8 +19,11 @@ import numpy as np
 
 class LongitudinalAuthorityAllocator:
     """
-    Dynamic authority allocation based on a continuous Sigmoid function.
-    Updated: More aggressive gap closing for BOTH large and small errors.
+    Dynamic authority allocation with HYSTERESIS to prevent oscillations.
+    
+    V5.2 MAXIMUM COMFORT TUNING:
+    - Very low alpha values for extremely smooth authority transitions
+    - Gradual handoffs prevent acceleration spikes
     """
 
     def __init__(self):
@@ -28,71 +34,103 @@ class LongitudinalAuthorityAllocator:
         self.k_steepness = 0.015
 
         self.prev_lambda = self.lambda_min
-        self.alpha_smoothing = 0.05 
+        
+        # === SMOOTHING PARAMETERS - MAXIMUM COMFORT ===
+        # Very low alpha = very slow, very smooth transitions
+        # The trade-off: slower response but no jerky handoffs
+        self.alpha_base = 0.05      # Base smoothing (was 0.08) - extremely smooth
+        self.alpha_fast = 0.12      # Fast response (was 0.20) - still smooth
+        
+        # === HYSTERESIS STATE ===
+        # Track if we're currently in "performance mode"
+        self.in_performance_mode = False
+        self.ENTER_THRESHOLD = 3.0   # Enter performance mode when |gap_error| > 3m
+        self.EXIT_THRESHOLD = 1.0    # Exit performance mode when |gap_error| < 1m
         
         # Store last computed authority values for logging
         self.last_lambda_safety = 0.0
         self.last_lambda_performance = 0.0
 
-        print(f"🛡️ Authority Allocator V4 (Improved Gap Closing) Initialized")
+        print(f"🛡️ Authority Allocator V5.2 (Maximum Comfort) Initialized")
+        print(f"   Smoothing: alpha_base={self.alpha_base}, alpha_fast={self.alpha_fast}")
+        print(f"   Hysteresis: enter={self.ENTER_THRESHOLD}m, exit={self.EXIT_THRESHOLD}m")
 
     def compute_authority_ratio(self, risk_force: float, gap_error: float = 0.0, velocity_error: float = 0.0) -> float:
         """
-        Computes authority ratio lambda(k).
-        Logic: Max(Safety_Need, Performance_Need)
+        Computes authority ratio lambda(k) with HYSTERESIS.
         
-        V4 CHANGES:
-        - Lower threshold: 2m instead of 10m
-        - Handles both positive (too far) and negative (too close) errors
-        - Progressive gain based on magnitude
+        V5 CHANGES:
+        - Hysteresis: different thresholds for entering/exiting
+        - Continuous smooth function instead of hard threshold
+        - Adaptive smoothing based on error magnitude
         """
         force_mag = abs(risk_force)
+        abs_gap_error = abs(gap_error)
         
         # --- 1. SAFETY Authority (Based on Field Force) ---
-        # Low force -> Low Lambda (Human)
-        # High force -> High Lambda (System)
         sigmoid_factor = 1.0 / (1.0 + np.exp(-self.k_steepness * (force_mag - self.force_midpoint)))
         lambda_safety = self.lambda_min + (self.lambda_max - self.lambda_min) * sigmoid_factor
 
-        # --- 2. PERFORMANCE Authority (Based on Gap Error) ---
-        # 
-        # Gap Error > 0: We are TOO FAR behind (need to catch up)
-        # Gap Error < 0: We are TOO CLOSE (need to slow down)
+        # --- 2. PERFORMANCE Authority with HYSTERESIS ---
         #
-        # Both cases require system intervention when error is significant!
+        # Hysteresis logic:
+        # - If NOT in performance mode: enter when |error| > ENTER_THRESHOLD
+        # - If IN performance mode: exit when |error| < EXIT_THRESHOLD
+        #
+        # This creates a "dead band" that prevents oscillations
         
+        # Update hysteresis state
+        if not self.in_performance_mode:
+            if abs_gap_error > self.ENTER_THRESHOLD:
+                self.in_performance_mode = True
+        else:
+            if abs_gap_error < self.EXIT_THRESHOLD:
+                self.in_performance_mode = False
+        
+        # Compute performance authority
         lambda_performance = 0.1  # Default - human in control
         
-        abs_gap_error = abs(gap_error)
-        
-        # THRESHOLD LOWERED from 10m to 2m for tighter tracking!
-        if abs_gap_error > 2.0:
-            # Progressive authority based on gap magnitude
-            # At 2m error: lambda = 1.0
-            # At 5m error: lambda = 1.0 + 3*0.3 = 1.9
-            # At 10m error: lambda = 1.0 + 8*0.3 = 3.4
-            # At 40m error: lambda = 1.0 + 38*0.3 = 12.4
-            lambda_performance = 1.0 + (abs_gap_error - 2.0) * 0.3
+        if self.in_performance_mode:
+            # Use CONTINUOUS function instead of hard threshold
+            # Soft sigmoid-like activation based on gap error
+            # At 1m: lambda ≈ 1.0 (just entered)
+            # At 3m: lambda ≈ 1.6
+            # At 10m: lambda ≈ 3.7
+            # At 40m: lambda ≈ 12.7
+            
+            # Normalized error (0 at EXIT_THRESHOLD, 1 at ENTER_THRESHOLD)
+            normalized_error = (abs_gap_error - self.EXIT_THRESHOLD) / (self.ENTER_THRESHOLD - self.EXIT_THRESHOLD)
+            normalized_error = max(0.0, normalized_error)  # Clamp to positive
+            
+            # Progressive authority
+            lambda_performance = 1.0 + normalized_error * 0.3 + (abs_gap_error - self.EXIT_THRESHOLD) * 0.25
             
             # Higher gain for POSITIVE gap error (catching up is more critical)
-            # When we're behind, we need more aggressive system intervention
             if gap_error > 0:
-                lambda_performance *= 1.5
+                lambda_performance *= 1.3
             
-        # Upper bound to prevent extreme values
+        # Upper bound
         lambda_performance = min(lambda_performance, 50.0)
 
         # --- 3. Fusion: Take the MAX urgency ---
-        # System takes control if there's safety risk OR performance issue
         target_lambda = max(lambda_safety, lambda_performance)
         
         # Store for logging
         self.last_lambda_safety = lambda_safety
         self.last_lambda_performance = lambda_performance
 
-        # --- 4. Smoothing ---
-        # Prevent sudden jumps in authority
-        lambda_k = (self.alpha_smoothing * target_lambda) + ((1 - self.alpha_smoothing) * self.prev_lambda)
+        # --- 4. ADAPTIVE Smoothing ---
+        # Use faster smoothing when error is large (need quick response)
+        # Use slower smoothing when error is small (need stability)
+        if abs_gap_error > 5.0:
+            alpha = self.alpha_fast
+        elif abs_gap_error > 2.0:
+            # Linear interpolation between fast and base
+            alpha = self.alpha_base + (self.alpha_fast - self.alpha_base) * (abs_gap_error - 2.0) / 3.0
+        else:
+            alpha = self.alpha_base
+        
+        lambda_k = alpha * target_lambda + (1 - alpha) * self.prev_lambda
         
         self.prev_lambda = lambda_k
         return lambda_k
@@ -105,8 +143,9 @@ class LongitudinalAuthorityAllocator:
         return weight_human, weight_system
     
     def reset(self):
-        """Reset smoothing state."""
+        """Reset smoothing state and hysteresis."""
         self.prev_lambda = self.lambda_min
+        self.in_performance_mode = False
 
 
 # Export
