@@ -1,3 +1,7 @@
 fix_emojis.py
 /platoon_sim_kinematic_results
 **/convoy_simulation_results/
+__pycache__/
+*.pyc
+*.png
+*.gif
