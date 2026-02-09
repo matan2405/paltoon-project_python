@@ -116,6 +116,7 @@ class PlatoonNashSimulation(PlatoonSimulation):
         print("🚗 Platoon Nash Simulation Initialized (With Filters)")
 
     def nash_control_step(self, human_vehicle: Vehicle, leader_vehicle: Vehicle = None) -> Dict:
+        """Nash control step with leader-aware human prediction."""
         # Get current state
         current_state = np.array([human_vehicle.state.x, human_vehicle.state.vx])
         
@@ -128,7 +129,6 @@ class PlatoonNashSimulation(PlatoonSimulation):
         desired_gap = 50.0
         
         # Calculate Velocity Error (Target - Current)
-        # If result is negative (e.g. -10), it means we are 10 m/s FASTER than target (Overspeeding)
         target_vel = self.platoon_manager.target_velocity
         velocity_error = target_vel - human_vehicle.state.vx
         
@@ -136,12 +136,12 @@ class PlatoonNashSimulation(PlatoonSimulation):
             from control.platoon_control import rajamani
             _, desired_gap = rajamani(leader, human_vehicle)
             current_gap = leader.state.x - human_vehicle.state.x
-            current_gap_error = current_gap - desired_gap # Positive = Behind
+            current_gap_error = current_gap - desired_gap  # Positive = Behind
         elif follower:
             from control.platoon_control import rajamani
             _, desired_gap = rajamani(human_vehicle, follower)
             current_gap = human_vehicle.state.x - follower.state.x
-            current_gap_error = desired_gap - current_gap # Positive = Behind
+            current_gap_error = desired_gap - current_gap  # Positive = Behind
         
         # --- 2. Safety Field Calculation ---
         raw_field_force = self.safety_field.compute_risk_force_from_platoon(
@@ -160,7 +160,6 @@ class PlatoonNashSimulation(PlatoonSimulation):
         )
 
         # --- 3. Authority Allocation ---
-        # Includes Risk, Performance (Gap Error), and Safety (Velocity Error) logic
         lambda_k = self.authority_allocator.compute_authority_ratio(
             field_force, 
             gap_error=current_gap_error,
@@ -172,9 +171,20 @@ class PlatoonNashSimulation(PlatoonSimulation):
         accel_seq_sys, state_seq_sys = self.system_ref_generator.get_system_acceleration_and_state_sequence(self)
         R1_ref = state_seq_sys
         
-        # Human Reference (R2) - With IDM
+        # ======================================================================
+        # FIXED: Human Reference (R2) - NOW PASSES LEADER FOR GAP-AWARE PREDICTION
+        # ======================================================================
+        # Previously: 
+        #   accel_seq_human, state_seq_human = self.human_driver.get_human_acceleration_and_state_sequence(
+        #       dt=self.dt_nash, Np=self.Np, vehicle=human_vehicle
+        #   )
+        # 
+        # Now we pass the leader so the human driver uses IDM car-following
+        # instead of free-road driving. This ensures R2_ref is consistent with
+        # actual driving behavior and creates cooperative Nash equilibrium.
+        # ======================================================================
         accel_seq_human, state_seq_human = self.human_driver.get_human_acceleration_and_state_sequence(
-            dt=self.dt_nash, Np=self.Np, vehicle=human_vehicle
+            dt=self.dt_nash, Np=self.Np, vehicle=human_vehicle, leader=leader  # <-- NEW!
         )
         R2_ref = state_seq_human
         
@@ -193,14 +203,14 @@ class PlatoonNashSimulation(PlatoonSimulation):
                 u1_opt = 0.0
                 u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
         else:
-             u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
+            u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
         
         # --- 6. Shared Control ---
         alpha = lambda_k / (1.0 + lambda_k)
         u_raw = alpha * u1_opt + (1 - alpha) * u2_opt
         
-        # FILTER 2: Smooth the final control input
-        u_shared = u_raw#self.control_filter.filter(u_raw)
+        # FILTER 2: Smooth the final control input (currently disabled)
+        u_shared = u_raw  # self.control_filter.filter(u_raw)
         
         # Apply hard constraints
         u_shared = self.safety_field.apply_hard_constraint(
@@ -233,8 +243,10 @@ class PlatoonNashSimulation(PlatoonSimulation):
             self.nash_cost_history.append([0.0, 0.0])
             
         if abs(u1_opt) > 0.01 and abs(u2_opt) > 0.01:
-            if u1_opt * u2_opt > 0: self.nash_data['cooperation_moments'] += 1
-            else: self.nash_data['opposition_moments'] += 1
+            if u1_opt * u2_opt > 0: 
+                self.nash_data['cooperation_moments'] += 1
+            else: 
+                self.nash_data['opposition_moments'] += 1
 
         return {
             'controller_input': u1_opt,

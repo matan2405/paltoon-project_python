@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """
 Human driver module containing the HumanDriver class.
-Updated: Adds 'planning' mode for more tolerant predictions in Nash.
+VERSION 2.0 - LEADER-AWARE PREDICTION
+
+Key Fix:
+========
+The get_human_acceleration_and_state_sequence() method now accepts an optional
+leader parameter. When provided, the human driver prediction will use IDM
+car-following behavior instead of free-road driving.
+
+This fixes the "Join Middle" and "Join After" scenarios where the human driver
+prediction was ignoring the leader, causing the Nash solver to receive conflicting
+references (System wants to close gap, Human wants to accelerate to target speed).
+
+The fix ensures R2_ref (human reference) is consistent with actual car-following
+behavior, leading to cooperative Nash equilibrium solutions.
 """
 
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import sys
 import copy
 import os
+
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vehicle.vehicle import Vehicle
+
 
 class HumanDriver:
     def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = 0.1):
@@ -27,8 +42,8 @@ class HumanDriver:
         self.comfortable_deceleration = 2.0
         
         # Planning Parameters (More tolerant for Nash prediction)
-        self.plan_time_headway = 0.8 # Shorter headway for planning
-        self.plan_decel = 4.0 # Harder braking allowed in planning
+        self.plan_time_headway = 0.8  # Shorter headway for planning
+        self.plan_decel = 4.0  # Harder braking allowed in planning
         
         self.dt = dt
         self.merging = False
@@ -40,12 +55,14 @@ class HumanDriver:
         self.vehicle.set_motion_model(use_kinematic, use_state_space)
         
     def _get_leader(self, platoon_vehicles: List):
-        if not platoon_vehicles: return None
+        if not platoon_vehicles: 
+            return None
         my_x = self.vehicle.state.x
         min_dist = float('inf')
         leader = None
         for v in platoon_vehicles:
-            if v.vehicle_id == self.vehicle.vehicle_id: continue
+            if v.vehicle_id == self.vehicle.vehicle_id: 
+                continue
             dist = v.state.x - my_x
             if 0 < dist < min_dist:
                 min_dist = dist
@@ -81,7 +98,8 @@ class HumanDriver:
         if leader:
             s = leader.state.x - self.vehicle.state.x - leader.L
             delta_v = v - leader.state.vx
-            s_star = (self.min_spacing + v * T + (v * delta_v) / (2 * np.sqrt(self.max_acceleration * b)))
+            s_star = (self.min_spacing + v * T + 
+                      (v * delta_v) / (2 * np.sqrt(self.max_acceleration * b)))
             s = max(0.1, s)
             interaction_term = - (s_star / s) ** 2
         
@@ -110,7 +128,29 @@ class HumanDriver:
             
         return desired_accel
 
-    def get_human_acceleration_and_state_sequence(self, dt: float, Np: int, vehicle: Vehicle) -> Tuple[np.ndarray, np.ndarray]:
+    def get_human_acceleration_and_state_sequence(
+        self, 
+        dt: float, 
+        Np: int, 
+        vehicle: Vehicle,
+        leader: Optional[Vehicle] = None  # NEW: Optional leader for gap-aware prediction
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate predicted acceleration and state sequence for the human driver.
+        
+        VERSION 2.0: Now accepts an optional leader for gap-aware prediction.
+        
+        Args:
+            dt: Time step for prediction
+            Np: Number of prediction steps
+            vehicle: Current ego vehicle state
+            leader: Optional leader vehicle for car-following prediction
+            
+        Returns:
+            Tuple of (acceleration_sequence, state_sequence)
+            - acceleration_sequence: Shape (Np,)
+            - state_sequence: Shape (Np, 2) with [position, velocity]
+        """
         accel_sequence = np.zeros(Np)
         state_sequence = np.zeros((Np, 2))
         
@@ -118,14 +158,37 @@ class HumanDriver:
         sim_driver = copy.deepcopy(self)
         sim_driver.vehicle = sim_veh
         
+        # === NEW: Create simulated leader if provided ===
+        sim_leader = None
+        if leader is not None:
+            sim_leader = copy.deepcopy(leader)
+        
         dt_sim = 0.02
         steps_per_dt = max(1, int(dt / dt_sim))
         
         for i in range(Np):
-            # Predict using PLANNING mode (more aggressive/tolerant)
-            # We pass empty list for leader to simulate "optimistic" human intent (trying to maintain speed)
-            # OR we could pass the leader if we had it, but with 'planning' parameters it won't brake as early.
-            a_human = sim_driver.update(dt, platoon_vehicles=[], mode='planning') 
+            # === NEW: If we have a leader, update its position (constant velocity assumption) ===
+            if sim_leader is not None:
+                # Leader moves at constant velocity during prediction
+                sim_leader.state.x += sim_leader.state.vx * dt
+            
+            # Predict using PLANNING mode
+            # Pass the leader in a list if available, empty list otherwise
+            if sim_leader is not None:
+                platoon_list = [sim_leader]
+                # Force merging=True so IDM uses the leader
+                old_merging = sim_driver.merging
+                old_ignore = sim_driver.ignore_platoon_before_merge
+                sim_driver.merging = True
+                sim_driver.ignore_platoon_before_merge = False
+                
+                a_human = sim_driver.update(dt, platoon_vehicles=platoon_list, mode='planning')
+                
+                sim_driver.merging = old_merging
+                sim_driver.ignore_platoon_before_merge = old_ignore
+            else:
+                # No leader - free road driving
+                a_human = sim_driver.update(dt, platoon_vehicles=[], mode='planning')
             
             sim_veh.a_desired = a_human
             for _ in range(steps_per_dt):
@@ -137,8 +200,16 @@ class HumanDriver:
             
         return accel_sequence, state_sequence
 
-    def get_human_acceleration_and_state_prediction(self, dt: float, Np: int, vehicle: Vehicle) -> np.ndarray:
-        acc, _ = self.get_human_acceleration_and_state_sequence(dt, Np, vehicle)
+    def get_human_acceleration_and_state_prediction(
+        self, 
+        dt: float, 
+        Np: int, 
+        vehicle: Vehicle,
+        leader: Optional[Vehicle] = None
+    ) -> np.ndarray:
+        """Get single acceleration prediction (last step)."""
+        acc, _ = self.get_human_acceleration_and_state_sequence(dt, Np, vehicle, leader)
         return acc[-1] if len(acc) > 0 else 0.0
+
 
 __all__ = ['HumanDriver']

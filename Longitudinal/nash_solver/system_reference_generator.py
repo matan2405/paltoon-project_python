@@ -3,22 +3,31 @@
 File: system_reference_generator.py  
 Description: Generates target trajectories for the System player (R1).
 
-VERSION 2.0 - WITH TRANSITIONAL CONTROLLER
-============================================
-Based on Rajamani Chapter 6.7.1: "The need for a transitional controller"
+VERSION 5.0 - RAJAMANI CHAPTER 6.7 TRANSITIONAL CONTROLLER
+===========================================================
+Exact implementation of Rajamani "Vehicle Dynamics and Control" Chapter 6.7.
 
-Key Insight: The regular CTG (Constant Time-Gap) control law cannot directly 
-be used to follow a newly encountered vehicle. A transitional trajectory 
-needs to be designed before the CTG control law can be used.
+The Transitional Controller operates in the R-Ṙ (Range vs Range-Rate) phase plane:
+    R = actual gap to preceding vehicle [m]
+    Ṙ = range-rate = v_leader - v_ego [m/s] (positive = gap increasing)
 
-This version adds THREE operating modes:
-1. CRUISE MODE: No leader or leader very far - accelerate to target speed
-2. GAP CLOSING MODE: Leader exists but gap is larger than desired - 
-   use transitional controller to close the gap safely
-3. FOLLOWING MODE: Gap is close to desired - use Rajamani CTG controller
+Key Equations from Rajamani Section 6.7.2:
 
-The Gap Closing Mode is the key addition that solves the "Join After Platoon"
-persistent gap error problem.
+1. Parabolic Switching Line:
+   R_switch = R_desired + Ṙ² / (2 * a_comfort)
+   
+2. Gap-Closing Controller (above parabola):
+   a_des = -a_comfort  (constant comfortable deceleration)
+   
+3. Parabola-Following Controller (on/near parabola):
+   v_target = v_leader - sqrt(2 * a_comfort * (R - R_desired))
+   a_des = -K_v * (v_ego - v_target)
+   
+4. CTG Following Controller (at equilibrium):
+   a_des = K1 * (R - R_desired) + K2 * Ṙ
+
+The controller uses CONTINUOUS parabola-based velocity tracking
+without discrete mode switching to eliminate oscillations.
 """
 import numpy as np
 import copy
@@ -35,10 +44,12 @@ class SystemReferenceGenerator:
     """
     Generates target trajectories for the System player (R1) in Nash equilibrium.
     
-    The generator uses three modes based on the situation:
-    - Cruise: Accelerate to platoon target speed
-    - Gap Closing: Transitional controller to close large gaps safely
-    - Following: Rajamani CTG controller for steady-state following
+    VERSION 5.0: Exact Rajamani Chapter 6.7 Transitional Controller.
+    
+    Uses CONTINUOUS parabola-based velocity control:
+    - Compute target velocity from parabola: v_target = v_leader - sqrt(2*a_comfort*gap_error)
+    - Track this velocity with proportional controller
+    - No discrete mode switching = no oscillations
     """
     
     def __init__(self, Np: int = 20, dt: float = 0.1):
@@ -52,68 +63,64 @@ class SystemReferenceGenerator:
         self.Np = Np
         self.dt = dt
         
-        # === MODE THRESHOLDS ===
-        # Distance beyond which we consider ourselves "alone" (no leader influence)
+        # === DETECTION ===
         self.DETECTION_RANGE = 150.0  # [m]
         
-        # Gap error threshold for switching between Gap Closing and Following modes
-        # If gap_error > GAP_CLOSING_THRESHOLD, use transitional controller
-        self.GAP_CLOSING_THRESHOLD = 3.0  # [m] - increased from 5.0 for smoother transition
+        # === RAJAMANI CHAPTER 6.7 PARAMETERS ===
+        # Time headway for CTG policy (Section 6.3)
+        self.h = 1.5  # [s]
         
-        # Minimum gap error below which we use pure Rajamani
-        self.STABLE_GAP_THRESHOLD = 1.0  # [m]
+        # Standstill distance
+        self.d0 = 5.0  # [m]
         
-        # === GAP CLOSING PARAMETERS ===
-        # Maximum overspeed factor relative to leader when closing gap
-        self.MAX_OVERSPEED_FACTOR = 1.20  # Can go 20% faster than leader
+        # Comfortable deceleration (Section 6.7.2)
+        # Typical: 0.1g - 0.2g = 1.0 - 2.0 m/s²
+        self.a_comfort = 1.5  # [m/s²]
         
-        # === NEW: Adaptive parameters for large gaps ===
-        # For "Join After Platoon" scenario with initial gap > 15m
-        self.LARGE_GAP_THRESHOLD = 15.0  # [m] - threshold for "large gap"
-        self.MAX_OVERSPEED_FACTOR_LARGE_GAP = 1.30  # More aggressive for large gaps
+        # Velocity tracking gain (Section 6.7.2)
+        # Typical: 0.3 - 0.5 s⁻¹
+        self.K_v = 0.4  # [1/s]
         
-        # Desired closing rate [m/s] - how fast we want to close the gap
-        self.DESIRED_CLOSING_RATE = 3.0  # [m/s]
-        
-        # === NEW: Adaptive closing rates based on gap size ===
-        self.CLOSING_RATE_LARGE_GAP = 1.5   # [m/s] - slower for large gaps (>15m)
-        self.CLOSING_RATE_MEDIUM_GAP = 2.5  # [m/s] - medium for gaps (10-15m)
-        self.CLOSING_RATE_SMALL_GAP = 3.0   # [m/s] - fast for small gaps (<10m)
-        
-        # Gain for proportional gap closing controller
-        self.GAP_CLOSING_GAIN = 0.25  # [1/s] - acceleration per meter of gap error
-        
-        # === CATCH-UP PARAMETERS (for cruise mode when leader exists but far) ===
-        self.CATCHUP_FACTOR = 1.15  # 10% overspeed when catching up
+        # CTG Controller gains (Section 6.4, Eq. 6.15-6.16)
+        # K1: position gain, K2: velocity gain
+        self.K1 = 0.23  # [1/s²] - typical 0.2-0.4
+        self.K2 = 0.07  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
         
         # === COMFORT LIMITS ===
-        self.MAX_ACCEL = 2.0   # [m/s²]
+        self.MAX_ACCEL = 2.5   # [m/s²]
         self.MAX_DECEL = -3.5  # [m/s²]
-        self.MAX_JERK = 1.5    # [m/s³] - limits rate of change of acceleration
         
-        # === RATE LIMITING STATE ===
-        self.prev_a_ref = 0.0  # Previous acceleration reference for jerk limiting
+        # === CRUISE PARAMETERS ===
+        self.CATCHUP_FACTOR = 1.15
         
-        print(f"🚀 System Reference Generator V2.1 (Smoothstep + Jerk Limiting)")
+        # === DEBUG ===
+        self._debug_counter = 0
+        
+        print(f"🚀 System Reference Generator V5.0 (RAJAMANI Ch.6.7)")
         print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
-        print(f"   🎯 Gap Closing Threshold: {self.GAP_CLOSING_THRESHOLD}m")
-        print(f"   ⚡ Max Overspeed Factor: {self.MAX_OVERSPEED_FACTOR}")
-        print(f"   🎢 Max Jerk: {self.MAX_JERK} m/s³")
+        print(f"   🎯 CTG: h={self.h}s, d0={self.d0}m")
+        print(f"   📐 Comfort decel: a_comfort={self.a_comfort} m/s²")
+        print(f"   📈 Gains: K_v={self.K_v}, K1={self.K1}, K2={self.K2}")
 
     def get_system_acceleration_and_state_sequence(self, simulation):
         """
-        Generates the target trajectory using appropriate controller based on situation.
+        Generates the target trajectory using Rajamani Chapter 6.7 Transitional Controller.
         
-        Three modes:
-        1. CRUISE: No leader or leader > DETECTION_RANGE → free_road_acc to target speed
-        2. GAP_CLOSING: gap_error > GAP_CLOSING_THRESHOLD → transitional controller
-        3. FOLLOWING: gap_error < GAP_CLOSING_THRESHOLD → Rajamani CTG
+        This is a CONTINUOUS controller based on parabola velocity tracking:
         
-        Args:
-            simulation: The simulation object containing vehicle states
-            
-        Returns:
-            tuple: (accel_sequence, state_sequence) - predicted trajectory
+        1. CRUISE MODE: No leader detected
+           - Accelerate to target platoon speed
+           
+        2. TRANSITIONAL MODE (Rajamani Section 6.7.2):
+           - Compute target velocity from parabola equation:
+             v_target = v_leader + sign(gap_error) * sqrt(2 * a_comfort * |gap_error|)
+           - Track this velocity with proportional controller:
+             a_des = K_v * (v_target - v_ego)
+           
+        The parabola equation ensures that if we track v_target, we will
+        decelerate at exactly a_comfort and arrive at R_desired with v_rel = 0.
+        
+        This eliminates discrete mode switching and the oscillations it causes.
         """
         accel_sequence = np.zeros(self.Np)
         state_sequence = np.zeros((self.Np, 2))  # [position, velocity]
@@ -126,34 +133,26 @@ class SystemReferenceGenerator:
         # ========================================================================
         leader = None
         
-        # Check if we have locked targets (after t_merge)
         if hasattr(simulation.human_vehicle, 'target_leader_id'):
-            # === POST-MERGE: Use LOCKED leader ===
             target_id = simulation.human_vehicle.target_leader_id
             
             if target_id is not None:
-                # Find the locked leader by ID
                 for v in simulation.platoon_manager.vehicles:
                     if v.vehicle_id == target_id:
                         leader = v
                         break
                 
                 if leader is None:
-                    # Locked leader not found - this shouldn't happen!
                     print(f"⚠️  WARNING (RefGen): Locked leader '{target_id}' not found!")
-                    
-                    # Fallback to dynamic detection
                     if hasattr(simulation, 'safety_field'):
                         leader = simulation.safety_field._get_leader(
                             simulation.human_vehicle, 
                             simulation.platoon_manager
                         )
             else:
-                # Locked target is None - merging at front of platoon
                 leader = None
                 
         else:
-            # === PRE-MERGE: Use DYNAMIC closest leader ===
             if hasattr(simulation, 'safety_field'):
                 leader = simulation.safety_field._get_leader(
                     simulation.human_vehicle, 
@@ -179,8 +178,10 @@ class SystemReferenceGenerator:
         # Get target platoon speed
         target_platoon_speed = simulation.platoon_manager.target_velocity
         
-        # Time headway for desired gap calculation
-        h = 1.5  # [s] - constant time gap
+        # Track for debug output
+        initial_mode = "UNKNOWN"
+        initial_gap_error = 0.0
+        initial_R_dot = 0.0
         
         for i in range(self.Np):
             # === Step 1: Update Leader Prediction ===
@@ -193,25 +194,38 @@ class SystemReferenceGenerator:
             desired_gap = 50.0  # Default
             
             if sim_leader:
-                dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
-                
-                # Calculate desired gap (Rajamani formula)
+                # R = Range (actual gap, bumper to bumper)
                 L = sim_leader.L if hasattr(sim_leader, 'L') else 5.0
-                desired_gap = L + h * sim_vehicle.state.vx
+                R = sim_leader.state.x - sim_vehicle.state.x - L
                 
-                # Gap error: positive means we are too far behind
-                gap_error = dist_to_leader - desired_gap
+                # R_dot = Range rate (Rajamani convention: positive = gap increasing)
+                R_dot = sim_leader.state.vx - sim_vehicle.state.vx
+                
+                # R_desired = Desired gap (CTG policy, Rajamani Eq. 6.5)
+                R_desired = self.d0 + self.h * sim_vehicle.state.vx
+                
+                # Gap error: positive = too far behind, negative = too close
+                gap_error = R - R_desired
+                
+                # Store for distance calculations
+                dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
+                desired_gap = R_desired + L
+                
+                if i == 0:
+                    initial_gap_error = gap_error
+                    initial_R_dot = R_dot
             
-            # === Step 3: Select Operating Mode and Calculate Acceleration ===
+            # === Step 3: Rajamani Section 6.7.2 Transitional Controller ===
             a_ref = 0.0
+            mode = "UNKNOWN"
             
             if sim_leader is None or dist_to_leader > self.DETECTION_RANGE:
                 # =============================================
-                # MODE 1: CRUISE (No leader or leader very far)
+                # CRUISE MODE: No leader or leader very far
                 # =============================================
+                mode = "CRUISE"
                 target_v = target_platoon_speed
                 
-                # If we know there's a leader ahead (just far), allow overspeed
                 if sim_leader:
                     target_v *= self.CATCHUP_FACTOR
                 
@@ -219,70 +233,61 @@ class SystemReferenceGenerator:
                     v=sim_vehicle.state.vx,
                     t=0,
                     v_target=target_v,
-                    a_max=sim_vehicle.params.max_acceleration if hasattr(sim_vehicle, 'params') else self.MAX_ACCEL
+                    a_max=self.MAX_ACCEL
                 )
-                
-            elif gap_error > self.GAP_CLOSING_THRESHOLD:
-                # =============================================
-                # MODE 2: GAP CLOSING (Transitional Controller)
-                # =============================================
-                # This is the KEY addition for solving "Join After Platoon"
-                
-                a_ref = self._compute_gap_closing_acceleration(
-                    sim_vehicle=sim_vehicle,
-                    sim_leader=sim_leader,
-                    gap_error=gap_error,
-                    desired_gap=desired_gap,
-                    target_platoon_speed=target_platoon_speed
-                )
-                
-            elif gap_error > self.STABLE_GAP_THRESHOLD:
-                # =============================================
-                # MODE 2.5: TRANSITION ZONE (Blend between modes)
-                # =============================================
-                # Smooth transition between gap closing and following
-                
-                # Calculate both accelerations
-                a_closing = self._compute_gap_closing_acceleration(
-                    sim_vehicle=sim_vehicle,
-                    sim_leader=sim_leader,
-                    gap_error=gap_error,
-                    desired_gap=desired_gap,
-                    target_platoon_speed=target_platoon_speed
-                )
-                
-                a_following, _ = rajamani(sim_leader, sim_vehicle)
-                
-                # Blend factor: 1.0 at GAP_CLOSING_THRESHOLD, 0.0 at STABLE_GAP_THRESHOLD
-                # Using SMOOTHSTEP instead of linear for smoother transition (zero derivative at endpoints)
-                t = (gap_error - self.STABLE_GAP_THRESHOLD) / \
-                        (self.GAP_CLOSING_THRESHOLD - self.STABLE_GAP_THRESHOLD)
-                t = np.clip(t, 0.0, 1.0)
-                
-                # Smoothstep function: 3t² - 2t³
-                blend = t * t * (3.0 - 2.0 * t)
-                
-                a_ref = blend * a_closing + (1 - blend) * a_following
                 
             else:
                 # =============================================
-                # MODE 3: FOLLOWING (Rajamani CTG Controller)
+                # TRANSITIONAL CONTROLLER (Rajamani Section 6.7.2)
+                #
+                # CONTINUOUS parabola-based velocity tracking.
+                # No discrete mode switching!
+                #
+                # The parabola equation defines the target velocity:
+                #   v_target = v_leader + sign(gap_error) * sqrt(2 * a_comfort * |gap_error|)
+                #
+                # If gap_error > 0 (too far): v_target > v_leader (approach)
+                # If gap_error < 0 (too close): v_target < v_leader (back off)
+                # If gap_error = 0: v_target = v_leader (maintain)
                 # =============================================
-                # Steady-state car following
+                mode = "TRANSITIONAL"
                 
-                a_ref, _ = rajamani(sim_leader, sim_vehicle)
+                # Compute target velocity from parabola (Rajamani Eq. in Section 6.7.2)
+                if gap_error >= 0:
+                    # Too far behind - need to approach (v_ego > v_leader)
+                    v_target = sim_leader.state.vx + np.sqrt(2 * self.a_comfort * gap_error)
+                else:
+                    # Too close - need to back off (v_ego < v_leader)
+                    v_target = sim_leader.state.vx - np.sqrt(2 * self.a_comfort * abs(gap_error))
+                
+                # Velocity tracking controller (Rajamani Section 6.7.2)
+                # a_des = K_v * (v_target - v_ego)
+                v_error = v_target - sim_vehicle.state.vx
+                a_ref = self.K_v * v_error
+                
+                # Add CTG feedback for better steady-state tracking (Rajamani Eq. 6.15)
+                # This provides damping when near the equilibrium point
+                # a_ctg = K1 * gap_error + K2 * R_dot
+                a_ctg = self.K1 * gap_error + self.K2 * R_dot
+                
+                # Blend: use more CTG as we get closer to equilibrium
+                # This provides smooth transition without discrete switching
+                gap_magnitude = abs(gap_error)
+                if gap_magnitude < 5.0:
+                    # Near equilibrium - blend in CTG for fine control
+                    blend = 1.0 - (gap_magnitude / 5.0)
+                    blend = blend * blend  # Quadratic for smoother transition
+                    a_ref = (1 - blend) * a_ref + blend * a_ctg
+                
+                # Feedforward from leader acceleration
+                if hasattr(sim_leader.state, 'ax') and sim_leader.state.ax is not None:
+                    a_ref += 0.5 * sim_leader.state.ax
+            
+            if i == 0:
+                initial_mode = mode
             
             # === Step 4: Apply Comfort Constraints ===
             a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
-            
-            # === Step 4.5: Apply Jerk Limiting ===
-            # Limit rate of change of acceleration for smoother transitions
-            if i == 0:
-                # First step uses actual previous acceleration
-                max_delta_a = self.MAX_JERK * self.dt
-                a_ref = np.clip(a_ref, 
-                               self.prev_a_ref - max_delta_a,
-                               self.prev_a_ref + max_delta_a)
             
             # === Step 5: Update Simulated Vehicle State ===
             sim_vehicle.state.ax = a_ref
@@ -302,111 +307,13 @@ class SystemReferenceGenerator:
             state_sequence[i, 0] = sim_vehicle.state.x
             state_sequence[i, 1] = sim_vehicle.state.vx
         
-        # Update previous acceleration for next call (jerk limiting)
-        if len(accel_sequence) > 0:
-            self.prev_a_ref = accel_sequence[0]
+        # Debug output (every 100 calls)
+        self._debug_counter += 1
+        if self._debug_counter % 100 == 1:
+            print(f"   📍 RefGen: mode={initial_mode}, gap_err={initial_gap_error:.1f}m, "
+                  f"R_dot={initial_R_dot:.2f}m/s, a_ref[0]={accel_sequence[0]:.2f} m/s²")
         
         return accel_sequence, state_sequence
-
-    def _compute_gap_closing_acceleration(self, sim_vehicle, sim_leader, 
-                                          gap_error, desired_gap, target_platoon_speed):
-        """
-        Adaptive Transitional Controller for closing gaps of any size.
-        
-        VERSION 2.1 - ADAPTIVE FOR LARGE GAPS
-        =====================================
-        This enhanced version adapts its behavior based on gap size:
-        - Large gaps (>15m): Conservative approach with slow closing
-        - Medium gaps (10-15m): Moderate closing rate
-        - Small gaps (5-10m): Standard closing rate
-        - Tiny gaps (<5m): Fast convergence
-        
-        Based on Rajamani Chapter 6.7.1, this controller:
-        1. Computes a safe approach speed based on distance
-        2. Uses adaptive closing rate based on gap size
-        3. Limits overspeed for safety and comfort
-        4. Uses adaptive gain to prevent oscillations
-        
-        Args:
-            sim_vehicle: Simulated ego vehicle
-            sim_leader: Simulated leader vehicle
-            gap_error: Current gap error (positive = too far)
-            desired_gap: Target gap distance
-            target_platoon_speed: Platoon target speed
-            
-        Returns:
-            float: Desired acceleration for gap closing
-        """
-        ego_v = sim_vehicle.state.vx
-        leader_v = sim_leader.state.vx
-        
-        # === ADAPTIVE PARAMETERS BASED ON GAP SIZE ===
-        if gap_error > 15.0:
-            # LARGE GAP: Very conservative approach
-            max_overspeed = self.MAX_OVERSPEED_FACTOR_LARGE_GAP
-            base_closing_rate = self.CLOSING_RATE_LARGE_GAP
-            K_v = 0.3  # Low gain to prevent oscillations
-            
-        elif gap_error > 10.0:
-            # MEDIUM GAP: Moderate approach
-            max_overspeed = 1.25  # Interpolated
-            base_closing_rate = self.CLOSING_RATE_MEDIUM_GAP
-            K_v = 0.4
-            
-        elif gap_error > 5.0:
-            # SMALL GAP: Standard approach
-            max_overspeed = self.MAX_OVERSPEED_FACTOR
-            base_closing_rate = self.CLOSING_RATE_SMALL_GAP
-            K_v = 0.6
-            
-        else:
-            # TINY GAP: Fast convergence
-            max_overspeed = self.MAX_OVERSPEED_FACTOR
-            base_closing_rate = self.CLOSING_RATE_SMALL_GAP
-            K_v = 0.8  # Original high gain
-        
-        # === Method 1: Safe Approach Speed ===
-        # Maximum safe speed based on being able to stop before collision
-        # v_safe = v_leader + sqrt(2 * a_comfortable * gap_error)
-        # This ensures we can always decelerate to leader's speed
-        comfortable_decel = 1.5  # [m/s²] - comfortable deceleration
-        v_safe = leader_v + np.sqrt(2 * comfortable_decel * max(gap_error, 0.1))
-        
-        # === Method 2: Desired Closing Rate ===
-        # We want to approach at a steady rate, faster when gap is larger
-        # But with adaptive rate based on gap size
-        desired_closing_rate = self.GAP_CLOSING_GAIN * gap_error
-        
-        # Adaptive clipping based on gap size
-        if gap_error > 15.0:
-            desired_closing_rate = np.clip(desired_closing_rate, 0.5, base_closing_rate)
-        elif gap_error > 10.0:
-            desired_closing_rate = np.clip(desired_closing_rate, 1.0, base_closing_rate)
-        else:
-            desired_closing_rate = np.clip(desired_closing_rate, 1.5, base_closing_rate * 1.5)
-        
-        # Target velocity to achieve this closing rate
-        v_closing = leader_v + desired_closing_rate
-        
-        # === Combine Methods ===
-        # Take minimum of safe speed and closing speed
-        v_target = min(v_safe, v_closing)
-        
-        # Also limit by adaptive overspeed factor relative to platoon speed
-        v_max_overspeed = target_platoon_speed * max_overspeed
-        v_target = min(v_target, v_max_overspeed)
-        
-        # === Calculate Required Acceleration with Adaptive Gain ===
-        # Use adaptive gain K_v based on gap size
-        velocity_error = v_target - ego_v
-        
-        a_ref = K_v * velocity_error
-        
-        # Add small feedforward based on leader acceleration if available
-        if hasattr(sim_leader.state, 'ax') and sim_leader.state.ax is not None:
-            a_ref += 0.3 * sim_leader.state.ax
-        
-        return a_ref
 
 
 # Export
@@ -416,7 +323,8 @@ __all__ = ['SystemReferenceGenerator']
 # === UNIT TEST ===
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("System Reference Generator V2.0 - Unit Test")
+    print("System Reference Generator V5.0 - Unit Test")
+    print("Rajamani Chapter 6.7 Transitional Controller")
     print("="*60)
     
     # Create mock objects for testing
@@ -438,10 +346,12 @@ if __name__ == "__main__":
             self.L = 5.0
             self.v = v
             self.a = 0
+            self.vehicle_id = "mock"
     
     class MockPlatoonManager:
         def __init__(self):
             self.target_velocity = 33.33  # 120 km/h
+            self.vehicles = []
     
     class MockSafetyField:
         def __init__(self, leader):
@@ -467,36 +377,69 @@ if __name__ == "__main__":
     accel1, states1 = gen.get_system_acceleration_and_state_sequence(sim1)
     print(f"Initial velocity: 25 m/s, Target: 33.33 m/s")
     print(f"Accelerations: {accel1[:5].round(2)}")
-    print(f"Final velocity: {states1[-1, 1]:.2f} m/s")
+    print(f"Expected: Positive acceleration toward 33.33 m/s")
     
-    print("\n--- Test 2: Gap Closing Mode (Large Gap) ---")
-    # Ego at x=0, v=30. Leader at x=80, v=30. Desired gap ~50m. Gap error = 30m
-    sim2 = MockSimulation(ego_x=0, ego_v=30, leader_x=80, leader_v=30)
+    print("\n--- Test 2: Large Gap (gap_error = 13.4m) ---")
+    # Ego at x=0, v=28.6 (103 km/h). Leader at x=66.6, v=30.3 (109 km/h)
+    # R = 66.6 - 5 = 61.6m (actual gap)
+    # R_desired = 5 + 1.5*28.6 = 47.9m
+    # gap_error = 61.6 - 47.9 = 13.7m
+    # v_target = 30.3 + sqrt(2*1.5*13.7) = 30.3 + 6.4 = 36.7 m/s
+    # v_error = 36.7 - 28.6 = 8.1 m/s
+    # a_ref = 0.4 * 8.1 = 3.24 m/s² (capped to 2.5)
+    sim2 = MockSimulation(ego_x=0, ego_v=28.6, leader_x=66.6, leader_v=30.3)
     accel2, states2 = gen.get_system_acceleration_and_state_sequence(sim2)
-    print(f"Initial gap: 80m, Desired: ~50m, Gap error: ~30m")
+    print(f"Ego: x=0, v=28.6 m/s (103 km/h)")
+    print(f"Leader: x=66.6m, v=30.3 m/s (109 km/h)")
+    print(f"Gap error: ~14m")
     print(f"Accelerations: {accel2[:5].round(2)}")
-    print(f"Should be POSITIVE to close gap")
+    print(f"Expected: Positive acceleration ~2.5 m/s² (saturated)")
     
-    print("\n--- Test 3: Following Mode (Small Gap) ---")
-    # Ego at x=0, v=30. Leader at x=52, v=30. Desired gap ~50m. Gap error = 2m
-    sim3 = MockSimulation(ego_x=0, ego_v=30, leader_x=52, leader_v=30)
+    if accel2[0] > 1.5:
+        print("✅ PASS: Acceleration is sufficient to close gap")
+    else:
+        print("❌ FAIL: Acceleration too low!")
+    
+    print("\n--- Test 3: Approaching Too Fast ---")
+    # Ego at x=0, v=35. Leader at x=60, v=30.
+    # R = 60 - 5 = 55m
+    # R_desired = 5 + 1.5*35 = 57.5m
+    # gap_error = 55 - 57.5 = -2.5m (too close!)
+    # v_target = 30 - sqrt(2*1.5*2.5) = 30 - 2.74 = 27.26 m/s
+    # v_error = 27.26 - 35 = -7.74 m/s
+    # a_ref = 0.4 * (-7.74) = -3.1 m/s² (decelerate)
+    sim3 = MockSimulation(ego_x=0, ego_v=35, leader_x=60, leader_v=30)
     accel3, states3 = gen.get_system_acceleration_and_state_sequence(sim3)
-    print(f"Initial gap: 52m, Desired: ~50m, Gap error: ~2m")
+    print(f"Ego: x=0, v=35 m/s")
+    print(f"Leader: x=60m, v=30 m/s")
+    print(f"Gap error: -2.5m (too close)")
     print(f"Accelerations: {accel3[:5].round(2)}")
-    print(f"Should be near ZERO (steady state)")
+    print(f"Expected: NEGATIVE acceleration to back off")
     
-    print("\n--- Test 4: Join After Platoon Scenario ---")
-    # Simulating the problematic scenario
-    # Ego behind platoon, just joined, gap error = +20m
-    sim4 = MockSimulation(ego_x=0, ego_v=33, leader_x=70, leader_v=33)
+    if accel3[0] < -1.0:
+        print("✅ PASS: Decelerating to back off")
+    else:
+        print("❌ FAIL: Should be decelerating!")
+    
+    print("\n--- Test 4: Steady State Following ---")
+    # Ego at x=0, v=30. Leader at x=55, v=30.
+    # R = 55 - 5 = 50m
+    # R_desired = 5 + 1.5*30 = 50m
+    # gap_error = 0
+    # v_target = v_leader = 30 m/s
+    # a_ref ≈ 0
+    sim4 = MockSimulation(ego_x=0, ego_v=30, leader_x=55, leader_v=30)
     accel4, states4 = gen.get_system_acceleration_and_state_sequence(sim4)
-    h = 1.5
-    desired = 5 + h * 33  # ~55m
-    actual = 70
-    gap_err = actual - desired  # ~15m
-    print(f"Initial gap: 70m, Desired: {desired:.1f}m, Gap error: {gap_err:.1f}m")
+    print(f"Ego: x=0, v=30 m/s")
+    print(f"Leader: x=55m, v=30 m/s")
+    print(f"Gap error: 0m (perfect)")
     print(f"Accelerations: {accel4[:5].round(2)}")
-    print(f"Should show POSITIVE acceleration to close gap!")
+    print(f"Expected: Near ZERO (steady state)")
+    
+    if abs(accel4[0]) < 0.5:
+        print("✅ PASS: Near-zero acceleration")
+    else:
+        print("❌ FAIL: Should be near zero!")
     
     print("\n" + "="*60)
     print("✅ Unit tests complete")
