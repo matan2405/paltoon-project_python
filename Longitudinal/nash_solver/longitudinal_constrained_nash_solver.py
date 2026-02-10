@@ -420,22 +420,18 @@ class ConstrainedLongitudinalNashSolver:
         """
         Solve the constrained Nash equilibrium with proper λ incorporation.
         
-        KEY INSIGHT from Li et al. (2019):
-        ==================================
-        The authority ratio λ affects Q2 = λ * Q1, but the critical effect is that
-        when λ is HIGH, Player 2 (human) should be "pulled" toward Player 1's reference.
+        Nash Game Structure (Li et al. 2019):
+        =====================================
+        Player 1 (System): min J1 = ||z - r1||²_Q1 + R1||u1||² + S1||u2||²
+        Player 2 (Human):  min J2 = ||z - r2||²_{λQ1} + R2||u2||² + S2||u1||²
         
-        We achieve this by blending the references:
-        - At low λ: Player 2 tracks their own reference R2
-        - At high λ: Player 2 tracks the system reference R1
+        The authority ratio λ affects Q2 = λ * Q1:
+        - Low λ (safe): Human has freedom, small penalty for deviation from r2
+        - High λ (danger): Human strongly penalized for deviating from r2
         
-        The effective reference for Player 2 becomes:
-            R2_effective = α * R1 + (1-α) * R2
-        where α = λ / (1 + λ)
-        
-        This makes the cost function work correctly:
-        - High λ → R2_eff ≈ R1 → Player 2 is forced toward system's trajectory
-        - Low λ → R2_eff ≈ R2 → Player 2 follows their own preference
+        Each player tracks their OWN reference (no blending).
+        The cooperation emerges from the cross-coupling terms S1, S2 and
+        the final authority blending: u_shared = α*u1 + (1-α)*u2
         
         Args:
             x0: Current state [position, velocity]
@@ -460,16 +456,15 @@ class ConstrainedLongitudinalNashSolver:
         self.last_lambda_used = lambda_used
         self.constraint_stats['lambda_level_usage'][lambda_used] += 1
         
-        # Compute authority factor
+        # Compute authority factor (stored for diagnostics)
         alpha = lambda_used / (1.0 + lambda_used)  # α ∈ [0, 1]
         
         # Flatten references
         r1 = R1_ref.flatten()
-        r2_original = R2_ref.flatten()
+        r2 = R2_ref.flatten()
         
-        # CRITICAL: Blend references based on authority
-        # When λ is high (danger), Player 2's effective reference moves toward R1
-        r2_effective = alpha * r1 + (1.0 - alpha) * r2_original
+        # NOTE: No reference blending - each player tracks their own reference.
+        # The λ effect comes only from Q2 = λ * Q1 scaling in the cost function.
         
         # Free response (z without control)
         z_free = self.U @ x0
@@ -478,9 +473,8 @@ class ConstrainedLongitudinalNashSolver:
         # Player 1: always tracks R1
         q1 = -2 * self.H.T @ self.Q1_full @ (r1 - z_free)
         
-        # Player 2: tracks R2_effective (blended based on authority)
-        # Note: The λ in P22 provides additional weighting, r2_effective provides the target
-        q2 = -2 * lambda_used * self.H.T @ self.Q1_full @ (r2_effective - z_free)
+        # Player 2: tracks R2 but with λ scaling in Q2
+        q2 = -2 * lambda_used * self.H.T @ self.Q1_full @ (r2 - z_free)
         
         q_stacked = np.concatenate([q1, q2])
         
