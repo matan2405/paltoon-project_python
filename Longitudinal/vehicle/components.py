@@ -10,21 +10,22 @@ from typing import Tuple
 
 @dataclass
 class VehicleParameters:
-    """Audi TT 2.0 TFSI parameters from Unity code"""
+    """Audi TT Coupé 2.0 TFSI (230PS) parameters - from official technical data"""
     # Vehicle dimensions
-    mass: float = 1305.0  # kg
-    length: float = 4.177  # m
-    width: float = 1.832  # m
-    height: float = 1.353  # m
+    mass: float = 1305.0  # kg (kerb weight without driver)
+    length: float = 4.177  # m (overall length)
+    width: float = 1.832  # m (overall width)
+    height: float = 1.353  # m (overall height)
     wheelbase: float = 2.505  # m
-    track_width: float = 1.572  # m
+    track_width: float = 1.572  # m (front track)
+    track_width_rear: float = 1.555  # m (rear track)
     
     # Center of gravity distances
     lf: float = 1.2525  # distance from CG to front axle
     lr: float = 1.2525  # distance from CG to rear axle
     
     # Aerodynamics
-    drag_coefficient: float = 0.30
+    drag_coefficient: float = 0.32  # Cd value from technical data
     frontal_area: float = 2.09  # m^2
     
     # Tire parameters
