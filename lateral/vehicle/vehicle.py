@@ -52,25 +52,24 @@ class Vehicle:
     def _build_state_space_matrices(self, dt: float = 0.01):
         """Build continuous and discrete-time state-space matrices."""
         p = self.params
-        vx = max(self.vx, 1.0)
+        vx = max(self.vx, 0.001)  # Avoid division by zero
         
-        # Continuous-time A matrix (2-DOF bicycle model)
-        a22 = -(p.Cf + p.Cr) / (p.mass * vx)
-        a23 = (p.Cf + p.Cr) / p.mass
-        a24 = (-p.lf * p.Cf + p.lr * p.Cr) / (p.mass * vx)
-        a42 = (-p.lf * p.Cf + p.lr * p.Cr) / (p.Iz * vx)
-        a43 = (p.lf * p.Cf - p.lr * p.Cr) / p.Iz
-        a44 = -(p.lf**2 * p.Cf + p.lr**2 * p.Cr) / (p.Iz * vx)
+        # Continuous-time A matrix (2-DOF bicycle model with kinematic coupling)
+        a22 = -2 * (p.Cf + p.Cr) / (p.mass * vx)
+        a24 = -vx - (2 * p.Cf * p.lf - 2 * p.Cr * p.lr) / (p.mass * vx)
+        a42 = -(2 * p.lf * p.Cf - 2 * p.lr * p.Cr) / (p.Iz * vx)
+        a44 = -(2 * p.lf**2 * p.Cf + 2 * p.lr**2 * p.Cr) / (p.Iz * vx)
         
+        # Row 0: dy/dt = y_dot + vx*psi (kinematic coupling for global Y position)
         self.A_c = np.array([
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, a22, a23, a24],
+            [0.0, 1.0, vx,  0.0],
+            [0.0, a22, 0.0, a24],
             [0.0, 0.0, 0.0, 1.0],
-            [0.0, a42, a43, a44]
+            [0.0, a42, 0.0, a44]
         ])
         
-        b2 = p.Cf / p.mass
-        b4 = (p.lf * p.Cf) / p.Iz
+        b2 = 2 * p.Cf / p.mass
+        b4 = 2 * (p.lf * p.Cf) / p.Iz
         self.B_c = np.array([[0.0], [b2], [0.0], [b4]])
         
         self.C = np.array([
