@@ -82,7 +82,6 @@ class LateralSimulation:
             Np=self.Np, 
             Nu=self.Nc, 
             dt=self.dt_nash,
-            vx=self.human_vehicle.vx,
             driver_type='normal'
         )
         
@@ -156,7 +155,6 @@ class LateralSimulation:
             Np=self.Np, 
             Nu=self.Nc, 
             dt=self.dt_nash,
-            vx=self.human_vehicle.vx,
             driver_type=driver_type
         )
         

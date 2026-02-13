@@ -30,12 +30,16 @@ Performance:
 - With Lambda: ~2-3ms per solve (DPP compliant)
 """
 
+import os
+import sys
 import numpy as np
 import cvxpy as cp
 from typing import Tuple, Dict, Optional
 from dataclasses import dataclass
-from scipy.linalg import expm
 
+# Add parent directory (lateral/) to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vehicle import Vehicle
 
 @dataclass
 class ConstrainedLateralNashParams:
@@ -48,17 +52,10 @@ class ConstrainedLateralNashParams:
     # Prediction horizons - REDUCED for speed
     Np: int = 20              # Prediction horizon (was 20)
     Nu: int = 10               # Control horizon (was 10)
-    dt: float = 0.1           # Time step [s]
+    dt: float = 0.01           # Time step [s]
     
-    # Vehicle parameters
-    vx: float = 20.0          # Longitudinal velocity [m/s]
-    L: float = 2.7            # Wheelbase [m]
-    Lf: float = 1.2           # Front axle to CG [m]
-    Lr: float = 1.5           # Rear axle to CG [m]
-    m: float = 1500.0         # Mass [kg]
-    Iz: float = 2500.0        # Yaw inertia [kg*m²]
-    Cf: float = 80000.0       # Front cornering stiffness [N/rad]
-    Cr: float = 80000.0       # Rear cornering stiffness [N/rad]
+    # Note: Vehicle parameters (vx, m, Iz, Cf, Cr, etc.) are obtained from
+    # the Vehicle object passed to the solver - no duplication needed.
     
     # Cost weights - FROM WORKING SYSTEM (VERIFIED!)
     # These weights produce realistic steering angles that meet all requirements:
@@ -128,14 +125,20 @@ class ConstrainedLateralNashSolver:
     We pre-compute P for discrete λ values and select the closest at runtime.
     """
     
-    def __init__(self, vehicle=None, params: ConstrainedLateralNashParams = None):
+    def __init__(self, vehicle: Vehicle, params: ConstrainedLateralNashParams = None):
         """
         Initialize constrained lateral Nash solver.
         
         Args:
-            vehicle: Vehicle model (optional, for API compatibility)
+            vehicle: Vehicle model (REQUIRED - provides state-space matrices)
             params: Solver parameters
+        
+        Raises:
+            ValueError: If vehicle is not provided
         """
+        if vehicle is None:
+            raise ValueError("Vehicle must be provided - it supplies the state-space matrices")
+        
         self.params = params or ConstrainedLateralNashParams()
         self.vehicle = vehicle
         
@@ -188,47 +191,18 @@ class ConstrainedLateralNashSolver:
         print(f"   Pre-computed problems: {len(self.params.lambda_levels)}")
     
     def _build_state_space(self):
-        """Build discrete-time bicycle model state-space."""
+        """Get discrete-time bicycle model state-space from vehicle.
+        
+        Uses the vehicle's get_state_space_matrices() method to ensure
+        consistency between the Nash solver and vehicle dynamics.
+        """
         p = self.params
-        vx = p.vx
-        m, Iz = p.m, p.Iz
-        Lf, Lr = p.Lf, p.Lr
-        Cf, Cr = p.Cf, p.Cr
-        dt = p.dt
         
-        # Continuous-time bicycle model
-        Ac = np.array([
-            [0, 1, 0, 0],
-            [0, -(Cf+Cr)/(m*vx), (Cf+Cr)/m, -(Lf*Cf-Lr*Cr)/(m*vx)],
-            [0, 0, 0, 1],
-            [0, -(Lf*Cf-Lr*Cr)/(Iz*vx), (Lf*Cf-Lr*Cr)/Iz, -(Lf**2*Cf+Lr**2*Cr)/(Iz*vx)]
-        ])
-        
-        Bc = np.array([
-            [0],
-            [Cf/m],
-            [0],
-            [Lf*Cf/Iz]
-        ])
-        
-        # Discretize using matrix exponential
-        n = 4
-        M = np.zeros((n+1, n+1))
-        M[:n, :n] = Ac * dt
-        M[:n, n:] = Bc * dt
-        
-        expM = expm(M)
-        self.A = expM[:n, :n]
-        self.B = expM[:n, n:]
-        
-        # Output: [y, psi]
-        self.C = np.array([
-            [1, 0, 0, 0],
-            [0, 0, 1, 0]
-        ])
-        
-        self.nx = 4
-        self.nz = 2
+        # Get matrices from vehicle (no code duplication!)
+        self.A, self.B, self.C = self.vehicle.get_state_space_matrices(p.dt)
+        self.nx = self.A.shape[0]
+        self.nz = self.C.shape[0]
+        print(f"   Using vehicle's state-space matrices (dt={p.dt}s)")
     
     def _build_prediction_matrices(self):
         """Build prediction matrices U, H."""
@@ -669,8 +643,17 @@ if __name__ == "__main__":
     print("Lambda-Aware Lateral Nash MPC Solver V5.0 - Integration Test")
     print("="*70)
     
-    params = ConstrainedLateralNashParams(Np=10, Nu=5, dt=0.1, vx=20.0)
-    solver = ConstrainedLateralNashSolver(params=params)
+    # Create a test vehicle (required for solver)
+    test_vehicle = Vehicle(
+        initial_y=0.0,
+        initial_psi=0.0,
+        initial_x=0.0,
+        vehicle_id="TestVehicle",
+        longitudinal_velocity=20.0
+    )
+    
+    params = ConstrainedLateralNashParams(Np=10, Nu=5, dt=0.1)
+    solver = ConstrainedLateralNashSolver(vehicle=test_vehicle, params=params)
     
     # Test 1: Basic solve with different lambda values
     print("\n📊 Test 1: Nash solve with varying λ")
