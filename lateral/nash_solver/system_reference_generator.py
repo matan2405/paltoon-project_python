@@ -24,6 +24,10 @@ from typing import List, Dict, Tuple, Optional
 from enum import Enum
 from dataclasses import dataclass
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import LANE_WIDTH
+
 
 class TrajectoryPhase(Enum):
     CRUISE = "CRUISE"
@@ -89,8 +93,8 @@ class SystemReferenceGenerator:
         self.Np = Np
         self.dt = dt
         
-        # Lane configuration
-        self.lane_width = 3.5
+        # Lane configuration (from config.py)
+        self.lane_width = LANE_WIDTH
         self.target_lane_y = 0.0
         
         # Base lane change duration (will be adjusted dynamically)
