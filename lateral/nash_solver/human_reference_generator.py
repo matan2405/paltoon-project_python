@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH
+from config import LANE_WIDTH, NOMINAL_VELOCITY
 
 
 class HumanTrajectoryPhase(Enum):
@@ -106,7 +106,7 @@ class HumanReferenceGenerator:
         self._lane_change_start_time = None
         self._lane_change_start_y = None
         self._current_time = 0.0
-        self._current_vx = 20.0
+        self._current_vx = NOMINAL_VELOCITY
         
         print(f"👤 Human Reference Generator V3.0 (Heading-Constrained) Initialized")
         print(f"   Driver type: {driver_type}, Base T_lc={self.lane_change_duration}s")

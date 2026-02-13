@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 import sys
 import os
 
+from config import NOMINAL_VELOCITY
 from unified_lateral_controller import UnifiedLateralController
 from vehicle import Vehicle
 from control import PlatoonManager, PlatoonParams
@@ -45,7 +46,7 @@ def run_lane_change_test(driver_type: str,
     
     # Parameters
     dt = 0.1
-    vx = 20.0
+    vx = NOMINAL_VELOCITY
     target_y = 0.0
     
     # Initialize vehicle at y=3.5m (one lane over)

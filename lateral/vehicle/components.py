@@ -6,6 +6,10 @@ VERSION 2.0
 import numpy as np
 from dataclasses import dataclass
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import NOMINAL_VELOCITY
+
 
 @dataclass
 class VehicleParameters:
@@ -53,7 +57,7 @@ class VehicleState:
         self.psi = 0.0
         self.psi_dot = 0.0
         self.x = 0.0
-        self.vx = 20.0
+        self.vx = NOMINAL_VELOCITY
         self.delta = 0.0
         self.ay = 0.0
         self.beta = 0.0

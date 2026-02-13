@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH
+from config import LANE_WIDTH, NOMINAL_VELOCITY
 
 
 class TrajectoryPhase(Enum):
@@ -111,7 +111,7 @@ class SystemReferenceGenerator:
         self._current_time = 0.0
         
         # Velocity tracking
-        self._current_vx = 20.0
+        self._current_vx = NOMINAL_VELOCITY
         
         print(f"🚀 System Reference Generator V3.0 (Heading-Constrained) Initialized")
         print(f"   Base T_lc={self.lane_change_duration}s (dynamically adjusted)")

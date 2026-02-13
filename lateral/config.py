@@ -46,8 +46,11 @@ setup_results_directory()
 # =============================================================================
 # SIMULATION CONSTANTS
 # =============================================================================
-SIMULATION_DT = 0.01          # 100 Hz
+SIMULATION_DT = 0.01          # 100 Hz - vehicle dynamics
+NASH_CONTROL_DT = 0.1         # 10 Hz - Nash MPC control step
+NASH_Np = 20                  # Prediction horizon (gives 2s lookahead with dt=0.1)
 DEFAULT_SIMULATION_TIME = 120.0  # seconds
+NOMINAL_VELOCITY = 20.0       # m/s - nominal longitudinal velocity
 
 # Lane configuration
 LANE_WIDTH = 3.5              # meters
@@ -130,7 +133,8 @@ MERGING_PSI_ERROR_THRESHOLD = 0.10   # |psi| > ~6 degrees
 PHASE_TRANSITION_TIME = 5.0  # seconds of stability required
 
 __all__ = [
-    'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'DEFAULT_SIMULATION_TIME',
+    'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT', 'NASH_Np',
+    'DEFAULT_SIMULATION_TIME', 'NOMINAL_VELOCITY',
     'LANE_WIDTH', 'PLATOON_LANE_Y', 'HUMAN_INITIAL_LANE_Y', 'VEHICLE_COLORS',
     'STANLEY_K_E_CAUTIOUS', 'STANLEY_K_E_NORMAL', 'STANLEY_K_E_AGGRESSIVE',
     'STANLEY_K_PSI_CAUTIOUS', 'STANLEY_K_PSI_NORMAL', 'STANLEY_K_PSI_AGGRESSIVE',
