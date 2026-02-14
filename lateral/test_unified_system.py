@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import sys
 import os
 
-from config import NOMINAL_VELOCITY
+from config import NOMINAL_VELOCITY, NASH_CONTROL_DT
 from unified_lateral_controller import UnifiedLateralController
 from vehicle import Vehicle
 from control import PlatoonManager, PlatoonParams
@@ -44,8 +44,8 @@ def run_lane_change_test(driver_type: str,
         print(f"TEST: Lane Change - Driver: {driver_type}")
         print('='*65)
     
-    # Parameters
-    dt = 0.1
+    # Parameters (from config.py)
+    dt = NASH_CONTROL_DT
     vx = NOMINAL_VELOCITY
     target_y = 0.0
     

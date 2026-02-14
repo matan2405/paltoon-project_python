@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH, NOMINAL_VELOCITY
+from config import LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_Np
 
 
 class TrajectoryPhase(Enum):
@@ -89,7 +89,7 @@ class SystemReferenceGenerator:
     - **NEW** State-dependent phase transitions
     """
     
-    def __init__(self, Np: int = 20, dt: float = 0.1):
+    def __init__(self, Np: int = NASH_Np, dt: float = NASH_CONTROL_DT):
         self.Np = Np
         self.dt = dt
         

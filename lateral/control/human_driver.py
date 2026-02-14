@@ -12,7 +12,7 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (STANLEY_K_E_NORMAL, STANLEY_K_PSI_NORMAL, STANLEY_K_SOFT,
                     STANLEY_K_E_CAUTIOUS, STANLEY_K_PSI_CAUTIOUS,
-                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE)
+                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE, NASH_Np,SIMULATION_DT)
 
 
 class DriverType(Enum):
@@ -33,13 +33,13 @@ class StanleyParams:
 class HumanDriver:
     """Human driver model using Stanley controller."""
     
-    def __init__(self, vehicle, target_lane_y: float = 0.0, dt: float = 0.01):
+    def __init__(self, vehicle, target_lane_y: float = 0.0, dt: float = SIMULATION_DT):
         self.vehicle = vehicle
         self.target_lane_y = target_lane_y
         self.dt = dt
         self.stanley = StanleyParams()
         self.driver_type = DriverType.NORMAL
-        self.Np = 20
+        self.Np = NASH_Np  # From config.py
         
         # Low-pass filter for steering
         self.delta_filtered = 0.0

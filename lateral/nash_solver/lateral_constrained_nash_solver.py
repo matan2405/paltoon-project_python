@@ -652,7 +652,7 @@ if __name__ == "__main__":
         longitudinal_velocity=20.0
     )
     
-    params = ConstrainedLateralNashParams(Np=10, Nu=5, dt=0.1)
+    params = ConstrainedLateralNashParams(Np=10, Nu=5, dt=0.1)  # Test with 0.1s dt
     solver = ConstrainedLateralNashSolver(vehicle=test_vehicle, params=params)
     
     # Test 1: Basic solve with different lambda values

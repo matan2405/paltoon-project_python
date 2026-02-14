@@ -47,7 +47,7 @@ setup_results_directory()
 # SIMULATION CONSTANTS
 # =============================================================================
 SIMULATION_DT = 0.01          # 100 Hz - vehicle dynamics
-NASH_CONTROL_DT = 0.1         # 10 Hz - Nash MPC control step
+NASH_CONTROL_DT = 0.05         # 10 Hz - Nash MPC control step
 NASH_Np = 20                  # Prediction horizon (gives 2s lookahead with dt=0.1)
 DEFAULT_SIMULATION_TIME = 120.0  # seconds
 NOMINAL_VELOCITY = 20.0       # m/s - nominal longitudinal velocity

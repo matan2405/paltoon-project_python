@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH, NOMINAL_VELOCITY
+from config import LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_Np
 
 
 class HumanTrajectoryPhase(Enum):
@@ -72,7 +72,7 @@ class HumanReferenceGenerator:
     - **NEW** State-dependent parameters from platoon configuration
     """
     
-    def __init__(self, Np: int = 20, dt: float = 0.1, driver_type: str = 'normal'):
+    def __init__(self, Np: int = NASH_Np, dt: float = NASH_CONTROL_DT, driver_type: str = 'normal'):
         self.Np = Np
         self.dt = dt
         self.driver_type = driver_type
