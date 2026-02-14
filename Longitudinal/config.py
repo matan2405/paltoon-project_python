@@ -58,7 +58,7 @@ def setup_results_directory():
 setup_results_directory()
 
 # Global constants
-SIMULATION_DT = 0.02  # Default timestep
+SIMULATION_DT = 0.01  # Default timestep
 DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time in seconds
 
 # Vehicle colors for plotting

@@ -104,6 +104,7 @@ class EllipseLongitudinalParams:
     
     # === Force Limits ===
     max_repulsive_force: float = 800.0
+    min_attractive_force: float = -500.0  # Lower bound for attractive forces
     
     # === Follower Weights ===
     leader_weight: float = 1.0
@@ -383,7 +384,7 @@ class EllipseLongitudinalSafetyField:
             F_follower = self._apply_soft_transition(F_follower_raw, follower_gap_error, desired_gap)
         
         F_total = F_leader + F_follower
-        F_total = min(F_total, self.params.max_repulsive_force)
+        F_total = np.clip(F_total, self.params.min_attractive_force, self.params.max_repulsive_force)
         
         self._last_breakdown = {
             'context': context,

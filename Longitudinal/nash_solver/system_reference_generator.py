@@ -84,7 +84,7 @@ class SystemReferenceGenerator:
         # CTG Controller gains (Section 6.4, Eq. 6.15-6.16)
         # K1: position gain, K2: velocity gain
         self.K1 = 0.23  # [1/s²] - typical 0.2-0.4
-        self.K2 = 0.07  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
+        self.K2 = 0.6  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
         
         # === COMFORT LIMITS ===
         self.MAX_ACCEL = 2.5   # [m/s²]

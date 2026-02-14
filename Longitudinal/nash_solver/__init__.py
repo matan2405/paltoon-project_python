@@ -8,11 +8,11 @@ longitudinal_authority_allocator: Module for allocating control authority betwee
 longitudinal_safety_field: Module for computing safety fields in longitudinal control scenarios
 """
 
-from . import system_reference_generator, longitudinal_nash_solver, longitudinal_authority_allocator, longitudinal_safety_field
+from . import system_reference_generator, longitudinal_constrained_nash_solver, longitudinal_authority_allocator, longitudinal_safety_field
 
 __all__ = [
     'system_reference_generator',
-    'longitudinal_nash_solver',
+    'longitudinal_constrained_nash_solver',
     'longitudinal_authority_allocator',
     'longitudinal_safety_field'
 ]

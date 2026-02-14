@@ -77,8 +77,8 @@ class ConstrainedNashParams:
     u2_max: float = 3.0       # Human max acceleration
     
     # Rate constraints [m/s³]
-    du1_max: float = 1.0      # System max jerk
-    du2_max: float = 1.5      # Human max jerk
+    du1_max: float = 1.5      # System max jerk
+    du2_max: float = 2.0      # Human max jerk
     
     # State constraints
     v_min: float = 0.0        # Min velocity [m/s]

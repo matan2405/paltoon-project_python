@@ -33,7 +33,7 @@ from nash_solver.longitudinal_safety_field import (
     EllipseLongitudinalParams,
     PlatoonContext
 )
-from nash_solver import longitudinal_nash_solver, system_reference_generator
+from nash_solver import system_reference_generator, longitudinal_constrained_nash_solver
 from nash_solver.longitudinal_constrained_nash_solver import ConstrainedLongitudinalNashSolver
 
 os.system('cls' if os.name == 'nt' else 'clear')
@@ -80,13 +80,13 @@ class PlatoonNashSimulation(PlatoonSimulation):
                     human_driver=self.human_driver, 
                     Np=self.Np, Nu=self.Nu, dt=self.dt_nash
                 )
-            else:
-                self.nash_solver = longitudinal_nash_solver.LongitudinalNashSolver(
-                    vehicle=self.human_vehicle, 
-                    platoon_manager=self.platoon_manager, 
-                    human_driver=self.human_driver, 
-                    Np=self.Np, dt=self.dt_nash
-                )
+            # else:
+            #     self.nash_solver = longitudinal_nash_solver.LongitudinalNashSolver(
+            #         vehicle=self.human_vehicle, 
+            #         platoon_manager=self.platoon_manager, 
+            #         human_driver=self.human_driver, 
+            #         Np=self.Np, dt=self.dt_nash
+            #     )
             self.nash_solver_available = True
         except Exception as e:
             print(f"⚠️ Nash solver initialization issue: {e}")
