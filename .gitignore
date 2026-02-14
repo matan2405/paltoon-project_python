@@ -5,4 +5,4 @@ __pycache__/
 *.pyc
 *.png
 *.gif
-/Longitudinal\former_file
+Longitudinal/former_file/
