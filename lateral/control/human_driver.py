@@ -12,9 +12,8 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (STANLEY_K_E_NORMAL, STANLEY_K_PSI_NORMAL, STANLEY_K_SOFT,
                     STANLEY_K_E_CAUTIOUS, STANLEY_K_PSI_CAUTIOUS,
-                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE, NASH_Np,SIMULATION_DT)
-
-
+                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE, NASH_NP, SIMULATION_DT)
+from vehicle.components import VehicleParameters, VehicleState
 class DriverType(Enum):
     CAUTIOUS = "cautious"
     NORMAL = "normal"
@@ -27,7 +26,7 @@ class StanleyParams:
     k_e: float = STANLEY_K_E_NORMAL
     k_psi: float = STANLEY_K_PSI_NORMAL
     k_soft: float = STANLEY_K_SOFT
-    delta_max: float = 0.4  # ~23 degrees
+    delta_max: float = VehicleParameters.max_steering_angle  # Default matches vehicle (Audi TT: 25°)
 
 
 class HumanDriver:
@@ -39,7 +38,10 @@ class HumanDriver:
         self.dt = dt
         self.stanley = StanleyParams()
         self.driver_type = DriverType.NORMAL
-        self.Np = NASH_Np  # From config.py
+        self.Np = NASH_NP  # From config.py
+        
+        # Override steering limit from vehicle.params
+        self.stanley.delta_max = vehicle.params.max_steering_angle
         
         # Low-pass filter for steering
         self.delta_filtered = 0.0

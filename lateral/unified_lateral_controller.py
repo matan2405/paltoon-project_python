@@ -54,6 +54,9 @@ import numpy as np
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 
+# Config imports
+from config import HUMAN_INITIAL_LANE_Y
+
 # Import existing components
 from nash_solver.lateral_constrained_nash_solver import (
     ConstrainedLateralNashSolver, 
@@ -397,7 +400,7 @@ if __name__ == '__main__':
     # Mock vehicle for testing
     class MockState:
         def __init__(self):
-            self.y = 3.5
+            self.y = HUMAN_INITIAL_LANE_Y
             self.y_dot = 0.0
             self.psi = 0.0
             self.psi_dot = 0.0

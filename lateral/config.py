@@ -47,8 +47,9 @@ setup_results_directory()
 # SIMULATION CONSTANTS
 # =============================================================================
 SIMULATION_DT = 0.01          # 100 Hz - vehicle dynamics
-NASH_CONTROL_DT = 0.05         # 10 Hz - Nash MPC control step
-NASH_Np = 20                  # Prediction horizon (gives 2s lookahead with dt=0.1)
+NASH_CONTROL_DT = 0.05        # 20 Hz - Nash MPC control step
+NASH_NP = 20     # Prediction horizon
+NASH_NU = 10# Control horizon
 DEFAULT_SIMULATION_TIME = 120.0  # seconds
 NOMINAL_VELOCITY = 20.0       # m/s - nominal longitudinal velocity
 
@@ -81,7 +82,7 @@ STANLEY_K_SOFT = 1.0  # Low softening to allow proper gain application
 # CRITICAL: Q_psi >> Q_y for stability (stabilize heading first!)
 # REDUCED Q_y for gentler, more gradual lane change
 NASH_Q_Y = 10.0         # Weight on lateral position error (was 50 - too aggressive)
-NASH_Q_PSI = 5000.0     # Weight on heading angle error (HIGH!)
+NASH_Q_PSI = 10000.0     # Weight on heading angle error (HIGH!)
 
 # Own control effort weights (R) - BASE VALUES
 # VERY HIGH for smooth, gentle control
@@ -133,7 +134,7 @@ MERGING_PSI_ERROR_THRESHOLD = 0.10   # |psi| > ~6 degrees
 PHASE_TRANSITION_TIME = 5.0  # seconds of stability required
 
 __all__ = [
-    'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT', 'NASH_Np',
+    'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT', 'NASH_NP', 'NASH_NU',
     'DEFAULT_SIMULATION_TIME', 'NOMINAL_VELOCITY',
     'LANE_WIDTH', 'PLATOON_LANE_Y', 'HUMAN_INITIAL_LANE_Y', 'VEHICLE_COLORS',
     'STANLEY_K_E_CAUTIOUS', 'STANLEY_K_E_NORMAL', 'STANLEY_K_E_AGGRESSIVE',

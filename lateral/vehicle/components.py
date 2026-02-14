@@ -34,9 +34,9 @@ class VehicleParameters:
     # Moment of inertia
     Iz: float = 2500.0  # kg·m² (estimated)
     
-    # Steering constraints
-    max_steering_angle: float = np.radians(25.0)  # rad
-    max_steering_rate: float = np.radians(15.0)  # rad/s
+    # Steering constraints (Audi TT specs)
+    max_steering_angle: float = np.radians(25.0)  # rad (25°)
+    max_steering_rate: float = np.radians(15.0)   # rad/s (15°/s)
     steering_ratio: float = 14.6  # from technical data
     
     # Lateral dynamics constraints
@@ -44,7 +44,7 @@ class VehicleParameters:
     max_lateral_jerk: float = 2.5  # m/s³
     
     # Performance
-    nominal_velocity: float = 20.0  # m/s
+    nominal_velocity: float = NOMINAL_VELOCITY  # m/s
     max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
 
 

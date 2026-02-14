@@ -14,7 +14,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (SIMULATION_DT, DEFAULT_SIMULATION_TIME, LANE_WIDTH, 
-                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_Np)
+                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_NP, NASH_NU)
 from vehicle import Vehicle
 from control import HumanDriver, PlatoonManager, PlatoonParams, MOBILLaneChange
 from nash_solver import (ConstrainedLateralNashSolver, LateralSafetyField, LateralSafetyFieldParams,
@@ -60,8 +60,8 @@ class LateralSimulation:
         self.authority_allocator = LateralAuthorityAllocator()
         
         # Nash solver parameters (from config.py)
-        self.Np = NASH_Np
-        self.Nc = 10
+        self.Np = NASH_NP
+        self.Nc = NASH_NU
         self.dt_nash = NASH_CONTROL_DT  # Nash solver dt (from config.py)
         
         # Reference generators (R1 and R2 - Li et al. 2019)

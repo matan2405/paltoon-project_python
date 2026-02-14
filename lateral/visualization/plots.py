@@ -159,7 +159,7 @@ def create_trajectory_plot(sim_data: Dict, scenario_name: str = "Simulation") ->
         ax.plot(human_x[i:i+2], human_y[i:i+2], color=color, linewidth=3)
     
     ax.axhline(y=0, color='g', linestyle='--', alpha=0.5, label='Target Lane')
-    ax.axhline(y=3.5, color='r', linestyle=':', alpha=0.3, label='Initial Lane')
+    ax.axhline(y=LANE_WIDTH, color='r', linestyle=':', alpha=0.3, label='Initial Lane')
     ax.plot(human_x[0], human_y[0], 'go', markersize=15, label='Start')
     ax.plot(human_x[-1], human_y[-1], 'r*', markersize=20, label='End')
     

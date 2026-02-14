@@ -39,8 +39,8 @@ from dataclasses import dataclass
 
 # Add parent directory (lateral/) to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vehicle import Vehicle
-
+from vehicle import Vehicle,VehicleParameters
+from config import (NASH_CONTROL_DT, NASH_NP,NASH_NU)
 @dataclass
 class ConstrainedLateralNashParams:
     """
@@ -50,9 +50,9 @@ class ConstrainedLateralNashParams:
     """
     
     # Prediction horizons - REDUCED for speed
-    Np: int = 20              # Prediction horizon (was 20)
-    Nu: int = 10               # Control horizon (was 10)
-    dt: float = 0.01           # Time step [s]
+    Np: int = NASH_NP              # Prediction horizon (was 20)
+    Nu: int = NASH_NU               # Control horizon (was 10)
+    dt: float = NASH_CONTROL_DT       # Time step [s]
     
     # Note: Vehicle parameters (vx, m, Iz, Cf, Cr, etc.) are obtained from
     # the Vehicle object passed to the solver - no duplication needed.
@@ -79,11 +79,11 @@ class ConstrainedLateralNashParams:
     S2: float = 200000.0      # Cross-coupling weight
     
     # Input constraints [rad]
-    delta_min: float = -0.4   # Min steering angle (~-23°)
-    delta_max: float = 0.4    # Max steering angle (~23°)
+    delta_min: float = -VehicleParameters.max_steering_angle   # Min steering angle (~-23°)
+    delta_max: float = VehicleParameters.max_steering_angle    # Max steering angle (~23°)
     
     # Rate constraints [rad/s]
-    ddelta_max: float = 0.5   # Max steering rate
+    ddelta_max: float = VehicleParameters.max_steering_rate   # Max steering rate
     
     # State constraints (for reference)
     y_max: float = 5.0        # Max lateral deviation [m]
