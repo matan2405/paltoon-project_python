@@ -1,49 +1,51 @@
 """
-Global configuration and setup for the platoon simulation system.
-Handles matplotlib backend selection and global constants.
+Global configuration for the Longitudinal Control simulation system.
+VERSION 2.0 - Comprehensive parameter centralization
+
+Based on the lateral system's config architecture (lateral/config.py).
+All hardcoded parameters from nash_solver, safety_field, authority_allocator,
+system_reference_generator, human_driver, and platoon_control are extracted here.
+
+This file is the SINGLE SOURCE OF TRUTH for all longitudinal parameters.
 """
 
 import os
 import matplotlib
 import matplotlib.pyplot as plt
 
-# Global matplotlib configuration
+# =============================================================================
+# MATPLOTLIB BACKEND SETUP
+# =============================================================================
 def setup_matplotlib():
     """Configure matplotlib backend with fallback options."""
     global HEADLESS_MODE
-    
+
     try:
-        # Force interactive mode - don't fall back to headless unless absolutely necessary
         matplotlib.use('Qt5Agg', force=True)
         import matplotlib.pyplot as plt
-        plt.ion()  # Turn on interactive mode
+        plt.ion()
         print("✅ Using Qt5Agg backend (interactive mode enabled)")
         HEADLESS_MODE = False
-    except ImportError as e:
+    except ImportError:
         try:
-            # Try TkAgg if Qt5Agg not available
             matplotlib.use('TkAgg', force=True)
             import matplotlib.pyplot as plt
-            plt.ion()  # Turn on interactive mode
+            plt.ion()
             print("✅ Using TkAgg backend (interactive mode enabled)")
             HEADLESS_MODE = False
         except ImportError:
-            # Only use Agg as last resort
             matplotlib.use('Agg', force=True)
             import matplotlib.pyplot as plt
             print("⚠️ Using Agg backend (headless mode - plots will be saved only)")
             HEADLESS_MODE = True
 
-    # Enable interactive mode for better display
-    matplotlib.pyplot.ion()
-    
-    # Disable interactive mode to prevent threading issues
     plt.ioff()
 
-# Initialize matplotlib
 setup_matplotlib()
 
-# Results directory configuration
+# =============================================================================
+# RESULTS & FILE SYSTEM
+# =============================================================================
 RESULTS_DIR = "platoon_sim_kinematic_results"
 
 def setup_results_directory():
@@ -54,25 +56,331 @@ def setup_results_directory():
     else:
         print(f"📁 Using existing results directory: {RESULTS_DIR}")
 
-# Initialize results directory
 setup_results_directory()
 
-# Global constants
-SIMULATION_DT = 0.01  # Default timestep
-DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time in seconds
+# =============================================================================
+# SIMULATION CONSTANTS
+# =============================================================================
+SIMULATION_DT = 0.01              # 100 Hz - vehicle dynamics integration step [s]
+NASH_CONTROL_DT = 0.1             # 10 Hz  - Nash MPC control step [s]
+NASH_NP = 20                      # Prediction horizon [steps]
+NASH_NU = 10                      # Control horizon [steps]
+DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time [s]
 
 # Vehicle colors for plotting
 VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
 GAP_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
 
-# Export important variables
+# =============================================================================
+# PLATOON PARAMETERS
+# =============================================================================
+PLATOON_TARGET_VELOCITY = 120.0 / 3.6   # Target platoon velocity [m/s] (120 km/h)
+PLATOON_MAX_VELOCITY = 250.0             # Max velocity limit [m/s]
+PLATOON_MAX_ACCELERATION = 2.5           # Max acceleration limit [m/s²]
+
+# Rajamani controller gains (Chapter 6.4)
+RAJAMANI_H = 1.5           # Desired time headway [s]
+RAJAMANI_TAU = 0.1         # Time lag [s]
+RAJAMANI_K1 = -0.12        # Constraint: k1 < -tau/h
+RAJAMANI_K5 = 0.1          # Constraint: k5 > 0
+# Derived gains (from Rajamani Eq. 6.15-6.16)
+RAJAMANI_K2 = -RAJAMANI_K1 - RAJAMANI_H * RAJAMANI_K1 * RAJAMANI_K5
+RAJAMANI_K3 = 1.0 / RAJAMANI_H - RAJAMANI_K1 * RAJAMANI_K5
+RAJAMANI_K4 = RAJAMANI_K5 / RAJAMANI_H
+
+# Free road acceleration IDM exponent
+FREE_ROAD_DELTA = 4
+
+# =============================================================================
+# NASH SOLVER PARAMETERS (Li et al. 2019)
+# Source: longitudinal_constrained_nash_solver.py - ConstrainedNashParams
+# =============================================================================
+# Cost weights - Output tracking
+NASH_Q_POS = 2500.0               # Weight on position tracking error
+NASH_Q_VEL = 50.0                 # Weight on velocity tracking error
+
+# Control effort weights (R) - BASE VALUES
+# S = R for cooperation (Nash equilibrium insight)
+NASH_R1 = 800.0                   # System's cost on its own control effort
+NASH_R2 = 800.0                   # Human's cost on its own control effort
+
+# Cross-coupling weights (S) - THE KEY FOR COUPLED NASH GAME
+NASH_S1 = 800.0                   # System penalty on human control effort
+NASH_S2 = 800.0                   # Human penalty on system control effort
+
+# Input constraints [m/s²]
+NASH_U1_MIN = -3.5                # System min acceleration
+NASH_U1_MAX = 2.5                 # System max acceleration
+NASH_U2_MIN = -4.0                # Human min acceleration
+NASH_U2_MAX = 3.0                 # Human max acceleration
+
+# Rate constraints (jerk limits) [m/s³]
+NASH_DU1_MAX = 1.5                # System max jerk
+NASH_DU2_MAX = 2.0                # Human max jerk
+
+# State constraints
+NASH_V_MIN = 0.0                  # Min velocity [m/s]
+NASH_V_MAX = 50.0                 # Max velocity [m/s]
+NASH_GAP_MIN = 5.0                # Min safe gap [m]
+
+# Lambda levels for pre-computation (authority ratio discrete values)
+# Covers range from Li et al. lookup table: λ = 0.014 (safe) to λ = 106.6 (emergency)
+NASH_LAMBDA_LEVELS = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
+
+# Solver settings
+NASH_SOLVER_BACKEND = 'OSQP'
+NASH_WARM_START = True
+NASH_VERBOSE = False
+NASH_MAX_ITER = 1000
+NASH_EPS_ABS = 1e-4
+NASH_EPS_REL = 1e-4
+NASH_REGULARIZATION = 1e-5
+
+# =============================================================================
+# DRIVER TYPE - NASH PARAMETER MODIFIERS (Li et al. 2019)
+# =============================================================================
+# Aggressive driver: lower R2 (more control effort), lower S2 (less cooperative)
+# Cautious driver: higher R2 (gentle control), higher S2 (more cooperative)
+NASH_DRIVER_PARAMS = {
+    'cautious': {
+        'R2_factor': 1.5,       # 50% higher - more gentle
+        'S2_factor': 1.5,       # 50% more cooperative with system
+        'Q_pos_factor': 0.8,    # Less aggressive tracking
+    },
+    'normal': {
+        'R2_factor': 1.0,       # Baseline
+        'S2_factor': 1.0,
+        'Q_pos_factor': 1.0,
+    },
+    'aggressive': {
+        'R2_factor': 0.6,       # 40% lower - more control effort
+        'S2_factor': 0.6,       # Less cooperative (more independent)
+        'Q_pos_factor': 1.3,    # More aggressive tracking
+    }
+}
+
+# =============================================================================
+# SAFETY FIELD PARAMETERS (Wang et al. 2015/2016)
+# Source: longitudinal_safety_field.py - EllipseLongitudinalParams
+# =============================================================================
+# --- Hard Constraints ---
+SAFETY_MIN_SAFE_DISTANCE = 5.0          # [m]
+SAFETY_EMERGENCY_BRAKE_DISTANCE = 8.0   # [m]
+SAFETY_MAX_DECEL = 3.5                  # [m/s²]
+
+# --- Base Ellipse Parameters ---
+SAFETY_BASE_SAFETY_RADIUS = 10.0
+SAFETY_BASE_OBSTACLE_MASS = 400.0
+SAFETY_BASE_INFLUENCE_FACTOR = 1.0
+SAFETY_BASE_DRIVER_RISK = 0.5
+SAFETY_EPSILON = 0.1
+
+# --- Position Multipliers ---
+SAFETY_LEADER_POSITION_MULTIPLIER = 0.8
+SAFETY_MIDDLE_POSITION_MULTIPLIER = 1.2
+SAFETY_FOLLOWER_POSITION_MULTIPLIER = 1.0
+
+# --- Risk Multipliers ---
+SAFETY_NORMAL_RISK_MULTIPLIER = 1.0
+SAFETY_MODERATE_RISK_MULTIPLIER = 1.5
+SAFETY_HIGH_RISK_MULTIPLIER = 2.0
+SAFETY_EMERGENCY_RISK_MULTIPLIER = 2.5
+
+# --- Velocity Scaling ---
+SAFETY_VELOCITY_REFERENCE = 120.0       # [km/h]
+SAFETY_VELOCITY_SCALING_FACTOR = 0.8
+
+# --- Distance Decay ---
+SAFETY_DISTANCE_DECAY_FACTOR = 15.0
+
+# --- Force Limits ---
+SAFETY_MAX_REPULSIVE_FORCE = 800.0
+SAFETY_MIN_ATTRACTIVE_FORCE = -500.0
+
+# --- Follower Weights ---
+SAFETY_LEADER_WEIGHT = 1.0
+SAFETY_FOLLOWER_WEIGHT = 0.5
+SAFETY_JOINING_FOLLOWER_WEIGHT = 0.2
+SAFETY_DECELERATING_FOLLOWER_WEIGHT = 0.4
+
+# --- Platoon Factors ---
+SAFETY_PLATOON_COHERENCE_FACTOR = 1.5
+SAFETY_MERGING_MULTIPLIER = 1.2
+
+# --- Low-Pass Filter ---
+SAFETY_FILTER_ALPHA = 0.2
+
+# --- Hard Constraint Jerk Limit ---
+SAFETY_HARD_CONSTRAINT_MAX_JERK = 2.0   # [m/s³]
+SAFETY_HARD_CONSTRAINT_DT = 0.02        # [s]
+SAFETY_HARD_CONSTRAINT_U_MIN = -3.5     # [m/s²]
+SAFETY_HARD_CONSTRAINT_U_MAX = 2.5      # [m/s²]
+
+# --- Road Conditions ---
+SAFETY_ROAD_CONDITION_FACTORS = {
+    "dry": 1.0,
+    "wet": 0.7,
+    "icy": 0.5,
+}
+
+# =============================================================================
+# PHASE DETECTION PARAMETERS (MERGING ↔ FOLLOWING)
+# Source: longitudinal_safety_field.py
+# =============================================================================
+# Entry to FOLLOWING thresholds (ALL must be satisfied for transition_time)
+FOLLOWING_GAP_ERROR_FACTOR = 0.15             # |gap_error| < 15% of desired_gap
+FOLLOWING_VELOCITY_ERROR_FACTOR = 0.05        # |rel_velocity| < 5% of target_velocity
+FOLLOWING_ACCELERATION_THRESHOLD = 0.5        # |acceleration| < 0.5 m/s²
+
+# Exit from FOLLOWING thresholds (ANY triggers return to MERGING - hysteresis)
+MERGING_GAP_ERROR_FACTOR = 0.25               # |gap_error| > 25% of desired_gap
+MERGING_VELOCITY_ERROR_FACTOR = 0.10          # |rel_velocity| > 10% of target_velocity
+
+# Phase transition confirmation time
+PHASE_TRANSITION_TIME = 5.0                   # [s] stability required
+
+# =============================================================================
+# AUTHORITY ALLOCATOR PARAMETERS
+# Source: longitudinal_authority_allocator.py
+# =============================================================================
+# Sigmoid parameters for SAFETY (risk-based)
+AUTHORITY_LAMBDA_MIN = 0.1          # Human dominant when safe
+AUTHORITY_LAMBDA_MAX = 100.0        # System dominant when dangerous
+AUTHORITY_FORCE_MIDPOINT = 400.0    # Sigmoid center point [N]
+AUTHORITY_K_STEEPNESS = 0.015       # Sigmoid slope
+
+# Smoothing parameters (Maximum Comfort V5.2)
+AUTHORITY_ALPHA_BASE = 0.05         # Base smoothing (extremely smooth)
+AUTHORITY_ALPHA_FAST = 0.12         # Fast response (still smooth)
+
+# Hysteresis thresholds
+AUTHORITY_ENTER_THRESHOLD = 3.0     # Enter performance mode when |gap_error| > 3m
+AUTHORITY_EXIT_THRESHOLD = 1.0      # Exit performance mode when |gap_error| < 1m
+
+# Performance authority upper bound
+AUTHORITY_LAMBDA_PERFORMANCE_MAX = 50.0
+
+# =============================================================================
+# SYSTEM REFERENCE GENERATOR PARAMETERS (Rajamani Ch. 6.7)
+# Source: system_reference_generator.py
+# =============================================================================
+# Detection range
+REFGEN_DETECTION_RANGE = 150.0      # [m]
+
+# CTG policy (Rajamani Eq. 6.5)
+REFGEN_TIME_HEADWAY = 1.5          # [s]
+REFGEN_STANDSTILL_DISTANCE = 5.0   # [m]
+
+# Comfortable deceleration (Rajamani Section 6.7.2, typical 0.1g-0.2g)
+REFGEN_A_COMFORT = 1.5             # [m/s²]
+
+# Velocity tracking gain (Rajamani Section 6.7.2, typical 0.3-0.5)
+REFGEN_K_V = 0.4                   # [1/s]
+
+# CTG Controller gains (Rajamani Eq. 6.15-6.16)
+REFGEN_K1 = 0.23                   # [1/s²] position gain (typical 0.2-0.4)
+REFGEN_K2 = 0.6                    # [1/s]  velocity gain (typical 0.6-1.0)
+
+# Comfort limits
+REFGEN_MAX_ACCEL = 2.5             # [m/s²]
+REFGEN_MAX_DECEL = -3.5            # [m/s²]
+
+# Cruise catch-up factor
+REFGEN_CATCHUP_FACTOR = 1.15
+
+# CTG blending zone (gap error threshold for CTG/parabola blend)
+REFGEN_CTG_BLEND_ZONE = 5.0        # [m] - blend in CTG for |gap_error| < 5m
+REFGEN_CTG_BLEND_POWER = 2.0       # Quadratic blending
+
+# Leader acceleration feedforward gain
+REFGEN_LEADER_FF_GAIN = 0.5
+
+# =============================================================================
+# HUMAN DRIVER PARAMETERS (IDM-based)
+# Source: human_driver.py
+# =============================================================================
+# IDM execution parameters
+HUMAN_MAX_ACCELERATION = 2.5       # [m/s²]
+HUMAN_DESIRED_TIME_HEADWAY = 1.2   # [s]
+HUMAN_MIN_SPACING = 2.0            # [m]
+HUMAN_DELTA_IDM = 4.0              # IDM exponent
+HUMAN_COMFORTABLE_DECEL = 2.0      # [m/s²]
+
+# IDM planning parameters (more tolerant for Nash prediction)
+HUMAN_PLAN_TIME_HEADWAY = 0.8      # [s] shorter headway for planning
+HUMAN_PLAN_DECEL = 4.0             # [m/s²] harder braking allowed in planning
+
+# Execution constraints
+HUMAN_ACCEL_MIN = -4.0             # [m/s²]
+HUMAN_ACCEL_MAX = 2.5              # [m/s²]
+
+# Lane change rate
+HUMAN_LANE_CHANGE_RATE = 0.25      # Progress per second
+
+# =============================================================================
+# EXPORT
+# =============================================================================
 __all__ = [
-    'HEADLESS_MODE',
-    'RESULTS_DIR', 
-    'SIMULATION_DT',
-    'DEFAULT_SIMULATION_TIME',
-    'VEHICLE_COLORS',
-    'GAP_COLORS',
-    'setup_matplotlib',
-    'setup_results_directory'
+    # System
+    'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT',
+    'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME',
+    'VEHICLE_COLORS', 'GAP_COLORS',
+
+    # Platoon
+    'PLATOON_TARGET_VELOCITY', 'PLATOON_MAX_VELOCITY', 'PLATOON_MAX_ACCELERATION',
+    'RAJAMANI_H', 'RAJAMANI_TAU', 'RAJAMANI_K1', 'RAJAMANI_K2', 'RAJAMANI_K3',
+    'RAJAMANI_K4', 'RAJAMANI_K5', 'FREE_ROAD_DELTA',
+
+    # Nash solver
+    'NASH_Q_POS', 'NASH_Q_VEL', 'NASH_R1', 'NASH_R2', 'NASH_S1', 'NASH_S2',
+    'NASH_U1_MIN', 'NASH_U1_MAX', 'NASH_U2_MIN', 'NASH_U2_MAX',
+    'NASH_DU1_MAX', 'NASH_DU2_MAX', 'NASH_V_MIN', 'NASH_V_MAX', 'NASH_GAP_MIN',
+    'NASH_LAMBDA_LEVELS', 'NASH_SOLVER_BACKEND', 'NASH_WARM_START',
+    'NASH_VERBOSE', 'NASH_MAX_ITER', 'NASH_EPS_ABS', 'NASH_EPS_REL',
+    'NASH_REGULARIZATION', 'NASH_DRIVER_PARAMS',
+
+    # Safety field
+    'SAFETY_MIN_SAFE_DISTANCE', 'SAFETY_EMERGENCY_BRAKE_DISTANCE', 'SAFETY_MAX_DECEL',
+    'SAFETY_BASE_SAFETY_RADIUS', 'SAFETY_BASE_OBSTACLE_MASS',
+    'SAFETY_BASE_INFLUENCE_FACTOR', 'SAFETY_BASE_DRIVER_RISK', 'SAFETY_EPSILON',
+    'SAFETY_LEADER_POSITION_MULTIPLIER', 'SAFETY_MIDDLE_POSITION_MULTIPLIER',
+    'SAFETY_FOLLOWER_POSITION_MULTIPLIER',
+    'SAFETY_NORMAL_RISK_MULTIPLIER', 'SAFETY_MODERATE_RISK_MULTIPLIER',
+    'SAFETY_HIGH_RISK_MULTIPLIER', 'SAFETY_EMERGENCY_RISK_MULTIPLIER',
+    'SAFETY_VELOCITY_REFERENCE', 'SAFETY_VELOCITY_SCALING_FACTOR',
+    'SAFETY_DISTANCE_DECAY_FACTOR',
+    'SAFETY_MAX_REPULSIVE_FORCE', 'SAFETY_MIN_ATTRACTIVE_FORCE',
+    'SAFETY_LEADER_WEIGHT', 'SAFETY_FOLLOWER_WEIGHT',
+    'SAFETY_JOINING_FOLLOWER_WEIGHT', 'SAFETY_DECELERATING_FOLLOWER_WEIGHT',
+    'SAFETY_PLATOON_COHERENCE_FACTOR', 'SAFETY_MERGING_MULTIPLIER',
+    'SAFETY_FILTER_ALPHA',
+    'SAFETY_HARD_CONSTRAINT_MAX_JERK', 'SAFETY_HARD_CONSTRAINT_DT',
+    'SAFETY_HARD_CONSTRAINT_U_MIN', 'SAFETY_HARD_CONSTRAINT_U_MAX',
+    'SAFETY_ROAD_CONDITION_FACTORS',
+
+    # Phase detection
+    'FOLLOWING_GAP_ERROR_FACTOR', 'FOLLOWING_VELOCITY_ERROR_FACTOR',
+    'FOLLOWING_ACCELERATION_THRESHOLD',
+    'MERGING_GAP_ERROR_FACTOR', 'MERGING_VELOCITY_ERROR_FACTOR',
+    'PHASE_TRANSITION_TIME',
+
+    # Authority allocator
+    'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX',
+    'AUTHORITY_FORCE_MIDPOINT', 'AUTHORITY_K_STEEPNESS',
+    'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
+    'AUTHORITY_ENTER_THRESHOLD', 'AUTHORITY_EXIT_THRESHOLD',
+    'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
+
+    # System reference generator
+    'REFGEN_DETECTION_RANGE', 'REFGEN_TIME_HEADWAY', 'REFGEN_STANDSTILL_DISTANCE',
+    'REFGEN_A_COMFORT', 'REFGEN_K_V', 'REFGEN_K1', 'REFGEN_K2',
+    'REFGEN_MAX_ACCEL', 'REFGEN_MAX_DECEL', 'REFGEN_CATCHUP_FACTOR',
+    'REFGEN_CTG_BLEND_ZONE', 'REFGEN_CTG_BLEND_POWER', 'REFGEN_LEADER_FF_GAIN',
+
+    # Human driver
+    'HUMAN_MAX_ACCELERATION', 'HUMAN_DESIRED_TIME_HEADWAY', 'HUMAN_MIN_SPACING',
+    'HUMAN_DELTA_IDM', 'HUMAN_COMFORTABLE_DECEL',
+    'HUMAN_PLAN_TIME_HEADWAY', 'HUMAN_PLAN_DECEL',
+    'HUMAN_ACCEL_MIN', 'HUMAN_ACCEL_MAX',
+    'HUMAN_LANE_CHANGE_RATE', 'HUMAN_PREDICTION_DT',
 ]

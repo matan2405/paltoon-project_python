@@ -18,7 +18,7 @@ from nash_solver import longitudinal_constrained_nash_solver
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import platoon simulation modules
-from config import setup_matplotlib, HEADLESS_MODE, RESULTS_DIR, SIMULATION_DT, DEFAULT_SIMULATION_TIME
+from config import setup_matplotlib, HEADLESS_MODE, RESULTS_DIR, SIMULATION_DT, DEFAULT_SIMULATION_TIME, NASH_NP, NASH_NU,NASH_CONTROL_DT
 from simulation.simulator import PlatoonSimulation, run_simulation
 from visualization.animation import create_platoon_animation
 from visualization.plots import create_comprehensive_plots, create_detailed_scenario_summary, create_nash_analysis_plots
@@ -63,9 +63,9 @@ class PlatoonNashSimulation(PlatoonSimulation):
         self.safety_field.params = EllipseLongitudinalParams()
         self.authority_allocator = LongitudinalAuthorityAllocator()
         
-        self.Np = 20  # Prediction horizon
-        self.Nu = 10  # Control horizon
-        self.dt_nash = 0.1  # Time step
+        self.Np = NASH_NP  # Prediction horizon
+        self.Nu = NASH_NU  # Control horizon
+        self.dt_nash = NASH_CONTROL_DT  # Time step
         
         self.system_ref_generator = system_reference_generator.SystemReferenceGenerator(
             Np=self.Np, dt=self.dt_nash

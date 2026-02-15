@@ -25,12 +25,12 @@ import os
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from config import SIMULATION_DT, NASH_NP
 from vehicle.vehicle import Vehicle
 
 
 class HumanDriver:
-    def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = 0.1):
+    def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = SIMULATION_DT):
         self.vehicle = vehicle
         self.target_speed = target_speed
         

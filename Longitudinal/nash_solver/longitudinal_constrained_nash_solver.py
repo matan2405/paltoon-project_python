@@ -37,14 +37,17 @@ When λ increases (high risk):
 - Combined with authority blending: u_shared = α*u1 + (1-α)*u2
 """
 
+import os
+import sys
 import numpy as np
 import cvxpy as cp
 from typing import Tuple, Dict, Optional, List
 from dataclasses import dataclass
 from scipy.linalg import expm
 import time
-
-
+# Add parent directory (lateral/) to path for imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import (NASH_CONTROL_DT, NASH_NP,NASH_NU)
 @dataclass
 class ConstrainedNashParams:
     """
@@ -54,9 +57,9 @@ class ConstrainedNashParams:
     """
     
     # Prediction horizons
-    Np: int = 20              # Prediction horizon
-    Nu: int = 10              # Control horizon
-    dt: float = 0.1           # Time step [s]
+    Np: int = NASH_NP              # Prediction horizon
+    Nu: int = NASH_NU              # Control horizon
+    dt: float = NASH_CONTROL_DT          # Time step [s]
     
     # Cost weights (base values)
     Q_pos: float = 2500.0     # Position tracking weight
@@ -94,7 +97,7 @@ class ConstrainedNashParams:
     solver: str = 'OSQP'
     warm_start: bool = True
     verbose: bool = False
-    max_iter: int = 1000
+    max_iter: int = 200
     eps_abs: float = 1e-4
     eps_rel: float = 1e-4
     

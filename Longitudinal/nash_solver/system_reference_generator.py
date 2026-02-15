@@ -36,7 +36,7 @@ import os
 
 # Add parent directory to path to allow importing from control
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from config import (NASH_CONTROL_DT, NASH_NP)
 from control.platoon_control import free_road_acc, rajamani
 
 
@@ -60,8 +60,8 @@ class SystemReferenceGenerator:
             Np: Prediction horizon (number of steps)
             dt: Time step for prediction [seconds]
         """
-        self.Np = Np
-        self.dt = dt
+        self.Np = NASH_NP
+        self.dt = NASH_CONTROL_DT
         
         # === DETECTION ===
         self.DETECTION_RANGE = 150.0  # [m]
