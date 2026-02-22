@@ -71,12 +71,12 @@ class ConstrainedLateralNashParams:
     
     # Control effort weights - VERY HIGH for realistic small steering
     # Key ratio: R/Q_y = 100,000 (forces small steering angles)
-    R1: float = 1000000.0     # System control effort
-    R2: float = 1000000.0     # Human control effort
+    R1: float = 50000.0     # System control effort
+    R2: float = 50000.0     # Human control effort
     
     # Cross-coupling weights - S = 0.2*R for cooperation (not S=R!)
-    S1: float = 200000.0      # Cross-coupling weight
-    S2: float = 200000.0      # Cross-coupling weight
+    S1: float = 50000.0      # Cross-coupling weight
+    S2: float = 50000.0      # Cross-coupling weight
     
     # Input constraints [rad]
     delta_min: float = -VehicleParameters.max_steering_angle   # Min steering angle (~-23°)

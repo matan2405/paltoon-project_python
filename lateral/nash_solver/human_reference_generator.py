@@ -58,7 +58,7 @@ class HumanDynamicParams:
         max_y_dot = vx * np.tan(max_heading)
         T_lc_min = 1.5 * abs(delta_y) / max_y_dot
         
-        return max(T_lc_min, 8.0)
+        return max(T_lc_min, 2.0)  # Physical minimum only (no artificial floor)
 
 
 class HumanReferenceGenerator:
@@ -79,20 +79,24 @@ class HumanReferenceGenerator:
         
         # Base lane change durations (will be adjusted dynamically)
         self._base_lane_change_durations = {
-            'cautious': 14.0,
-            'normal': 12.0,
-            'aggressive': 10.0
+            'cautious': 6.0,
+            'normal': 4.5,
+            'aggressive': 3.0
         }
         self.lane_change_duration = self._base_lane_change_durations.get(driver_type, 12.0)
         
         # Maximum heading angles per driver type
-        # These define the human's "comfort zone"
+        # Based on empirical data: Toledo & Zohar (2007), Song et al. (2013)
+        # Required ψ_max for cubic polynomial: tan(ψ) ≥ 1.5·Δy/(vx·T_lc)
+        #   cautious  T_lc=6.0s → ψ_min=2.5° → allow 3.0°
+        #   normal    T_lc=4.5s → ψ_min=3.3° → allow 4.0°
+        #   aggressive T_lc=3.0s → ψ_min=5.0° → allow 6.0°
         self.max_heading_angles = {
-            'cautious': np.radians(1.6),    # Very conservative - wants ψ < 1.6°
-            'normal': np.radians(1.8),      # Moderate - wants ψ < 1.8°
-            'aggressive': np.radians(2.0)   # Tolerates up to 2.0°
+            'cautious': np.radians(3.0),    # Conservative - allows T_lc=6.0s
+            'normal': np.radians(4.0),      # Moderate - allows T_lc=4.5s
+            'aggressive': np.radians(6.0)   # Tolerant - allows T_lc=3.0s
         }
-        self.max_heading_angle = self.max_heading_angles.get(driver_type, np.radians(1.8))
+        self.max_heading_angle = self.max_heading_angles.get(driver_type, np.radians(4.0))
         
         # Dynamic parameters
         self.dynamic_params = HumanDynamicParams()
@@ -116,7 +120,7 @@ class HumanReferenceGenerator:
         """Update driver type and associated parameters."""
         self.driver_type = driver_type
         self.lane_change_duration = self._base_lane_change_durations.get(driver_type, 12.0)
-        self.max_heading_angle = self.max_heading_angles.get(driver_type, np.radians(1.8))
+        self.max_heading_angle = self.max_heading_angles.get(driver_type, np.radians(4.0))
     
     def set_current_time(self, time: float):
         self._current_time = time

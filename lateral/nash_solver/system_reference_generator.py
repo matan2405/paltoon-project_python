@@ -50,7 +50,7 @@ class DynamicTrajectoryParams:
     platoon_lane_y: float = 0.0         # Platoon lane y position [m]
     
     # Computed constraints
-    max_heading_angle: float = np.radians(1.8)  # Max allowed ψ [rad] - gives margin below 2°
+    max_heading_angle: float = np.radians(8)  # Max allowed ψ [rad] - gives margin below 3.5° requirement
     
     def compute_min_T_lc(self, delta_y: float, vx: float) -> float:
         """
@@ -67,7 +67,7 @@ class DynamicTrajectoryParams:
             Minimum T_lc [s]
         """
         if vx < 1.0 or abs(delta_y) < 0.1:
-            return 10.0  # Default minimum
+            return 5.0  # Default for very low speed
         
         # Max lateral velocity for heading constraint
         max_y_dot = vx * np.tan(self.max_heading_angle)
@@ -75,7 +75,7 @@ class DynamicTrajectoryParams:
         # Minimum T_lc (quintic polynomial factor is 1.875)
         T_lc_min = 1.875 * abs(delta_y) / max_y_dot
         
-        return max(T_lc_min, 10.0)  # At least 10 seconds
+        return max(T_lc_min, 3.0)  # Physical minimum 3 seconds
 
 
 class SystemReferenceGenerator:
@@ -89,17 +89,27 @@ class SystemReferenceGenerator:
     - **NEW** State-dependent phase transitions
     """
     
-    def __init__(self, Np: int = NASH_NP, dt: float = NASH_CONTROL_DT):
+    def __init__(self, Np: int = NASH_NP, dt: float = NASH_CONTROL_DT, 
+                 driver_type: str = 'normal'):
         self.Np = Np
         self.dt = dt
+        self.driver_type = driver_type
         
         # Lane configuration (from config.py)
         self.lane_width = LANE_WIDTH
         self.target_lane_y = 0.0
         
-        # Base lane change duration (will be adjusted dynamically)
-        self.lane_change_duration = 14.0  # Base T_lc - will be increased if needed
-        self._base_T_lc = 14.0
+        # System T_lc = Human T_lc × 1.5 (always more conservative, but no conflict)
+        # This ensures the Nash game has ALIGNED but DIFFERENT references
+        self._system_T_lc_multiplier = 1.5
+        self._human_base_T_lc = {
+            'cautious': 6.0,
+            'normal': 4.5,
+            'aggressive': 3.0
+        }
+        human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
+        self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
+        self.lane_change_duration = self._base_T_lc
         
         # Dynamic parameters (updated from platoon state)
         self.dynamic_params = DynamicTrajectoryParams()
@@ -113,8 +123,9 @@ class SystemReferenceGenerator:
         # Velocity tracking
         self._current_vx = NOMINAL_VELOCITY
         
-        print(f"🚀 System Reference Generator V3.0 (Heading-Constrained) Initialized")
-        print(f"   Base T_lc={self.lane_change_duration}s (dynamically adjusted)")
+        print(f"🚀 System Reference Generator V3.1 (Driver-Aware) Initialized")
+        print(f"   Driver type: {driver_type}, Base T_lc={self.lane_change_duration:.1f}s")
+        print(f"   (Human T_lc={human_T_lc:.1f}s × {self._system_T_lc_multiplier})")
         print(f"   Max heading constraint: {np.degrees(self.dynamic_params.max_heading_angle):.1f}°")
     
     def set_current_time(self, time: float):
@@ -123,6 +134,13 @@ class SystemReferenceGenerator:
     def set_velocity(self, vx: float):
         """Update current velocity for heading constraint calculation."""
         self._current_vx = vx
+    
+    def set_driver_type(self, driver_type: str):
+        """Update driver type and recompute base T_lc."""
+        self.driver_type = driver_type
+        human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
+        self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
+        self.lane_change_duration = self._base_T_lc
     
     def update_from_platoon_state(self, target_velocity: float, desired_gap: float, 
                                    platoon_lane_y: float = 0.0):
@@ -140,10 +158,11 @@ class SystemReferenceGenerator:
         self.dynamic_params.desired_gap = desired_gap
         self.dynamic_params.platoon_lane_y = platoon_lane_y
         
-        # Update base T_lc based on velocity (higher speed = longer T_lc for comfort)
-        # Empirical: T_lc ∝ sqrt(vx) for similar accelerations
+        # Adjust T_lc for velocity (scale proportionally, not from scratch)
+        # At 20 m/s baseline → factor=1.0, at 30 m/s → factor ~1.22
         velocity_factor = np.sqrt(target_velocity / 20.0)
-        self._base_T_lc = 14.0 * velocity_factor
+        human_T_lc = self._human_base_T_lc.get(self.driver_type, 4.5)
+        self._base_T_lc = human_T_lc * self._system_T_lc_multiplier * velocity_factor
     
     def update_phase_from_safety_field(self, safety_phase: str):
         """Sync phase with safety field."""

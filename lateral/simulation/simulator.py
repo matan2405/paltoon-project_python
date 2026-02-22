@@ -144,6 +144,11 @@ class LateralSimulation:
         # Setup human reference generator (R2) with driver personality
         self.human_ref_generator.set_driver_type(driver_type)
         
+        # Setup system reference generator (R1) with driver personality
+        # CRITICAL: Without this, System T_lc stays at default (normal=6.8s)
+        # causing Nash mismatch when driver_type != 'normal'
+        self.system_ref_generator.set_driver_type(driver_type)
+        
         # RE-INITIALIZE Nash solver with driver type
         # Use CONSTRAINED Nash solver WITH DPP (V4.0 with V1.0 weights)
         from nash_solver.lateral_constrained_nash_solver import (
