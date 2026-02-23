@@ -29,7 +29,7 @@ class VehicleParameters:
     
     # Tire cornering stiffness
     Cf: float = 55000.0  # Front axle cornering stiffness N/rad
-    Cr: float = 80000.0  # Rear axle cornering stiffness N/rad
+    Cr: float = 55000.0  # Rear axle cornering stiffness N/rad
     
     # Moment of inertia
     Iz: float = 2500.0  # kg·m² (estimated)
