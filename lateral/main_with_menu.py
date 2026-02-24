@@ -107,8 +107,8 @@ def run_scenario(scenario_name: str, driver_type: str = 'normal',
     # Get parameters
     params = get_scenario_params(scenario_name, driver_type)
     
-    # Initialize simulation
-    sim = LateralSimulation(dt=SIMULATION_DT, T_sim=T_sim)
+    # Initialize simulation with correct driver_type from the start
+    sim = LateralSimulation(dt=SIMULATION_DT, T_sim=T_sim, driver_type=driver_type)
     sim.setup_scenario(f"{scenario_name}_{driver_type}", params)
     
     # Print initialization info

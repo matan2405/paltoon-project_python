@@ -27,76 +27,77 @@ class LateralSimulation:
     Main simulation class - VERSION 2.3 (Simulation Only)
     """
     
-    def __init__(self, dt: float = SIMULATION_DT, T_sim: float = DEFAULT_SIMULATION_TIME):
+    def __init__(self, dt: float = SIMULATION_DT, T_sim: float = DEFAULT_SIMULATION_TIME, driver_type: str = 'normal'):
         self.dt = dt
         self.T_sim = T_sim
         self.time = 0.0
-        
+
         # Human vehicle
         self.human_vehicle = Vehicle(
-            initial_y=HUMAN_INITIAL_LANE_Y, 
+            initial_y=HUMAN_INITIAL_LANE_Y,
             initial_psi=0.0,
-            initial_x=0.0, 
-            vehicle_id="Human", 
+            initial_x=0.0,
+            vehicle_id="Human",
             longitudinal_velocity=20.0
         )
-        
+
         # Platoon
         self.platoon_params = PlatoonParams(target_velocity=20.0, platoon_lane_y=PLATOON_LANE_Y)
         self.platoon_manager = PlatoonManager(self.platoon_params)
-        
+
         # Human driver model (Stanley Controller)
         self.human_driver = HumanDriver(
-            vehicle=self.human_vehicle, 
-            target_lane_y=PLATOON_LANE_Y, 
+            vehicle=self.human_vehicle,
+            target_lane_y=PLATOON_LANE_Y,
             dt=dt
         )
-        
+        self.human_driver.set_driver_type(driver_type)
+
         # Safety field (V2.0 - no lane centering)
         self.safety_field_params = LateralSafetyFieldParams(target_lane_y=PLATOON_LANE_Y)
         self.safety_field = LateralSafetyField(self.safety_field_params)
-        
+
         # Authority allocator
         self.authority_allocator = LateralAuthorityAllocator()
-        
+
         # Nash solver parameters (from config.py)
         self.Np = NASH_NP
         self.Nc = NASH_NU
         self.dt_nash = NASH_CONTROL_DT  # Nash solver dt (from config.py)
-        
+
         # Reference generators (R1 and R2 - Li et al. 2019)
         # R1 = System reference (slow, safe - 5th order polynomial, T=6s)
-        self.system_ref_generator = SystemReferenceGenerator(Np=self.Np, dt=self.dt_nash)
-        
+        self.system_ref_generator = SystemReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
+
         # R2 = Human reference (faster, more direct - 3rd order polynomial)
-        self.human_ref_generator = HumanReferenceGenerator(Np=self.Np, dt=self.dt_nash)
-        
+        self.human_ref_generator = HumanReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
+
         # Use CONSTRAINED Nash solver WITH DPP (V4.0 Optimized)
         # With V1.0 calibrated weights for smooth trajectories
         from nash_solver.lateral_constrained_nash_solver import (
-            ConstrainedLateralNashSolver, 
+            ConstrainedLateralNashSolver,
             ConstrainedLateralNashParams
         )
-        
+
         nash_params = ConstrainedLateralNashParams(
-            Np=self.Np, 
-            Nu=self.Nc, 
+            Np=self.Np,
+            Nu=self.Nc,
             dt=self.dt_nash,
-            driver_type='normal'
+            driver_type=driver_type
         )
-        
+
         self.nash_solver = ConstrainedLateralNashSolver(
-            vehicle=self.human_vehicle, 
+            vehicle=self.human_vehicle,
             params=nash_params
         )
-        
+
         # Flag to identify constrained solver
         self.use_constrained_solver = True
-        
+
         # NOTE: Constraints handled inside CVXPY QP:
         # - Input bounds: delta_min ≤ δ ≤ delta_max
         # - Rate constraints: |Δδ| ≤ ddelta_max * dt
-        
+
         # MOBIL lane change decision model (V2.4)
         self.mobil = MOBILLaneChange()
         self.mobil_approved = False  # Whether MOBIL has approved the lane change
@@ -134,40 +135,11 @@ class LateralSimulation:
         
         # Setup driver
         driver_type = scenario_params.get('driver_type', 'normal')
-        self.human_driver.set_driver_type(driver_type)
         self.human_driver.target_lane_y = scenario_params.get('target_lane_y', PLATOON_LANE_Y)
-        
+
         # Setup MOBIL with driver personality
         self.mobil.set_politeness(driver_type)
         self.mobil_approved = False  # Reset for new scenario
-        
-        # Setup human reference generator (R2) with driver personality
-        self.human_ref_generator.set_driver_type(driver_type)
-        
-        # Setup system reference generator (R1) with driver personality
-        # CRITICAL: Without this, System T_lc stays at default (normal=6.8s)
-        # causing Nash mismatch when driver_type != 'normal'
-        self.system_ref_generator.set_driver_type(driver_type)
-        
-        # RE-INITIALIZE Nash solver with driver type
-        # Use CONSTRAINED Nash solver WITH DPP (V4.0 with V1.0 weights)
-        from nash_solver.lateral_constrained_nash_solver import (
-            ConstrainedLateralNashSolver, 
-            ConstrainedLateralNashParams
-        )
-        
-        nash_params = ConstrainedLateralNashParams(
-            Np=self.Np, 
-            Nu=self.Nc, 
-            dt=self.dt_nash,
-            driver_type=driver_type
-        )
-        
-        self.nash_solver = ConstrainedLateralNashSolver(
-            vehicle=self.human_vehicle, 
-            params=nash_params
-        )
-        print(f"🧠 Constrained Nash Solver initialized with driver type: {driver_type}")
         
         # Setup platoon
         platoon_config = scenario_params.get('platoon', {})
