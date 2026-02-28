@@ -137,8 +137,16 @@ class LateralSimulation:
         driver_type = scenario_params.get('driver_type', 'normal')
         self.human_driver.target_lane_y = scenario_params.get('target_lane_y', PLATOON_LANE_Y)
 
-        # Setup MOBIL with driver personality
-        self.mobil.set_politeness(driver_type)
+        # ============================================================
+        # CRITICAL FIX: Propagate driver_type to ALL components
+        # Previously only MOBIL was updated, causing all driver types
+        # to produce identical results (always "normal" defaults).
+        # ============================================================
+        self.human_driver.set_driver_type(driver_type)           # Stanley gains (k_e, k_psi)
+        self.nash_solver.set_driver_type(driver_type)            # Nash weights (R2, S2 modifiers)
+        self.system_ref_generator.set_driver_type(driver_type)   # System T_lc multiplier
+        self.human_ref_generator.set_driver_type(driver_type)    # Human T_lc + max_heading_angle
+        self.mobil.set_politeness(driver_type)                   # MOBIL politeness factor
         self.mobil_approved = False  # Reset for new scenario
         
         # Setup platoon
@@ -214,8 +222,8 @@ class LateralSimulation:
         # 6. Weighted combination (Shared Control!)
         # α determines how much authority the system has
         # Higher λ → Higher α → More system control
-        alpha = lambda_k / (1.0 + lambda_k)
-        u_shared = alpha * u1_opt + (1 - alpha) * u2_opt
+        u_shared = u1_opt + u2_opt
+        alpha = lambda_k / (1.0 + lambda_k)  # For logging only
         
         # NOTE: No external filtering or clipping on Nash variables!
         # All constraints on u1, u2 are handled INSIDE the Nash solver (CVXPY QP):
