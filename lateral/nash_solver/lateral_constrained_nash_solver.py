@@ -137,9 +137,6 @@ class ConstrainedLateralNashParams:
     eps_abs: float = 1e-3
     eps_rel: float = 1e-3
     
-    # Driver type
-    driver_type: str = 'normal'
-    
     # Regularization
     regularization: float = 1e-5
 
@@ -179,7 +176,13 @@ class ConstrainedLateralNashSolver:
         # Build state-space matrices
         self._build_state_space()
         self._build_prediction_matrices()
-        self._apply_driver_type_modifiers()
+        
+        # Use base weights directly — driver type affects behavior parameters
+        # (T_lc, k_e, k_psi), NOT Nash game weights
+        self.R2_eff = self.params.R2
+        self.S2_eff = self.params.S2
+        self.Q_y_eff = self.params.Q_y
+        
         self._build_base_cost_matrices()
         self._precompute_lambda_problems()
         
@@ -214,7 +217,6 @@ class ConstrainedLateralNashSolver:
         print(f"   R1={self.params.R1:.0f}, R2={self.params.R2:.0f}, S1={self.params.S1:.0f}, S2={self.params.S2:.0f}")
         print(f"   S/R ratio: {s_r_ratio:.2f} ({'cooperation' if s_r_ratio >= 0.5 else 'competition'})")
         print(f"   Q_y/R1 ratio: {q_r_ratio:.4f}")
-        print(f"   Driver type: {self.params.driver_type}")
         print(f"   Lambda levels: {self.params.lambda_levels}")
         print(f"   Pre-computed problems: {len(self.params.lambda_levels)}")
     
@@ -247,22 +249,6 @@ class ConstrainedLateralNashSolver:
         for i in range(Np):
             for j in range(min(i+1, Nu)):
                 self.H[i*self.nz:(i+1)*self.nz, j:j+1] = CAB[i-j]
-    
-    def _apply_driver_type_modifiers(self):
-        """Apply driver-type specific weight modifiers."""
-        p = self.params
-        
-        modifiers = {
-            'cautious':   {'R2_factor': 1.5, 'S2_factor': 1.3, 'Q_y_factor': 0.8},
-            'normal':     {'R2_factor': 1.0, 'S2_factor': 1.0, 'Q_y_factor': 1.0},
-            'aggressive': {'R2_factor': 0.6, 'S2_factor': 0.7, 'Q_y_factor': 1.3}
-        }
-        
-        mod = modifiers.get(p.driver_type, modifiers['normal'])
-        
-        self.R2_eff = p.R2 * mod['R2_factor']
-        self.S2_eff = p.S2 * mod['S2_factor']
-        self.Q_y_eff = p.Q_y * mod['Q_y_factor']
     
     def _build_base_cost_matrices(self):
         """Pre-compute base cost matrices."""
@@ -742,9 +728,10 @@ class ConstrainedLateralNashSolver:
         print(self.get_constraint_summary())
     
     def set_driver_type(self, driver_type: str):
-        """Update driver type and rebuild problems."""
-        self.params.driver_type = driver_type
-        self._apply_driver_type_modifiers()
-        self._build_base_cost_matrices()
-        self._precompute_lambda_problems()
-        print(f"🔄 Driver type changed to: {driver_type}")
+        """
+        Driver type no longer modifies Nash weights (V6.0+).
+        Driver personality is expressed through behavior parameters
+        (T_lc, k_e, k_psi) in reference generators, NOT in the Nash game.
+        This method is kept for API compatibility but does nothing.
+        """
+        pass

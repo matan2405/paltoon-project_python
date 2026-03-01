@@ -82,8 +82,7 @@ class LateralSimulation:
         nash_params = ConstrainedLateralNashParams(
             Np=self.Np,
             Nu=self.Nc,
-            dt=self.dt_nash,
-            driver_type=driver_type
+            dt=self.dt_nash
         )
 
         self.nash_solver = ConstrainedLateralNashSolver(
@@ -143,7 +142,6 @@ class LateralSimulation:
         # to produce identical results (always "normal" defaults).
         # ============================================================
         self.human_driver.set_driver_type(driver_type)           # Stanley gains (k_e, k_psi)
-        self.nash_solver.set_driver_type(driver_type)            # Nash weights (R2, S2 modifiers)
         self.system_ref_generator.set_driver_type(driver_type)   # System T_lc multiplier
         self.human_ref_generator.set_driver_type(driver_type)    # Human T_lc + max_heading_angle
         self.mobil.set_politeness(driver_type)                   # MOBIL politeness factor
