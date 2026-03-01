@@ -38,8 +38,9 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (NASH_CONTROL_DT, NASH_NP)
 from control.platoon_control import free_road_acc, rajamani
-
-
+from vehicle.components import VehicleParameters
+from vehicle import Vehicle
+from simulation import simulator
 class SystemReferenceGenerator:
     """
     Generates target trajectories for the System player (R1) in Nash equilibrium.
@@ -65,7 +66,7 @@ class SystemReferenceGenerator:
         
         # === DETECTION ===
         self.DETECTION_RANGE = 150.0  # [m]
-        
+        self.desired_gap = 50.0  # [m] Desired gap at equilibrium (will be updated based on speed)
         # === RAJAMANI CHAPTER 6.7 PARAMETERS ===
         # Time headway for CTG policy (Section 6.3)
         self.h = 1.5  # [s]
@@ -85,6 +86,11 @@ class SystemReferenceGenerator:
         # K1: position gain, K2: velocity gain
         self.K1 = 0.23  # [1/s²] - typical 0.2-0.4
         self.K2 = 0.6  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
+        
+        # === SAFETY & CRASH AVOIDANCE (Zone 3) ===
+        self.MIN_CRITICAL_GAP = 2.0 + VehicleParameters.length*0.5  # [m] Minimum gap before emergency braking
+        self.TTC_THRESHOLD = 1.2    # [seconds] Time-to-collision threshold for emergency braking
+        self.MAX_EMERGENCY_DECEL = -5.0 # [m/s²] Maximum emergency deceleration
         
         # === COMFORT LIMITS ===
         self.MAX_ACCEL = 2.5   # [m/s²]
@@ -126,12 +132,13 @@ class SystemReferenceGenerator:
         state_sequence = np.zeros((self.Np, 2))  # [position, velocity]
         
         # Clone current state for forward simulation
+        sim_vehicle = Vehicle() 
         sim_vehicle = copy.deepcopy(simulation.human_vehicle)
         
         # ========================================================================
         # Identify Leader - USE LOCKED if available
         # ========================================================================
-        leader = None
+        leader = Vehicle()
         
         if hasattr(simulation.human_vehicle, 'target_leader_id'):
             target_id = simulation.human_vehicle.target_leader_id
@@ -191,11 +198,11 @@ class SystemReferenceGenerator:
             # === Step 2: Calculate Distance and Gap Error ===
             dist_to_leader = float('inf')
             gap_error = 0.0
-            desired_gap = 50.0  # Default
+            desired_gap = self.desired_gap  # Default desired gap
             
             if sim_leader:
                 # R = Range (actual gap, bumper to bumper)
-                L = sim_leader.L if hasattr(sim_leader, 'L') else 5.0
+                L = sim_leader.L # [m] Leader length
                 R = sim_leader.state.x - sim_vehicle.state.x - L
                 
                 # R_dot = Range rate (Rajamani convention: positive = gap increasing)
@@ -209,17 +216,25 @@ class SystemReferenceGenerator:
                 
                 # Store for distance calculations
                 dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
-                desired_gap = R_desired + L
+                self.desired_gap = R_desired + L  # Add leader length for front bumper distance
+                ttc= R / max(1e-5, R_dot) # Time-to-collision (Rajamani Eq. 6.4)
                 
                 if i == 0:
                     initial_gap_error = gap_error
+                    initial_desired_gap = self.desired_gap
                     initial_R_dot = R_dot
             
             # === Step 3: Rajamani Section 6.7.2 Transitional Controller ===
             a_ref = 0.0
             mode = "UNKNOWN"
             
-            if sim_leader is None or dist_to_leader > self.DETECTION_RANGE:
+            # --- 1. Collision Avoidance (Zone 3) ---
+            # If leader is too close or TTC is short, apply emergency braking
+            if sim_leader and (R < self.MIN_CRITICAL_GAP or ttc < self.TTC_THRESHOLD):
+                mode = "COLLISION_AVOIDANCE"
+                a_ref = self.MAX_EMERGENCY_DECEL
+            
+            elif sim_leader is None or dist_to_leader > self.DETECTION_RANGE:
                 # =============================================
                 # CRUISE MODE: No leader or leader very far
                 # =============================================
@@ -275,10 +290,12 @@ class SystemReferenceGenerator:
                 gap_magnitude = abs(gap_error)
                 if gap_magnitude < 5.0:
                     # Near equilibrium - blend in CTG for fine control
+                    if gap_error < 0.02 * self.desired_gap:  
+                        mode = "CTG - Following"
                     blend = 1.0 - (gap_magnitude / 5.0)
                     blend = blend * blend  # Quadratic for smoother transition
                     a_ref = (1 - blend) * a_ref + blend * a_ctg
-                
+        
                 # Feedforward from leader acceleration
                 if hasattr(sim_leader.state, 'ax') and sim_leader.state.ax is not None:
                     a_ref += 0.5 * sim_leader.state.ax
@@ -310,7 +327,8 @@ class SystemReferenceGenerator:
         # Debug output (every 100 calls)
         self._debug_counter += 1
         if self._debug_counter % 100 == 1:
-            print(f"   📍 RefGen: mode={initial_mode}, gap_err={initial_gap_error:.1f}m, "
+            percent_gap_error = (initial_gap_error / max(1e-5, initial_desired_gap)) * 100 if initial_desired_gap > 0 else 0
+            print(f"   📍 RefGen: mode={initial_mode}, gap_err={initial_gap_error:.1f}m, gap_err%={percent_gap_error:.1f}%  "
                   f"R_dot={initial_R_dot:.2f}m/s, a_ref[0]={accel_sequence[0]:.2f} m/s²")
         
         return accel_sequence, state_sequence
