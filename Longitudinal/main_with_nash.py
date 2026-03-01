@@ -207,10 +207,10 @@ class PlatoonNashSimulation(PlatoonSimulation):
         
         # --- 6. Shared Control ---
         alpha = lambda_k / (1.0 + lambda_k)
-        u_raw = alpha * u1_opt + (1 - alpha) * u2_opt
+        u_shared = u1_opt + u2_opt
         
         # FILTER 2: Smooth the final control input (currently disabled)
-        u_shared = u_raw  # self.control_filter.filter(u_raw)
+        u_shared = u_shared  # self.control_filter.filter(u_shared)
         
         # Apply hard constraints
         u_shared = self.safety_field.apply_hard_constraint(
