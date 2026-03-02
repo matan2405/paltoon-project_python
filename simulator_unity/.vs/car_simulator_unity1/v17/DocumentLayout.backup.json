@@ -1,0 +1,111 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|c:\\users\\matan\\onedrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\assets\\scripts\\vehiclesystem\\transmission.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|solutionrelative:assets\\scripts\\vehiclesystem\\transmission.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\assets\\scripts\\vehiclesystem\\powertrain.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|solutionrelative:assets\\scripts\\vehiclesystem\\powertrain.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|c:\\users\\matan\\onedrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\assets\\scripts\\vehiclesystem\\advancedbicyclemodel_dst.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|solutionrelative:assets\\scripts\\vehiclesystem\\advancedbicyclemodel_dst.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\assets\\scripts\\vehiclesystem\\vehicleparameters.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|solutionrelative:assets\\scripts\\vehiclesystem\\vehicleparameters.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\assets\\scripts\\simulatorsystem\\logitech29\\logitechg29controller.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{BAFE03D5-3B29-8361-D686-CCBA2716E282}|Assembly-CSharp.csproj|solutionrelative:assets\\scripts\\simulatorsystem\\logitech29\\logitechg29controller.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 1,
+          "Children": [
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{d78612c7-9962-4b83-95d9-268046dad23a}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "Transmission.cs",
+              "DocumentMoniker": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\Transmission.cs",
+              "RelativeDocumentMoniker": "Assets\\Scripts\\VehicleSystem\\Transmission.cs",
+              "ToolTip": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\Transmission.cs",
+              "RelativeToolTip": "Assets\\Scripts\\VehicleSystem\\Transmission.cs",
+              "ViewState": "AgIAAPMAAAAAAAAAAAAqwAsBAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-06-04T15:44:33.914Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Bookmark",
+              "Name": "ST:0:0:{34e76e81-ee4a-11d0-ae2e-00a0c90fffc3}"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "AdvancedBicycleModel_dst.cs",
+              "DocumentMoniker": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\AdvancedBicycleModel_dst.cs",
+              "RelativeDocumentMoniker": "Assets\\Scripts\\VehicleSystem\\AdvancedBicycleModel_dst.cs",
+              "ToolTip": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\AdvancedBicycleModel_dst.cs",
+              "RelativeToolTip": "Assets\\Scripts\\VehicleSystem\\AdvancedBicycleModel_dst.cs",
+              "ViewState": "AgIAAK4BAAAAAAAAAAAqwMYBAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-06-04T07:19:02.652Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "Powertrain.cs",
+              "DocumentMoniker": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\Powertrain.cs",
+              "RelativeDocumentMoniker": "Assets\\Scripts\\VehicleSystem\\Powertrain.cs",
+              "ToolTip": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\Powertrain.cs",
+              "RelativeToolTip": "Assets\\Scripts\\VehicleSystem\\Powertrain.cs",
+              "ViewState": "AgIAABgBAAAAAAAAAAAqwDABAAABAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-06-03T13:04:01.953Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "VehicleParameters.cs",
+              "DocumentMoniker": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\VehicleParameters.cs",
+              "RelativeDocumentMoniker": "Assets\\Scripts\\VehicleSystem\\VehicleParameters.cs",
+              "ToolTip": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\VehicleSystem\\VehicleParameters.cs",
+              "RelativeToolTip": "Assets\\Scripts\\VehicleSystem\\VehicleParameters.cs",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAUAAAAjAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-06-03T13:01:44.29Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "LogitechG29Controller.cs",
+              "DocumentMoniker": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\SimulatorSystem\\Logitech29\\LogitechG29Controller.cs",
+              "RelativeDocumentMoniker": "Assets\\Scripts\\SimulatorSystem\\Logitech29\\LogitechG29Controller.cs",
+              "ToolTip": "C:\\Users\\matan\\OneDrive - post.bgu.ac.il\\\u05DE\u05E1\u05DE\u05DB\u05D9\u05DD\\\u05EA\u05D5\u05D0\u05E8 \u05E9\u05E0\u05D9\\car simulator with git\\car_simulator_unity1\\Assets\\Scripts\\SimulatorSystem\\Logitech29\\LogitechG29Controller.cs",
+              "RelativeToolTip": "Assets\\Scripts\\SimulatorSystem\\Logitech29\\LogitechG29Controller.cs",
+              "ViewState": "AgIAABMAAAAAAAAAAAAQwB8AAAAcAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2025-05-19T08:34:05.721Z"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
