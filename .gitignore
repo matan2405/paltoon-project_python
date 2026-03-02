@@ -1,8 +1,36 @@
-fix_emojis.py
-/platoon_sim_kinematic_results
-**/convoy_simulation_results/
+# --- Python Specific ---
 __pycache__/
 *.pyc
-*.png
-*.gif
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# --- Project Specific Results ---
+/platoon_sim_kinematic_results/
+**/convoy_simulation_results/
 Longitudinal/former_file/
+fix_emojis.py
+
+# --- Unity Specific (Relative to simulator_unity/) ---
+**/[Ll]ibrary/
+**/[Tt]emp/
+**/[Oo]bj/
+**/[Bb]uild/
+**/[Builds]/
+**/[Ll]ogs/
+**/[MemoryCaptures]/
+**/UserSettings/
+
+# --- IDE & OS Specific ---
+*.csproj
+*.sln
+*.userprefs
+*.unitypackage.meta
+.DS_Store
+Thumbs.db
+
+# --- Media (Handled by LFS) ---
+# למרות שהגדרת LFS, מומלץ לא להתעלם מהם ב-gitignore כדי ש-Git ידע לעקוב אחריהם כ-Pointers
+# *.png  <-- שים לב: מחקתי את החסימה על PNG כדי שתוכל להעלות טקסטורות דרך LFS
