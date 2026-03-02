@@ -12,6 +12,10 @@ venv/
 **/convoy_simulation_results/
 Longitudinal/former_file/
 fix_emojis.py
+**/lateral_sim_results_v2/
+**/platoon_sim_kinematic_results/
+
+
 
 # --- Unity Specific (Relative to simulator_unity/) ---
 **/[Ll]ibrary/
