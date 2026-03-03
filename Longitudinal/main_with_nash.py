@@ -334,7 +334,7 @@ def select_driver_type() -> str:
         except EOFError:
             return 'normal'
 
-def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: str = 'normal') -> PlatoonNashSimulation:
+def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: str = 'normal', animate: bool = True, show_plots: bool = True) -> PlatoonNashSimulation:
     """Run a single scenario with Nash control"""
     print(f"\n{'='*60}")
     print(f"🎯 {scenario_name} (with Nash Equilibrium Control)")
@@ -537,7 +537,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
         # 1. Create comprehensive plots (always works)
         try:
             print(f"\n👍 Creating comprehensive plots...")
-            static_plots_fig = create_comprehensive_plots(sim, scenario_name)
+            static_plots_fig = create_comprehensive_plots(sim, scenario_name, show_plots=show_plots)
             if static_plots_fig:
                 print(f"✅ Comprehensive plots created and saved successfully")
             else:
@@ -552,7 +552,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
         try:
             if hasattr(sim, 'authority_history') and len(sim.authority_history) > 0:
                 print(f"\n👍Ž¨ Creating Nash analysis plots (9-grid)...")
-                nash_fig = create_nash_analysis_plots(sim, scenario_name)
+                nash_fig = create_nash_analysis_plots(sim, scenario_name, show_plots=show_plots)
                 if nash_fig:
                     print(f"✅ Nash analysis plots (9-grid) created and saved successfully")
                 else:
@@ -569,19 +569,20 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
         time.sleep(2)
         
         # Create animation
-        try:
-            import matplotlib.pyplot as plt
-            plt.ioff()
-            anim = create_platoon_animation(sim, f"{scenario_name} Animation (Nash)")
-            if anim:
-                sim._last_animation = anim
-            plt.ion()
-            if static_plots_fig:
-                plt.figure(static_plots_fig.number)
-                plt.draw()
-                static_plots_fig.canvas.flush_events()
-        except Exception as anim_error:
-            print(f"⚠️ Animation skipped: {anim_error}")
+        if animate:
+            try:
+                import matplotlib.pyplot as plt
+                plt.ioff()
+                anim = create_platoon_animation(sim, f"{scenario_name} Animation (Nash)")
+                if anim:
+                    sim._last_animation = anim
+                plt.ion()
+                if static_plots_fig:
+                    plt.figure(static_plots_fig.number)
+                    plt.draw()
+                    static_plots_fig.canvas.flush_events()
+            except Exception as anim_error:
+                print(f"⚠️ Animation skipped: {anim_error}")
         
         create_detailed_scenario_summary(sim, scenario_name, execution_time)
         
@@ -717,7 +718,7 @@ def run_all_scenarios_with_nash():
             
             try:
                 params = get_scenario_params(scenario, driver)
-                result = run_scenario_with_nash(key, params, driver_type=driver)
+                result = run_scenario_with_nash(key, params, driver_type=driver,animate=False, show_plots=False)
                 results[key] = result
                 print(f"✅ {key} completed!")
                 

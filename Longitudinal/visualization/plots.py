@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import HEADLESS_MODE, RESULTS_DIR
 
 
-def create_comprehensive_plots(simulation, scenario_name="Simulation"):
+def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plots=True):
     """Create comprehensive 9-plot analysis for any simulation"""
     try:
         import matplotlib.pyplot as plt
@@ -245,30 +245,31 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation"):
             traceback.print_exc()
         
         # Display plots
-        try:
-            if HEADLESS_MODE:
-                print("📊 Plots saved in headless mode")
-                try:
-                    import subprocess
-                    import platform
-                    if platform.system() == 'Windows':
-                        os.startfile(filename)
-                        print("📊 Opening plots with system image viewer")
-                    else:
-                        subprocess.run(['xdg-open', filename], check=False)
-                        print("📊 Opening plots with system image viewer")
-                except:
-                    print("📊 Plots saved - you can view them manually")
-            else:
-                print("📊 Displaying interactive plots...")
-                plt.ion()
-                plt.show(block=False)
-                plt.draw()
-                fig.canvas.flush_events()
-                print("✅ Interactive plots displayed successfully!")
-                time.sleep(2)
-        except Exception as show_error:
-            print(f"⚠️ Could not display plots interactively: {show_error}")
+        if show_plots:
+            try:
+                if HEADLESS_MODE:
+                    print("📊 Plots saved in headless mode")
+                    try:
+                        import subprocess
+                        import platform
+                        if platform.system() == 'Windows':
+                            os.startfile(filename)
+                            print("📊 Opening plots with system image viewer")
+                        else:
+                            subprocess.run(['xdg-open', filename], check=False)
+                            print("📊 Opening plots with system image viewer")
+                    except:
+                        print("📊 Plots saved - you can view them manually")
+                else:
+                    print("📊 Displaying interactive plots...")
+                    plt.ion()
+                    plt.show(block=False)
+                    plt.draw()
+                    fig.canvas.flush_events()
+                    print("✅ Interactive plots displayed successfully!")
+                    time.sleep(2)
+            except Exception as show_error:
+                print(f"⚠️ Could not display plots interactively: {show_error}")
         
         return fig if 'fig' in locals() else None
         
@@ -354,7 +355,7 @@ def create_detailed_scenario_summary(simulation, scenario_name, execution_time):
     print(f"{'=' * 70}")
 
 
-def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analysis"):
+def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analysis", show_plots=True):
     """Create comprehensive 9-plot Nash equilibrium analysis for longitudinal control"""
     try:
         print(f"[PALETTE] Creating enhanced 9-grid Nash analysis plots for: {scenario_name}")
@@ -583,7 +584,7 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             print(f"   📁 Path: {abs_path}")
             print(f"   💾 Size: {file_size:.1f} KB")
             
-            if not HEADLESS_MODE:
+            if not HEADLESS_MODE and show_plots:
                 plt.show(block=False)
                 plt.pause(0.1)
             
