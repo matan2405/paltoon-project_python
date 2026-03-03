@@ -21,7 +21,7 @@ from control.human_driver import HumanDriver
 class PlatoonSimulation:
     """Main simulation class"""
 
-    def __init__(self,Np=None,initial_x_platoon=None,initial_velocity_platoon=None, num_cars_platoon=4, initial_x_human=0.0, initial_velocity_human=0.0, use_state_space: bool = True):
+    def __init__(self,Np=None,initial_x_platoon=None,initial_velocity_platoon=None, num_cars_platoon=4, target_speed_platoon=120.0 / 3.6, initial_x_human=0.0, initial_velocity_human=0.0, use_state_space: bool = True, driver_type='normal'):
         # Simulation parameters - match platoon_control.py exactly
         self.dt = SIMULATION_DT  # 0.02s timestep like platoon_control.py
         self.time = 0.0
@@ -45,6 +45,7 @@ class PlatoonSimulation:
         self.is_prediction_mode = False  # Placeholder for prediction mode
         
         # Human vehicle initial conditions
+        self.driver_type = driver_type
         self.initial_x_human = initial_x_human
         self.initial_velocity_human = initial_velocity_human
         self.use_state_space = use_state_space  # Whether to use state-space model for platoon vehicles
@@ -62,6 +63,7 @@ class PlatoonSimulation:
         
         # Track vehicle indices for consistent plotting
         self.vehicle_indices = {}
+        self.target_speed_platoon = target_speed_platoon
         
         # Create vehicles
         self.setup_vehicles()
@@ -76,7 +78,7 @@ class PlatoonSimulation:
             vehicle.use_state_space_model = self.use_state_space  # Use state-space bicycle model if specified
             vehicle.use_kinematic_model = not self.use_state_space  # Platoon vehicles always use kinematic model
             vehicle.use_kinematic = not self.use_state_space
-            vehicle.target_velocity = 120.0 / 3.6  # 120 km/h in m/s
+            vehicle.target_velocity = self.target_speed_platoon  # Set target velocity for platoon vehicles
             self.platoon_vehicles.append(vehicle)
         
         # Human vehicle configuration - SET THIS TO CHOOSE MOTION MODEL
@@ -87,7 +89,7 @@ class PlatoonSimulation:
         self.human_vehicle = Vehicle(initial_x=self.initial_x_human, initial_y=-2, vehicle_id="Human", initial_velocity=self.initial_velocity_human)
         
         # Create human driver and set motion model
-        self.human_driver = HumanDriver(self.human_vehicle)
+        self.human_driver = HumanDriver(self.human_vehicle, driver_type=self.driver_type)
         self.human_driver.set_motion_model( human_use_kinematic, human_use_state_space)
         
         # Managers
@@ -99,6 +101,7 @@ class PlatoonSimulation:
         else:
             motion_type = "kinematic" if human_use_kinematic else "complex dynamics"
         print(f"Human vehicle using: {motion_type} model")
+        
         
         # Initialize vehicle tracking for consistent plotting
         self.all_vehicles = self.platoon_vehicles + [self.human_vehicle]

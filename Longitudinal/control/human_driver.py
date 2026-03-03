@@ -25,25 +25,28 @@ import os
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import SIMULATION_DT, NASH_NP
+from config import SIMULATION_DT, NASH_NP, NASH_DRIVER_PARAMS  
 from vehicle.vehicle import Vehicle
 
 
 class HumanDriver:
-    def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = SIMULATION_DT):
+    def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = SIMULATION_DT, driver_type= 'normal'):
         self.vehicle = vehicle
-        self.target_speed = target_speed
         
         # Standard Parameters (Execution)
-        self.max_acceleration = 2.5
-        self.desired_time_headway = 1.2
-        self.min_spacing = 2.0
-        self.delta_IDM = 4.0
-        self.comfortable_deceleration = 2.0
+        self.driver_type = driver_type
+        profile = NASH_DRIVER_PARAMS.get(driver_type, NASH_DRIVER_PARAMS['normal'])
+        self.max_acceleration = profile['max_acceleration']
+        self.max_deceleration = profile['max_deceleration']
+        self.desired_time_headway = profile['desired_time_headway']
+        self.min_spacing = profile['min_spacing']
+        self.delta_IDM = profile['delta_IDM']
+        self.comfortable_deceleration = profile['comfortable_deceleration']
+        self.target_speed = target_speed + profile['target_speed_offset'] / 3.6  # Convert km/h offset to m/s
         
         # Planning Parameters (More tolerant for Nash prediction)
-        self.plan_time_headway = 0.8  # Shorter headway for planning
-        self.plan_decel = 4.0  # Harder braking allowed in planning
+        self.plan_time_headway = profile['plan_time_headway']
+        self.plan_decel = profile['plan_decel']
         
         self.dt = dt
         self.merging = False
@@ -107,7 +110,7 @@ class HumanDriver:
         desired_accel = self.max_acceleration * (free_road_term + interaction_term)
         
         # Constraints
-        desired_accel = np.clip(desired_accel, -4.0, 2.5)
+        desired_accel = np.clip(desired_accel, self.max_deceleration, self.max_acceleration)
         
         if mode == 'execution':
             # Apply to vehicle (Throttle/Brake logic)
@@ -116,7 +119,7 @@ class HumanDriver:
                 brake = 0.0
             elif desired_accel < -0.1:
                 throttle = 0.0
-                brake = np.clip(abs(desired_accel) / 4.0, 0, 1)
+                brake = np.clip(abs(desired_accel) / abs(self.max_deceleration), 0, 1)
             else:
                 throttle = 0.0
                 brake = 0.0

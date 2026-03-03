@@ -55,8 +55,8 @@ class LowPassFilter:
 class PlatoonNashSimulation(PlatoonSimulation):
     """Extended platoon simulation with Nash equilibrium control"""
     
-    def __init__(self, Constrained_Nash=True):
-        super().__init__()
+    def __init__(self, Constrained_Nash=True, driver_type='normal'):
+        super().__init__(driver_type=driver_type)
         
         # Initialize Nash control components
         self.safety_field = EllipseLongitudinalSafetyField()
@@ -287,14 +287,61 @@ class PlatoonNashSimulation(PlatoonSimulation):
 
         super().update()
 
-def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashSimulation:
+def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict:
+    """Get scenario parameters — matches lateral system pattern."""
+    if scenario_name == 'join_before':
+        initial_x = 100.0
+        target_speed = 100.0
+        join_trigger_time = 25.0
+    elif scenario_name == 'join_middle':
+        initial_x = -10.0
+        target_speed = 110.0
+        join_trigger_time = 20.0
+    elif scenario_name == 'join_after':
+        initial_x = -200.0
+        target_speed = 110.0
+        join_trigger_time = 15.0
+    else:
+        raise ValueError(f"Unknown scenario: {scenario_name}")
+    
+    return {
+        'initial_x': initial_x,
+        'initial_y': -2.0,
+        'target_speed': target_speed,
+        'join_trigger_time': join_trigger_time,
+        'driver_type': driver_type,
+    }
+
+
+def select_driver_type() -> str:
+    """Let user select driver type interactively."""
+    print("\nSelect driver type:")
+    print("1. Cautious  (large headway, gentle braking, slower)")
+    print("2. Normal    (standard IDM parameters)")
+    print("3. Aggressive (short headway, hard braking, faster)")
+    
+    while True:
+        try:
+            choice = input("Enter choice (1-3): ").strip()
+            if choice == '1':
+                return 'cautious'
+            elif choice == '2':
+                return 'normal'
+            elif choice == '3':
+                return 'aggressive'
+            else:
+                print("Invalid choice. Please enter 1, 2, or 3.")
+        except EOFError:
+            return 'normal'
+
+def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: str = 'normal') -> PlatoonNashSimulation:
     """Run a single scenario with Nash control"""
     print(f"\n{'='*60}")
     print(f"🎯 {scenario_name} (with Nash Equilibrium Control)")
     print(f"{'='*60}")
     
     # Create Nash simulation
-    sim = PlatoonNashSimulation()
+    sim = PlatoonNashSimulation(driver_type=driver_type)
     
     # Apply scenario parameters
     sim.human_vehicle.state.x = sim_params.get('initial_x', 0.0)
@@ -303,6 +350,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict) -> PlatoonNashS
     join_trigger_time = sim_params.get('join_trigger_time', 20.0)
     
     print(f"🚗 Scenario settings:")
+    print(f"   🧑‍✈️ Driver type: {driver_type}")
     print(f"   📍 Initial position: ({sim.human_vehicle.state.x:.1f}, {sim.human_vehicle.state.y:.1f})")
     print(f"   🎯 Target speed: {sim.human_driver.target_speed*3.6:.0f} km/h")
     print(f"   🧠 Nash control: ACTIVE (Bidirectional Safety)")
@@ -649,66 +697,49 @@ def print_nash_analysis(sim: PlatoonNashSimulation):
 
 
 def run_all_scenarios_with_nash():
-    """Run all three scenarios with Nash equilibrium control"""
-    print("👍š› Platoon Joining with Nash Equilibrium Control (Bidirectional)")
-    print("=" * 60)
+    """Run all 9 scenarios: 3 merge positions × 3 driver types."""
+    scenarios = ['join_before', 'join_middle', 'join_after']
+    driver_types = ['cautious', 'normal', 'aggressive']
+    total = len(scenarios) * len(driver_types)
     
-    scenarios = [
-        {
-            'name': 'Scenario 1: Join Before Platoon (Nash)',
-            'params': {
-                'initial_x': 100.0,
-                'initial_y': -2.0,
-                'target_speed': 100.0,
-                'join_trigger_time': 25.0
-            }
-        },
-        {
-            'name': 'Scenario 2: Join Middle of Platoon (Nash)',
-            'params': {
-                'initial_x': -10.0,
-                'initial_y': -2.0,
-                'target_speed': 110.0,
-                'join_trigger_time': 20.0
-            }
-        },
-        {
-            'name': 'Scenario 3: Join After Platoon (Nash)',
-            'params': {
-                'initial_x': -200.0,
-                'initial_y': -2.0,
-                'target_speed': 110.0,
-                'join_trigger_time': 15.0
-            }
-        }
-    ]
+    print(f"\n{'='*70}")
+    print(f"🚗 Running ALL {total} Scenarios (3 positions × 3 driver types)")
+    print(f"{'='*70}")
     
-    results = []
+    results = {}
+    completed = 0
     
-    for i, scenario in enumerate(scenarios, 1):
-        print(f"\n{'👍Ž¬' * 20}")
-        print(f"Starting {scenario['name']} [{i}/3]")
-        print(f"{'👍Ž¬' * 20}")
-        
-        try:
-            result = run_scenario_with_nash(scenario['name'], scenario['params'])
-            results.append((scenario['name'], result))
-            print(f"✅ {scenario['name']} completed!")
+    for scenario in scenarios:
+        for driver in driver_types:
+            key = f"{scenario}_{driver}"
+            completed += 1
+            print(f"\n[{completed}/{total}] {scenario} — {driver}")
             
-            if i < len(scenarios):
-                print("\n⏸️ 3-second pause before next scenario...")
-                time.sleep(3)
-        except Exception as e:
-            print(f"❌ Error in {scenario['name']}: {e}")
-            results.append((scenario['name'], None))
+            try:
+                params = get_scenario_params(scenario, driver)
+                result = run_scenario_with_nash(key, params, driver_type=driver)
+                results[key] = result
+                print(f"✅ {key} completed!")
+                
+                if completed < total:
+                    time.sleep(3)
+            except Exception as e:
+                print(f"❌ Error in {key}: {e}")
+                results[key] = None
     
-    # Overall summary
-    print(f"\n{'👍' * 25}")
-    print("Nash Control Scenarios Summary (Bidirectional Safety)")
-    print(f"{'👍' * 25}")
+    # Summary matrix
+    successful = sum(1 for v in results.values() if v is not None)
+    print(f"\n✅ Completed: {successful}/{total}")
     
-    successful = sum(1 for _, r in results if r is not None)
-    print(f"👍 Completed: {successful}/3 scenarios")
+    print(f"\n  {'':15s} | {'Cautious':^12s} | {'Normal':^12s} | {'Aggressive':^12s}")
+    print(f"  {'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}")
+    for scenario in scenarios:
+        row = f"  {scenario:15s} |"
+        for driver in driver_types:
+            key = f"{scenario}_{driver}"
+            status = "  ✅  " if results.get(key) is not None else "  ❌  "
+            row += f" {status:^12s} |"
+        print(row)
     
     return results
 
@@ -716,38 +747,46 @@ def run_all_scenarios_with_nash():
 if __name__ == "__main__":
     os.system('cls' if os.name == 'nt' else 'clear')
     
-    print("🚗 Platoon Simulation with Nash Equilibrium Control (Bidirectional)")
+    print("🚗 Platoon Simulation with Nash Equilibrium Control")
     print("=" * 60)
-    print("1. Scenario 1 - Join Before Platoon (Nash)")
-    print("2. Scenario 2 - Join Middle of Platoon (Nash)")
-    print("3. Scenario 3 - Join After Platoon (Nash)")
-    print("4. Run all scenarios with Nash control")
-    print("5. Compare: Run original simulation (without Nash)")
+    print("1. Join Before Platoon")
+    print("2. Join Middle of Platoon")
+    print("3. Join After Platoon")
+    print("4. Run ALL scenarios (9 = 3 positions × 3 driver types)")
+    print("5. Single scenario with driver type selection")
+    print("6. Compare: Run original simulation (without Nash)")
     
     try:
-        choice = input("\nEnter choice (1-5): ").strip()
+        choice = input("\nEnter choice (1-6): ").strip()
         
-        if choice == "1":
-            run_scenario_with_nash("Join Before Platoon", {
-                'initial_x': 100.0, 'initial_y': -2.0, 
-                'target_speed': 100.0, 'join_trigger_time': 25.0
-            })
-        elif choice == "2":
-            run_scenario_with_nash("Join Middle of Platoon", {
-                'initial_x': -5.0, 'initial_y': -2.0,
-                'target_speed': 110.0, 'join_trigger_time': 20.0
-            })
-        elif choice == "3":
-            run_scenario_with_nash("Join After Platoon", {
-                'initial_x': -200.0, 'initial_y': -2.0,
-                'target_speed': 110.0, 'join_trigger_time': 15.0
-            })
-        elif choice == "4":
+        if choice in ['1', '2', '3']:
+            scenario_map = {
+                '1': 'join_before', '2': 'join_middle', '3': 'join_after'
+            }
+            scenario = scenario_map[choice]
+            driver_type = select_driver_type()
+            params = get_scenario_params(scenario, driver_type)
+            run_scenario_with_nash(scenario, params, driver_type=driver_type)
+            
+        elif choice == '4':
             run_all_scenarios_with_nash()
-        elif choice == "5":
+            
+        elif choice == '5':
+            print("\nSelect scenario:")
+            print("1. Join Before")
+            print("2. Join Middle")
+            print("3. Join After")
+            sc = input("Enter choice (1-3): ").strip()
+            scenario_names = {'1': 'join_before', '2': 'join_middle', '3': 'join_after'}
+            if sc in scenario_names:
+                driver_type = select_driver_type()
+                params = get_scenario_params(scenario_names[sc], driver_type)
+                run_scenario_with_nash(scenario_names[sc], params, driver_type=driver_type)
+            
+        elif choice == '6':
             print("🚗 Running original simulation without Nash...")
             simulation = run_simulation()
-            print("\n👍 Original simulation completed!")
+            print("\n✅ Original simulation completed!")
         else:
             print("❌ Invalid choice")
     

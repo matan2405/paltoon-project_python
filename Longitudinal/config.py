@@ -143,19 +143,37 @@ NASH_REGULARIZATION = 1e-5
 # Cautious driver: higher R2 (gentle control), higher S2 (more cooperative)
 NASH_DRIVER_PARAMS = {
     'cautious': {
-        'R2_factor': 1.5,       # 50% higher - more gentle
-        'S2_factor': 1.5,       # 50% more cooperative with system
-        'Q_pos_factor': 0.8,    # Less aggressive tracking
+        'max_acceleration': 1.8,             # [m/s²]
+        'comfortable_deceleration': 1.5,     # [m/s²]
+        'desired_time_headway': 1.8,         # [s]
+        'min_spacing': 3.0,                  # [m]
+        'delta_IDM': 4.0,
+        'plan_time_headway': 1.2,            # [s]
+        'plan_decel': 3.0,                   # [m/s²]
+        'target_speed_offset': -10.0,        # [km/h]
+        'max_deceleration': -3.0,                   # [m/s²]
     },
     'normal': {
-        'R2_factor': 1.0,       # Baseline
-        'S2_factor': 1.0,
-        'Q_pos_factor': 1.0,
+        'max_acceleration': 2.5,
+        'comfortable_deceleration': 2.0,
+        'desired_time_headway': 1.2,
+        'min_spacing': 2.0,
+        'delta_IDM': 4.0,
+        'plan_time_headway': 0.8,
+        'plan_decel': 4.0,
+        'target_speed_offset': 0.0,
+        'max_deceleration': -4.0,
     },
     'aggressive': {
-        'R2_factor': 0.6,       # 40% lower - more control effort
-        'S2_factor': 0.6,       # Less cooperative (more independent)
-        'Q_pos_factor': 1.3,    # More aggressive tracking
+        'max_acceleration': 3.5,
+        'comfortable_deceleration': 3.0,
+        'desired_time_headway': 0.8,
+        'min_spacing': 1.5,
+        'delta_IDM': 4.0,
+        'plan_time_headway': 0.5,
+        'plan_decel': 5.0,
+        'target_speed_offset': +10.0,
+        'max_deceleration': -5.0,
     }
 }
 

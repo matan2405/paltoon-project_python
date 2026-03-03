@@ -56,5 +56,5 @@
         "temp/": true,
         "Temp/": true
     },
-    "dotnet.defaultSolution": "car_simulator_unity1.slnx"
+    "dotnet.defaultSolution": "simulator_unity.slnx"
 }
