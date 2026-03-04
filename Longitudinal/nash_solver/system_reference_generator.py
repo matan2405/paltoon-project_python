@@ -191,7 +191,7 @@ class SystemReferenceGenerator:
         initial_R_dot = 0.0
         
         for i in range(self.Np):
-            # === Step 1: Update Leader Prediction ===
+            # === Step 1: Update Leader/Follower Prediction ===
             if sim_leader:
                 sim_leader.state.x += sim_leader.state.vx * self.dt
             
