@@ -151,7 +151,8 @@ NASH_DRIVER_PARAMS = {
         'plan_time_headway': 1.2,            # [s]
         'plan_decel': 3.0,                   # [m/s²]
         'target_speed_offset': -10.0,        # [km/h]
-        'max_deceleration': -3.0,                   # [m/s²]
+        'max_deceleration': -3.0,            # [m/s²]
+        'initial_x_offset': 20.0,             # [m] Start with larger gap to leader
     },
     'normal': {
         'max_acceleration': 2.5,
@@ -163,6 +164,7 @@ NASH_DRIVER_PARAMS = {
         'plan_decel': 4.0,
         'target_speed_offset': 0.0,
         'max_deceleration': -4.0,
+        'initial_x_offset': 0.0,              # [m] Start with normal gap to leader
     },
     'aggressive': {
         'max_acceleration': 3.5,
@@ -174,6 +176,7 @@ NASH_DRIVER_PARAMS = {
         'plan_decel': 5.0,
         'target_speed_offset': +10.0,
         'max_deceleration': -5.0,
+        'initial_x_offset': -20.0,             # [m] Start with smaller gap to leader
     }
 }
 

@@ -12,7 +12,7 @@ from typing import List, Tuple
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import SIMULATION_DT, DEFAULT_SIMULATION_TIME
+from config import NASH_DRIVER_PARAMS, SIMULATION_DT, DEFAULT_SIMULATION_TIME
 from vehicle.vehicle import Vehicle
 from control.platoon_control import PlatoonManager
 from control.human_driver import HumanDriver
@@ -86,7 +86,7 @@ class PlatoonSimulation:
         human_use_state_space = self.use_state_space  # Set to True for state-space bicycle model
 
         # Human vehicle (left lane)
-        self.human_vehicle = Vehicle(initial_x=self.initial_x_human, initial_y=-2, vehicle_id="Human", initial_velocity=self.initial_velocity_human)
+        self.human_vehicle = Vehicle(initial_x=self.initial_x_human+NASH_DRIVER_PARAMS[self.driver_type]['initial_x_offset'], initial_y=-2, vehicle_id="Human", initial_velocity=self.initial_velocity_human)
         
         # Create human driver and set motion model
         self.human_driver = HumanDriver(self.human_vehicle, driver_type=self.driver_type)
@@ -175,6 +175,8 @@ class PlatoonSimulation:
             closest_vehicle_id = None
             
             for platoon_vehicle in self.platoon_manager.vehicles:
+                if platoon_vehicle.vehicle_id == self.human_vehicle.vehicle_id:
+                    continue  # Skip self — distance to self is always 0
                 distance = abs(human_pos - platoon_vehicle.state.x)
                 if distance < min_distance:
                     min_distance = distance

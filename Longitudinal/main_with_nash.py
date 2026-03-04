@@ -55,8 +55,8 @@ class LowPassFilter:
 class PlatoonNashSimulation(PlatoonSimulation):
     """Extended platoon simulation with Nash equilibrium control"""
     
-    def __init__(self, Constrained_Nash=True, driver_type='normal'):
-        super().__init__(driver_type=driver_type)
+    def __init__(self, Constrained_Nash=True, driver_type='normal', **kwargs):
+        super().__init__(driver_type=driver_type, **kwargs)
         
         # Initialize Nash control components
         self.safety_field = EllipseLongitudinalSafetyField()
@@ -294,11 +294,11 @@ def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict
         target_speed = 100.0
         join_trigger_time = 25.0
     elif scenario_name == 'join_middle':
-        initial_x = -10.0
+        initial_x = -300.0
         target_speed = 110.0
         join_trigger_time = 20.0
     elif scenario_name == 'join_after':
-        initial_x = -200.0
+        initial_x = -500.0
         target_speed = 110.0
         join_trigger_time = 15.0
     else:
@@ -306,7 +306,7 @@ def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict
     
     return {
         'initial_x': initial_x,
-        'initial_y': -2.0,
+        'initial_y': -3.5,
         'target_speed': target_speed,
         'join_trigger_time': join_trigger_time,
         'driver_type': driver_type,
@@ -341,12 +341,10 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
     print(f"{'='*60}")
     
     # Create Nash simulation
-    sim = PlatoonNashSimulation(driver_type=driver_type)
+    sim = PlatoonNashSimulation(driver_type=driver_type,initial_x_human=sim_params.get('initial_x', 0.0),initial_velocity_human=sim_params.get('target_speed', 100.0) / 3.6,)
     
     # Apply scenario parameters
-    sim.human_vehicle.state.x = sim_params.get('initial_x', 0.0)
-    sim.human_vehicle.state.y = sim_params.get('initial_y', -2.0)
-    sim.human_driver.target_speed = sim_params.get('target_speed', 100.0) / 3.6
+    sim.human_vehicle.state.y = sim_params.get('initial_y', -3.5)
     join_trigger_time = sim_params.get('join_trigger_time', 20.0)
     
     print(f"🚗 Scenario settings:")
@@ -697,6 +695,82 @@ def print_nash_analysis(sim: PlatoonNashSimulation):
     print(f"{'='*60}")
 
 
+def extract_scenario_metrics(sim: PlatoonNashSimulation) -> Dict:
+    """Extract key performance metrics from a completed simulation."""
+    metrics = {}
+    
+    try:
+        # --- Safety: Minimum gap to leader ---
+        if hasattr(sim, 'human_closest_distance_history') and sim.human_closest_distance_history:
+            valid_distances = [d for d in sim.human_closest_distance_history if d is not None]
+            metrics['min_gap'] = min(valid_distances) if valid_distances else float('nan')
+        else:
+            metrics['min_gap'] = float('nan')
+        
+        # --- Comfort: Max jerk (derivative of acceleration) ---
+        if len(sim.nash_data['shared_inputs']) > 1:
+            shared = np.array(sim.nash_data['shared_inputs'])
+            jerk = np.diff(shared) / sim.dt_nash
+            metrics['max_jerk'] = np.max(np.abs(jerk))
+            metrics['rms_accel'] = np.sqrt(np.mean(shared**2))
+        else:
+            metrics['max_jerk'] = float('nan')
+            metrics['rms_accel'] = float('nan')
+        
+        # --- Performance: Final velocity (km/h) ---
+        if len(sim.velocity_history) > 0:
+            human_idx = sim.vehicle_indices.get('Human', -1)
+            if human_idx >= 0:
+                final_velocities = sim.velocity_history[-1]
+                metrics['final_vel_kmh'] = final_velocities[human_idx] if human_idx < len(final_velocities) else float('nan')
+            else:
+                metrics['final_vel_kmh'] = float('nan')
+        else:
+            metrics['final_vel_kmh'] = float('nan')
+        
+        # --- Velocity tracking: Steady-state error ---
+        target_vel_kmh = sim.platoon_manager.target_velocity * 3.6
+        metrics['vel_error_kmh'] = abs(target_vel_kmh - metrics['final_vel_kmh']) if not np.isnan(metrics['final_vel_kmh']) else float('nan')
+        
+        # --- Nash cooperation ratio ---
+        total_active = sim.nash_data['cooperation_moments'] + sim.nash_data['opposition_moments']
+        if total_active > 0:
+            metrics['coop_ratio'] = sim.nash_data['cooperation_moments'] / total_active
+        else:
+            metrics['coop_ratio'] = float('nan')
+        
+        # --- Authority: Average and max lambda ---
+        if len(sim.nash_data['authority_ratios']) > 0:
+            metrics['avg_lambda'] = np.mean(sim.nash_data['authority_ratios'])
+            metrics['max_lambda'] = np.max(sim.nash_data['authority_ratios'])
+        else:
+            metrics['avg_lambda'] = float('nan')
+            metrics['max_lambda'] = float('nan')
+        
+        # --- Safety field: Max force ---
+        if len(sim.nash_data['field_forces']) > 0:
+            metrics['max_force'] = np.max(sim.nash_data['field_forces'])
+        else:
+            metrics['max_force'] = float('nan')
+        
+        # --- Final gap error ---
+        if len(sim.gap_error_history) > 0:
+            metrics['final_gap_error'] = sim.gap_error_history[-1]
+        else:
+            metrics['final_gap_error'] = float('nan')
+        
+        metrics['status'] = 'OK'
+        
+    except Exception as e:
+        metrics['status'] = f'ERR: {e}'
+        for key in ['min_gap', 'max_jerk', 'rms_accel', 'final_vel_kmh', 
+                     'vel_error_kmh', 'coop_ratio', 'avg_lambda', 'max_lambda',
+                     'max_force', 'final_gap_error']:
+            metrics.setdefault(key, float('nan'))
+    
+    return metrics
+
+
 def run_all_scenarios_with_nash():
     """Run all 9 scenarios: 3 merge positions × 3 driver types."""
     scenarios = ['join_before', 'join_middle', 'join_after']
@@ -704,43 +778,144 @@ def run_all_scenarios_with_nash():
     total = len(scenarios) * len(driver_types)
     
     print(f"\n{'='*70}")
-    print(f"🚗 Running ALL {total} Scenarios (3 positions × 3 driver types)")
+    print(f"  Running ALL {total} Scenarios (3 positions x 3 driver types)")
     print(f"{'='*70}")
     
     results = {}
+    metrics_all = {}
     completed = 0
     
     for scenario in scenarios:
         for driver in driver_types:
             key = f"{scenario}_{driver}"
             completed += 1
-            print(f"\n[{completed}/{total}] {scenario} — {driver}")
+            print(f"\n[{completed}/{total}] {scenario} -- {driver}")
             
             try:
                 params = get_scenario_params(scenario, driver)
-                result = run_scenario_with_nash(key, params, driver_type=driver,animate=False, show_plots=False)
+                result = run_scenario_with_nash(key, params, driver_type=driver, animate=False, show_plots=False)
                 results[key] = result
-                print(f"✅ {key} completed!")
+                metrics_all[key] = extract_scenario_metrics(result)
+                print(f"  {key} completed!")
                 
                 if completed < total:
                     time.sleep(3)
             except Exception as e:
-                print(f"❌ Error in {key}: {e}")
+                print(f"  Error in {key}: {e}")
                 results[key] = None
+                metrics_all[key] = {'status': f'FAILED: {e}'}
     
-    # Summary matrix
+    # ================================================================
+    # DETAILED SUMMARY TABLE
+    # ================================================================
     successful = sum(1 for v in results.values() if v is not None)
-    print(f"\n✅ Completed: {successful}/{total}")
     
-    print(f"\n  {'':15s} | {'Cautious':^12s} | {'Normal':^12s} | {'Aggressive':^12s}")
+    print(f"\n\n{'='*110}")
+    print(f"  COMPREHENSIVE RESULTS SUMMARY  ({successful}/{total} completed)")
+    print(f"{'='*110}")
+    
+    # --- Table 1: Safety ---
+    print(f"\n  SAFETY")
+    print(f"  {'Metric':20s} | {'':15s} | {'Cautious':>12s} | {'Normal':>12s} | {'Aggressive':>12s}")
+    print(f"  {'-'*20}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}")
+    
+    for metric_key, metric_label, fmt, unit in [
+        ('min_gap',       'Min Gap',          '.1f', 'm'),
+        ('max_force',     'Max Safety Force',  '.1f', 'N'),
+        ('final_gap_error','Final Gap Error',  '.1f', 'm'),
+    ]:
+        for scenario in scenarios:
+            row = f"  {metric_label:20s} | {scenario:15s} |"
+            for driver in driver_types:
+                key = f"{scenario}_{driver}"
+                m = metrics_all.get(key, {})
+                val = m.get(metric_key, float('nan'))
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    cell = f"{val:{fmt}}{unit}"
+                else:
+                    cell = "  N/A  "
+                row += f" {cell:>12s} |"
+            print(row)
+        # Separator between metrics
+        if metric_key != 'final_gap_error':
+            print(f"  {'':20s} | {'':15s} | {'':>12s} | {'':>12s} | {'':>12s}")
+    
+    # --- Table 2: Comfort ---
+    print(f"\n  COMFORT")
+    print(f"  {'Metric':20s} | {'':15s} | {'Cautious':>12s} | {'Normal':>12s} | {'Aggressive':>12s}")
+    print(f"  {'-'*20}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}")
+    
+    for metric_key, metric_label, fmt, unit in [
+        ('max_jerk',    'Max Jerk',         '.2f', ' m/s3'),
+        ('rms_accel',   'RMS Acceleration',  '.2f', ' m/s2'),
+    ]:
+        for scenario in scenarios:
+            row = f"  {metric_label:20s} | {scenario:15s} |"
+            for driver in driver_types:
+                key = f"{scenario}_{driver}"
+                m = metrics_all.get(key, {})
+                val = m.get(metric_key, float('nan'))
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    cell = f"{val:{fmt}}{unit}"
+                else:
+                    cell = "  N/A  "
+                row += f" {cell:>12s} |"
+            print(row)
+        if metric_key != 'rms_accel':
+            print(f"  {'':20s} | {'':15s} | {'':>12s} | {'':>12s} | {'':>12s}")
+    
+    # --- Table 3: Performance & Nash ---
+    print(f"\n  PERFORMANCE & NASH GAME")
+    print(f"  {'Metric':20s} | {'':15s} | {'Cautious':>12s} | {'Normal':>12s} | {'Aggressive':>12s}")
+    print(f"  {'-'*20}-+-{'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}")
+    
+    for metric_key, metric_label, fmt, unit in [
+        ('final_vel_kmh',  'Final Velocity',    '.1f', ' km/h'),
+        ('vel_error_kmh',  'Vel Track Error',   '.1f', ' km/h'),
+        ('coop_ratio',     'Cooperation Ratio',  '.1%', ''),
+        ('avg_lambda',     'Avg Authority',      '.2f', ''),
+        ('max_lambda',     'Max Authority',      '.2f', ''),
+    ]:
+        for scenario in scenarios:
+            row = f"  {metric_label:20s} | {scenario:15s} |"
+            for driver in driver_types:
+                key = f"{scenario}_{driver}"
+                m = metrics_all.get(key, {})
+                val = m.get(metric_key, float('nan'))
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    if '%' in fmt:
+                        cell = f"{val:{fmt}}"
+                    else:
+                        cell = f"{val:{fmt}}{unit}"
+                else:
+                    cell = "  N/A  "
+                row += f" {cell:>12s} |"
+            print(row)
+        if metric_key != 'max_lambda':
+            print(f"  {'':20s} | {'':15s} | {'':>12s} | {'':>12s} | {'':>12s}")
+    
+    # --- Quick Status Matrix (compact) ---
+    print(f"\n  STATUS MATRIX")
+    print(f"  {'':15s} | {'Cautious':^12s} | {'Normal':^12s} | {'Aggressive':^12s}")
     print(f"  {'-'*15}-+-{'-'*12}-+-{'-'*12}-+-{'-'*12}")
     for scenario in scenarios:
         row = f"  {scenario:15s} |"
         for driver in driver_types:
             key = f"{scenario}_{driver}"
-            status = "  ✅  " if results.get(key) is not None else "  ❌  "
-            row += f" {status:^12s} |"
+            m = metrics_all.get(key, {})
+            st = m.get('status', 'FAILED')
+            if st == 'OK':
+                min_g = m.get('min_gap', float('nan'))
+                if not np.isnan(min_g) and min_g < 5.0:
+                    cell = " UNSAFE "
+                else:
+                    cell = "   OK   "
+            else:
+                cell = " FAILED "
+            row += f" {cell:^12s} |"
         print(row)
+    
+    print(f"\n{'='*110}")
     
     return results
 

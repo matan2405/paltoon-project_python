@@ -200,6 +200,11 @@ class SystemReferenceGenerator:
             gap_error = 0.0
             desired_gap = self.desired_gap  # Default desired gap
             
+            if i == 0:
+                initial_gap_error = 0.0
+                initial_desired_gap = self.desired_gap
+                initial_R_dot = 0.0
+            
             if sim_leader:
                 # R = Range (actual gap, bumper to bumper)
                 L = sim_leader.L # [m] Leader length
