@@ -153,11 +153,9 @@ class PlatoonNashSimulation(PlatoonSimulation):
         # FILTER 1: Smooth the field force
         field_force = self.force_filter.filter(raw_field_force)
         
-        breakdown = self.safety_field.get_force_breakdown_from_platoon(
-            ego_vehicle=human_vehicle,
-            platoon_manager=self.platoon_manager,
-            desired_gap=desired_gap
-        )
+        # Reuse breakdown already computed inside compute_risk_force_from_platoon()
+        # instead of calling get_force_breakdown_from_platoon() which recomputes it
+        breakdown = self.safety_field._last_breakdown
 
         # --- 3. Authority Allocation ---
         lambda_k = self.authority_allocator.compute_authority_ratio(
@@ -258,9 +256,16 @@ class PlatoonNashSimulation(PlatoonSimulation):
         }
 
     def update_with_nash(self):
-        """Override update method to include Nash control"""
+        """Override update method to include Nash control (multi-rate: Nash at dt_nash, dynamics at dt)"""
         if self.human_driver.merging or self.human_vehicle.joined_platoon:
-            nash_result = self.nash_control_step(self.human_vehicle)
+            # Multi-rate control: solve Nash only every dt_nash (0.1s), not every dt (0.01s)
+            time_since_last_nash = self.time % self.dt_nash
+            if time_since_last_nash < self.dt or not hasattr(self, '_last_nash_result'):
+                nash_result = self.nash_control_step(self.human_vehicle)
+                self._last_nash_result = nash_result
+            else:
+                nash_result = self._last_nash_result
+
             shared_accel = nash_result['shared_input']
             self.human_vehicle.nash_acceleration = shared_accel
             self.human_vehicle.a_desired = shared_accel
@@ -283,7 +288,6 @@ class PlatoonNashSimulation(PlatoonSimulation):
                       f"Total={nash_result['field_force']:.1f}N"
                       f", λ={nash_result['authority_ratio']:.2f}"
                       f", alpha={nash_result['authority_ratio']/(1+nash_result['authority_ratio']):.2f}")
-                time.sleep(3)  # Small delay for readability
 
         super().update()
 
@@ -383,7 +387,6 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
             # Status report every 5 seconds
             if sim.time % 5.0 < sim.dt:
                 sim.print_status()
-                # time.sleep(5)  # Small delay for readability
                 if human_joined and len(sim.nash_data['shared_inputs']) > 0:
                     # Safely get last forces
                     leader_force = sim.nash_data['leader_forces'][-1] if sim.nash_data['leader_forces'] else 0.0
@@ -563,8 +566,6 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
             import traceback
             traceback.print_exc()
             nash_fig = None
-
-        time.sleep(2)
         
         # Create animation
         if animate:
@@ -799,7 +800,7 @@ def run_all_scenarios_with_nash():
                 print(f"  {key} completed!")
                 
                 if completed < total:
-                    time.sleep(3)
+                    pass  # time.sleep(3) removed for performance
             except Exception as e:
                 print(f"  Error in {key}: {e}")
                 results[key] = None
