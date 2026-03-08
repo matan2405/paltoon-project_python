@@ -210,6 +210,7 @@ class Vehicle:
                 engine_force = wheel_torque / self.params.wheel_radius
                 engine_force *= self.actual_throttle
             else:
+<<<<<<< HEAD
                 # Engine braking: pumping losses + internal friction when
                 # drivetrain is connected but throttle is released.
                 # Real engines produce ~50-80 Nm of retarding torque at
@@ -223,6 +224,9 @@ class Vehicle:
                     engine_force = -(braking_torque * total_ratio / self.params.wheel_radius)
                 else:
                     engine_force = 0.0
+=======
+                engine_force = 0.0
+>>>>>>> 17fa96e0c85c7c38ca8539df6443fe540d22dcaa
 
             # Brake force
             if self.actual_brake > 0.001:
@@ -270,6 +274,7 @@ class Vehicle:
         self.state.vx = V
         self.state.ax = self.a
     
+<<<<<<< HEAD
     def get_dynamic_max_acceleration(self) -> float:
         """Physical max acceleration available from the engine at the current state.
 
@@ -294,6 +299,37 @@ class Vehicle:
 
         a_max = (F_engine_max - F_aero - F_roll) / self.params.mass
         return max(a_max, 0.0)
+=======
+    def _rate_limit_pedals(self, dt: float):
+        """Rate-limit throttle and brake pedal positions for realistic driver behavior.
+
+        Smoothly moves actual_throttle/actual_brake toward the commanded
+        throttle_input/brake_input at realistic human pedal rates.
+        """
+        # Rate-limit throttle
+        throttle_error = self.throttle_input - self.actual_throttle
+        if throttle_error > 0:
+            # Opening throttle
+            max_change = self.throttle_opening_rate * dt
+            self.actual_throttle += min(throttle_error, max_change)
+        else:
+            # Closing throttle
+            max_change = self.throttle_closing_rate * dt
+            self.actual_throttle += max(throttle_error, -max_change)
+        self.actual_throttle = np.clip(self.actual_throttle, 0.0, 1.0)
+
+        # Rate-limit brake
+        brake_error = self.brake_input - self.actual_brake
+        if brake_error > 0:
+            # Applying brake
+            max_change = self.brake_apply_rate * dt
+            self.actual_brake += min(brake_error, max_change)
+        else:
+            # Releasing brake
+            max_change = self.brake_release_rate * dt
+            self.actual_brake += max(brake_error, -max_change)
+        self.actual_brake = np.clip(self.actual_brake, 0.0, 1.0)
+>>>>>>> 17fa96e0c85c7c38ca8539df6443fe540d22dcaa
 
     def update_dynamics(self, dt: float):
         """Update vehicle dynamics - choose between complex, kinematic, state-space,
@@ -340,6 +376,7 @@ class Vehicle:
         self.actual_brake = np.clip(self.actual_brake, 0.0, 1.0)
 
     def update_dynamics_complex(self, dt: float):
+<<<<<<< HEAD
         """Update vehicle dynamics using complex model with ZOH-consistent integration.
 
         Integration order must match the ZOH double integrator used by the
@@ -350,6 +387,9 @@ class Vehicle:
         The previous semi-implicit Euler (v first, then x using NEW v) introduced
         a systematic O(a*dt²) position bias per step relative to ZOH.
         """
+=======
+        """Update vehicle dynamics using complex model - original implementation"""
+>>>>>>> 17fa96e0c85c7c38ca8539df6443fe540d22dcaa
         # Rate-limit pedal inputs for realistic driver behavior
         self._rate_limit_pedals(dt)
 
