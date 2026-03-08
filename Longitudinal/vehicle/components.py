@@ -97,45 +97,111 @@ class Engine:
         )
 
 class Transmission:
-    """Automatic transmission model"""
-    
+    """Automatic transmission model with smooth gear shifts (DCT-style)"""
+
     def __init__(self):
         # Gear ratios from Unity code
         self.gear_ratios = [3.769, 2.087, 1.481, 1.152, 1.167, 0.970]
         self.final_drive_ratios = [3.238, 3.238, 3.238, 3.238, 2.615, 2.615]
-        
+
         # Shift points
         self.upshift_rpm = [2800, 3200, 3600, 4000, 4400]
         self.downshift_rpm = [1400, 1600, 1800, 2000, 2200]
-        
+
         self.current_gear = 0  # 0-based index
         self.is_shifting = False
         self.shift_timer = 0.0
-        
+
+        # Smooth gear shift parameters
+        self.previous_gear = 0            # Gear before shift started
+        self.shift_duration = 0.3         # Total shift duration [s] (300ms for DCT)
+        self.torque_blend_progress = 1.0  # 0.0 = shift just started, 1.0 = fully engaged
+
     def get_total_ratio(self) -> float:
-        """Get current total gear reduction"""
+        """Get current total gear reduction (instantaneous, for RPM calculation)"""
         return self.gear_ratios[self.current_gear] * self.final_drive_ratios[self.current_gear]
-    
+
+    def get_effective_ratio(self) -> float:
+        """Get effective gear ratio with smooth blending during shifts.
+
+        During a gear shift, blends between old and new gear ratios
+        based on torque_blend_progress for smooth force transition.
+        """
+        if not self.is_shifting or self.torque_blend_progress >= 1.0:
+            # No shift in progress — use current gear ratio
+            return self.gear_ratios[self.current_gear] * self.final_drive_ratios[self.current_gear]
+
+        # Blend between previous and current gear ratios
+        old_ratio = self.gear_ratios[self.previous_gear] * self.final_drive_ratios[self.previous_gear]
+        new_ratio = self.gear_ratios[self.current_gear] * self.final_drive_ratios[self.current_gear]
+
+        # Smooth S-curve blend (smoother than linear)
+        t = self.torque_blend_progress
+        smooth_t = t * t * (3.0 - 2.0 * t)  # Hermite smoothstep
+
+        return old_ratio * (1.0 - smooth_t) + new_ratio * smooth_t
+
+    def get_torque_multiplier(self) -> float:
+        """Get torque multiplier during gear shifts.
+
+        Simulates realistic DCT shift behavior:
+        - Torque dips during clutch transition
+        - Gradually restores as new gear engages
+
+        Returns 1.0 when no shift is in progress.
+        """
+        if not self.is_shifting or self.torque_blend_progress >= 1.0:
+            return 1.0
+
+        t = self.torque_blend_progress
+
+        # Realistic DCT torque profile during shift:
+        # Phase 1 (0-30%): Clutch 1 disengaging — torque drops to 0.3
+        # Phase 2 (30-70%): Clutch 2 engaging — torque rises to 0.7
+        # Phase 3 (70-100%): Full engagement — torque rises to 1.0
+        if t < 0.3:
+            # Torque drops from 1.0 to 0.3 (clutch disengaging)
+            phase_t = t / 0.3
+            return 1.0 - 0.7 * phase_t
+        elif t < 0.7:
+            # Torque rises from 0.3 to 0.7 (new gear engaging)
+            phase_t = (t - 0.3) / 0.4
+            return 0.3 + 0.4 * phase_t
+        else:
+            # Torque rises from 0.7 to 1.0 (full engagement)
+            phase_t = (t - 0.7) / 0.3
+            return 0.7 + 0.3 * phase_t
+
     def update(self, engine_rpm: float, vehicle_speed: float, dt: float):
-        """Update transmission state and gear selection"""
+        """Update transmission state and gear selection with smooth shifts"""
         if self.is_shifting:
             self.shift_timer += dt
-            if self.shift_timer >= 0.2:  # 200ms shift time
+            # Advance torque blend progress
+            self.torque_blend_progress = min(1.0, self.shift_timer / self.shift_duration)
+
+            if self.shift_timer >= self.shift_duration:
                 self.is_shifting = False
                 self.shift_timer = 0.0
+                self.torque_blend_progress = 1.0
             return
-        
+
         # Check for upshift
-        if (self.current_gear < len(self.gear_ratios) - 1 and 
+        if (self.current_gear < len(self.gear_ratios) - 1 and
             engine_rpm > self.upshift_rpm[self.current_gear]):
+            self.previous_gear = self.current_gear
             self.current_gear += 1
             self.is_shifting = True
-            
-        # Check for downshift  
-        elif (self.current_gear > 0 and 
+            self.shift_timer = 0.0
+            self.torque_blend_progress = 0.0
+
+        # Check for downshift
+        elif (self.current_gear > 0 and
               engine_rpm < self.downshift_rpm[self.current_gear - 1]):
+            self.previous_gear = self.current_gear
             self.current_gear -= 1
             self.is_shifting = True
+            self.shift_timer = 0.0
+            self.torque_blend_progress = 0.0
 
 
 class VehicleState:

@@ -37,8 +37,16 @@ class Vehicle:
         self.a_desired = 0.0         # Desired acceleration [m/s^2]
         
         # For compatibility with human driver
-        self.throttle_input = 0.0    # 0 to 1
-        self.brake_input = 0.0       # 0 to 1
+        self.throttle_input = 0.0    # 0 to 1 (commanded/desired)
+        self.brake_input = 0.0       # 0 to 1 (commanded/desired)
+
+        # Rate-limited pedal positions (physical pedal state)
+        self.actual_throttle = 0.0       # Physical throttle position [0, 1]
+        self.actual_brake = 0.0          # Physical brake position [0, 1]
+        self.throttle_opening_rate = 0.4  # Max throttle increase per second (full open in ~2.5s)
+        self.throttle_closing_rate = 0.6  # Max throttle decrease per second (full close in ~1.7s)
+        self.brake_apply_rate = 1.5      # Max brake increase per second (fast for safety)
+        self.brake_release_rate = 0.8    # Max brake decrease per second
         
         # Mode controls
         self.autonomous_mode = False
@@ -118,21 +126,23 @@ class Vehicle:
             
             return total_force, 0.0
         else:
-            # Original complex calculation for human-driven vehicles
+            # Complex calculation for human-driven vehicles
+            # Uses rate-limited actual_throttle/actual_brake and smooth gear ratios
             # Engine force
-            if self.throttle_input > 0.001:
+            if self.actual_throttle > 0.001:
                 engine_torque = self.engine.get_torque(self.engine.rpm)
-                total_ratio = self.transmission.get_total_ratio()
-                wheel_torque = engine_torque * total_ratio
+                effective_ratio = self.transmission.get_effective_ratio()
+                torque_multiplier = self.transmission.get_torque_multiplier()
+                wheel_torque = engine_torque * effective_ratio * torque_multiplier
                 engine_force = wheel_torque / self.params.wheel_radius
-                engine_force *= self.throttle_input
+                engine_force *= self.actual_throttle
             else:
                 engine_force = 0.0
-                
+
             # Brake force
-            if self.brake_input > 0.001:
+            if self.actual_brake > 0.001:
                 max_brake_force = self.params.mass * self.params.gravity * self.params.tire_friction_coeff
-                brake_force = max_brake_force * self.brake_input
+                brake_force = max_brake_force * self.actual_brake
             else:
                 brake_force = 0.0
                 
@@ -175,6 +185,36 @@ class Vehicle:
         self.state.vx = V
         self.state.ax = self.a
     
+    def _rate_limit_pedals(self, dt: float):
+        """Rate-limit throttle and brake pedal positions for realistic driver behavior.
+
+        Smoothly moves actual_throttle/actual_brake toward the commanded
+        throttle_input/brake_input at realistic human pedal rates.
+        """
+        # Rate-limit throttle
+        throttle_error = self.throttle_input - self.actual_throttle
+        if throttle_error > 0:
+            # Opening throttle
+            max_change = self.throttle_opening_rate * dt
+            self.actual_throttle += min(throttle_error, max_change)
+        else:
+            # Closing throttle
+            max_change = self.throttle_closing_rate * dt
+            self.actual_throttle += max(throttle_error, -max_change)
+        self.actual_throttle = np.clip(self.actual_throttle, 0.0, 1.0)
+
+        # Rate-limit brake
+        brake_error = self.brake_input - self.actual_brake
+        if brake_error > 0:
+            # Applying brake
+            max_change = self.brake_apply_rate * dt
+            self.actual_brake += min(brake_error, max_change)
+        else:
+            # Releasing brake
+            max_change = self.brake_release_rate * dt
+            self.actual_brake += max(brake_error, -max_change)
+        self.actual_brake = np.clip(self.actual_brake, 0.0, 1.0)
+
     def update_dynamics(self, dt: float):
         """Update vehicle dynamics - choose between complex, kinematic or state-space model"""
         if self.use_state_space_model:
@@ -186,7 +226,10 @@ class Vehicle:
     
     def update_dynamics_complex(self, dt: float):
         """Update vehicle dynamics using complex model - original implementation"""
-        # Calculate forces
+        # Rate-limit pedal inputs for realistic driver behavior
+        self._rate_limit_pedals(dt)
+
+        # Calculate forces (uses rate-limited actual_throttle/actual_brake)
         Fx, _ = self.calculate_forces()
         
         # Steering angle
