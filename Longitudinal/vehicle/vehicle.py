@@ -7,7 +7,7 @@ import numpy as np
 import time
 from typing import Tuple
 from .components import VehicleParameters, Engine, Transmission, VehicleState
-
+from config import (SIMULATION_DT)
 
 class Vehicle:
     """Main vehicle class implementing bicycle model dynamics"""
@@ -37,13 +37,23 @@ class Vehicle:
         self.a_desired = 0.0         # Desired acceleration [m/s^2]
         
         # For compatibility with human driver
-        self.throttle_input = 0.0    # 0 to 1
-        self.brake_input = 0.0       # 0 to 1
+        self.throttle_input = 0.0    # 0 to 1 (commanded/desired)
+        self.brake_input = 0.0       # 0 to 1 (commanded/desired)
+
+        # Rate-limited pedal positions (physical pedal state)
+        self.actual_throttle = 0.0       # Physical throttle position [0, 1]
+        self.actual_brake = 0.0          # Physical brake position [0, 1]
+        self.throttle_opening_rate = 0.4  # Max throttle increase per second (full open in ~2.5s)
+        self.throttle_closing_rate = 0.6  # Max throttle decrease per second (full close in ~1.7s)
+        self.brake_apply_rate = 1.5      # Max brake increase per second (fast for safety)
+        self.brake_release_rate = 0.8    # Max brake decrease per second
         
         # Mode controls
         self.autonomous_mode = False
         self.use_kinematic_model = False  # False = complex dynamics, True = kinematic model
         self.use_state_space_model = False  # New state-space bicycle model
+        self.use_hierarchical_model = False  # Hierarchical: upper (double integrator) + lower (complex dynamics)
+        self.lower_level_controller = None  # Assigned when hierarchical mode is activated
         self.target_velocity = 0.0
         self.target_acceleration = 0.0
         
@@ -59,6 +69,11 @@ class Vehicle:
         self._debug_counter = 0  # For debug printing frequency control
         
         self.nash_acceleration = None  # For Nash equilibrium control input
+        
+        # Acceleration output filter for hierarchical mode
+        # Smooths noisy engine-level acceleration before Rajamani/Nash feedback
+        self._a_filtered = 0.0
+        self._a_filter_initialized = False
         
         # State-space matrices cache
         self.A=None
@@ -92,18 +107,84 @@ class Vehicle:
         """Current lateral velocity (m/s)"""
         return self.state.vy
         
-    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False):
-        """Set which motion model to use"""
-        if use_state_space:
+    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False,
+                         use_hierarchical: bool = False):
+        """Set which motion model to use.
+        
+        Parameters
+        ----------
+        use_kinematic : bool
+            Use simple kinematic model.
+        use_state_space : bool
+            Use double-integrator state-space model.
+        use_hierarchical : bool
+            Use hierarchical model: upper controller plans with double integrator,
+            lower controller converts a_desired to throttle/brake,
+            vehicle propagates with full longitudinal dynamics (engine, drag, etc.).
+        """
+        # Reset all flags first
+        self.use_kinematic_model = False
+        self.use_state_space_model = False
+        self.use_hierarchical_model = False
+        
+        if use_hierarchical:
+            self.use_hierarchical_model = True
+            # Also keep state-space flag for get_state_space_matrices() —
+            # Nash solver still uses the double integrator for planning.
             self.use_state_space_model = True
-            self.use_kinematic_model = False
+            model_name = "hierarchical (upper: double integrator, lower: complex dynamics)"
+            # Initialize lower-level controller
+            from control.lower_level_controller import LowerLevelController
+            self.lower_level_controller = LowerLevelController(self)
+            # Ensure engine/transmission are in a reasonable state
+            self._sync_engine_to_velocity()
+        elif use_state_space:
+            self.use_state_space_model = True
             model_name = "state-space bicycle model"
+        elif use_kinematic:
+            self.use_kinematic_model = True
+            model_name = "kinematic"
         else:
-            self.use_kinematic_model = use_kinematic
-            self.use_state_space_model = False
-            model_name = 'kinematic' if use_kinematic else 'complex dynamics'
+            model_name = "complex dynamics"
         
         print(f"{self.vehicle_id}: Motion model set to {model_name}")
+    
+    def _sync_engine_to_velocity(self):
+        """Synchronize engine RPM and gear to current velocity.
+        
+        Simulates sequential upshifting (same thresholds as Transmission.update)
+        so the initial gear is consistent with what the transmission would
+        naturally reach through gear progression at the current speed.
+        """
+        if abs(self.state.vx) > 0.1:
+            wheel_rpm = (self.state.vx * 60) / (2 * np.pi * self.params.wheel_radius)
+            # Walk gears from lowest, shifting up when RPM exceeds upshift threshold
+            # (mirrors Transmission.update sequential shift logic)
+            selected_gear = 0
+            for gear_idx in range(len(self.transmission.gear_ratios)):
+                ratio = (self.transmission.gear_ratios[gear_idx]
+                         * self.transmission.final_drive_ratios[gear_idx])
+                engine_rpm = wheel_rpm * ratio
+                # Skip gears where RPM exceeds redline
+                if engine_rpm > self.engine.redline_rpm:
+                    continue
+                # RPM below idle — gear too high for this speed
+                if engine_rpm < self.engine.idle_rpm:
+                    break
+                selected_gear = gear_idx
+                # Would the transmission upshift from this gear?
+                if (gear_idx < len(self.transmission.upshift_rpm) and
+                        engine_rpm > self.transmission.upshift_rpm[gear_idx]):
+                    continue  # yes — check next gear
+                else:
+                    break     # no — stay in this gear
+            self.transmission.current_gear = selected_gear
+            target_rpm = wheel_rpm * self.transmission.get_total_ratio()
+            target_rpm = np.clip(target_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
+            self.engine.rpm = target_rpm
+        else:
+            self.engine.rpm = self.engine.idle_rpm
+            self.transmission.current_gear = 0
         
     def calculate_forces(self) -> Tuple[float, float]:
         """Calculate longitudinal and lateral forces"""
@@ -118,21 +199,35 @@ class Vehicle:
             
             return total_force, 0.0
         else:
-            # Original complex calculation for human-driven vehicles
+            # Complex calculation for human-driven vehicles
+            # Uses rate-limited actual_throttle/actual_brake and smooth gear ratios
             # Engine force
-            if self.throttle_input > 0.001:
+            if self.actual_throttle > 0.001:
                 engine_torque = self.engine.get_torque(self.engine.rpm)
-                total_ratio = self.transmission.get_total_ratio()
-                wheel_torque = engine_torque * total_ratio
+                effective_ratio = self.transmission.get_effective_ratio()
+                torque_multiplier = self.transmission.get_torque_multiplier()
+                wheel_torque = engine_torque * effective_ratio * torque_multiplier
                 engine_force = wheel_torque / self.params.wheel_radius
-                engine_force *= self.throttle_input
+                engine_force *= self.actual_throttle
             else:
-                engine_force = 0.0
-                
+                # Engine braking: pumping losses + internal friction when
+                # drivetrain is connected but throttle is released.
+                # Real engines produce ~50-80 Nm of retarding torque at
+                # typical highway RPMs due to air compression in cylinders,
+                # bearing friction and auxiliary loads.
+                from config import ENGINE_BRAKING_BASE_TORQUE, ENGINE_BRAKING_MAX_TORQUE
+                if abs(self.state.vx) > 1.0 and self.actual_brake < 0.001:
+                    braking_torque = ENGINE_BRAKING_BASE_TORQUE * (self.engine.rpm / 2000.0)
+                    braking_torque = min(braking_torque, ENGINE_BRAKING_MAX_TORQUE)
+                    total_ratio = self.transmission.get_total_ratio()
+                    engine_force = -(braking_torque * total_ratio / self.params.wheel_radius)
+                else:
+                    engine_force = 0.0
+
             # Brake force
-            if self.brake_input > 0.001:
+            if self.actual_brake > 0.001:
                 max_brake_force = self.params.mass * self.params.gravity * self.params.tire_friction_coeff
-                brake_force = max_brake_force * self.brake_input
+                brake_force = max_brake_force * self.actual_brake
             else:
                 brake_force = 0.0
                 
@@ -175,25 +270,118 @@ class Vehicle:
         self.state.vx = V
         self.state.ax = self.a
     
+    def get_dynamic_max_acceleration(self) -> float:
+        """Physical max acceleration available from the engine at the current state.
+
+        a_max = (T_engine(rpm) * i_total / r_wheel - F_aero - F_roll) / m
+
+        Falls back to params.max_acceleration for kinematic / state-space models.
+        """
+        if not (self.use_hierarchical_model or
+                (not self.use_kinematic_model and not self.use_state_space_model)):
+            return self.params.max_acceleration
+
+        T = self.engine.get_torque(self.engine.rpm)
+        i_total = self.transmission.get_total_ratio()
+        F_engine_max = T * i_total / self.params.wheel_radius
+
+        v = self.state.vx
+        air_density = 1.225
+        F_aero = (0.5 * air_density * self.params.drag_coefficient *
+                  self.params.frontal_area * v * abs(v))
+        F_roll = (0.012 * self.params.mass * self.params.gravity
+                  if abs(v) > 0.01 else 0.0)
+
+        a_max = (F_engine_max - F_aero - F_roll) / self.params.mass
+        return max(a_max, 0.0)
+
     def update_dynamics(self, dt: float):
-        """Update vehicle dynamics - choose between complex, kinematic or state-space model"""
-        if self.use_state_space_model:
+        """Update vehicle dynamics - choose between complex, kinematic, state-space,
+        or hierarchical model.
+
+        In hierarchical mode the upper controller (Nash/Rajamani) has already
+        written a_desired using the double-integrator planning model.  Here the
+        lower-level controller converts that into throttle/brake, and the complex
+        dynamics model propagates the actual vehicle state.
+        """
+        if self.use_hierarchical_model:
+            self.update_dynamics_hierarchical(dt)
+        elif self.use_state_space_model:
             self.update_dynamics_state_space(dt)
         elif self.use_kinematic_model:
             self.update_dynamics_kinematic(dt)
         else:
             self.update_dynamics_complex(dt)
     
+    def _rate_limit_pedals(self, dt: float):
+        """Rate-limit throttle and brake pedal positions for realistic driver behavior.
+
+        Smoothly moves actual_throttle/actual_brake toward the commanded
+        throttle_input/brake_input at realistic human pedal rates.
+        """
+        # Rate-limit throttle
+        throttle_error = self.throttle_input - self.actual_throttle
+        if throttle_error > 0:
+            max_change = self.throttle_opening_rate * dt
+            self.actual_throttle += min(throttle_error, max_change)
+        else:
+            max_change = self.throttle_closing_rate * dt
+            self.actual_throttle += max(throttle_error, -max_change)
+        self.actual_throttle = np.clip(self.actual_throttle, 0.0, 1.0)
+
+        # Rate-limit brake
+        brake_error = self.brake_input - self.actual_brake
+        if brake_error > 0:
+            max_change = self.brake_apply_rate * dt
+            self.actual_brake += min(brake_error, max_change)
+        else:
+            max_change = self.brake_release_rate * dt
+            self.actual_brake += max(brake_error, -max_change)
+        self.actual_brake = np.clip(self.actual_brake, 0.0, 1.0)
+
     def update_dynamics_complex(self, dt: float):
-        """Update vehicle dynamics using complex model - original implementation"""
-        # Calculate forces
+        """Update vehicle dynamics using complex model with ZOH-consistent integration.
+
+        Integration order must match the ZOH double integrator used by the
+        upper controller for planning:
+            x[k+1] = x[k] + v[k]*dt + 0.5*a*dt²   (position first, OLD velocity)
+            v[k+1] = v[k] + a*dt
+
+        The previous semi-implicit Euler (v first, then x using NEW v) introduced
+        a systematic O(a*dt²) position bias per step relative to ZOH.
+        """
+        # Rate-limit pedal inputs for realistic driver behavior
+        self._rate_limit_pedals(dt)
+
+        # Calculate forces (uses rate-limited actual_throttle/actual_brake)
         Fx, _ = self.calculate_forces()
         
         # Steering angle
         steering_angle = self.steering_input * self.params.max_steering_angle
         
-        # Longitudinal dynamics
+        # Longitudinal acceleration from Newton's 2nd law
         self.state.ax = Fx / self.params.mass
+        
+        # Bicycle model for lateral dynamics (simplified)
+        if abs(self.state.vx) > 0.1:  # Avoid division by zero
+            beta = np.arctan(self.params.lr * np.tan(steering_angle) / self.params.wheelbase)
+            self.state.psi_dot = (self.state.vx * np.cos(beta) * np.tan(steering_angle)) / self.params.wheelbase
+            self.state.vy = self.state.vx * np.sin(beta)
+        else:
+            self.state.psi_dot = 0.0
+            self.state.vy = 0.0
+        
+        # === ZOH-consistent integration: POSITION first (using OLD velocity) ===
+        cos_psi = np.cos(self.state.psi)
+        sin_psi = np.sin(self.state.psi)
+        
+        self.state.psi += self.state.psi_dot * dt
+        self.state.x += (self.state.vx * cos_psi - self.state.vy * sin_psi) * dt \
+                       + 0.5 * self.state.ax * cos_psi * dt * dt
+        self.state.y += (self.state.vx * sin_psi + self.state.vy * cos_psi) * dt \
+                       + 0.5 * self.state.ax * sin_psi * dt * dt
+        
+        # === VELOCITY update (after position) ===
         self.state.vx += self.state.ax * dt
         self.state.vx = np.clip(self.state.vx, 0, self.params.max_velocity)
         
@@ -201,32 +389,16 @@ class Vehicle:
         self.v = self.state.vx
         self.a = self.state.ax
         
-        # Bicycle model for lateral dynamics (simplified)
-        if abs(self.state.vx) > 0.1:  # Avoid division by zero
-            # Simple bicycle model
-            beta = np.arctan(self.params.lr * np.tan(steering_angle) / self.params.wheelbase)
-            self.state.psi_dot = (self.state.vx * np.cos(beta) * np.tan(steering_angle)) / self.params.wheelbase
-            
-            # Update lateral velocity (simplified)
-            self.state.vy = self.state.vx * np.sin(beta)
-        else:
-            self.state.psi_dot = 0.0
-            self.state.vy = 0.0
-            
-        # Update position and orientation
-        self.state.psi += self.state.psi_dot * dt
-        self.state.x += self.state.vx * np.cos(self.state.psi) * dt - self.state.vy * np.sin(self.state.psi) * dt
-        self.state.y += self.state.vx * np.sin(self.state.psi) * dt + self.state.vy * np.cos(self.state.psi) * dt
-        
         # Update engine and transmission
         if abs(self.state.vx) > 0.1:
             wheel_rpm = (self.state.vx * 60) / (2 * np.pi * self.params.wheel_radius)
-            target_engine_rpm = wheel_rpm * self.transmission.get_total_ratio()
+            # Use get_effective_ratio() so RPM target blends smoothly during gear
+            # shifts (Hermite S-curve old→new).  get_total_ratio() would snap to
+            # the new gear the instant _begin_shift() sets current_gear, causing a
+            # sudden RPM target drop and sharp oscillations in RPM/throttle graphs.
+            target_engine_rpm = wheel_rpm * self.transmission.get_effective_ratio()
             target_engine_rpm = max(target_engine_rpm, self.engine.idle_rpm)
-            
-            if self.throttle_input > 0.001:
-                target_engine_rpm += self.throttle_input * 1200  # Additional RPM from throttle
-                
+
             self.engine.update_rpm(target_engine_rpm, dt)
         else:
             self.engine.update_rpm(self.engine.idle_rpm, dt)
@@ -252,6 +424,106 @@ class Vehicle:
         delta_r = 0  # rear wheel steering (zero for normal cars)
         
         self.state_equation_platoon(delta_f, delta_r, new_velocity, dt)
+    
+    def update_dynamics_hierarchical(self, dt: float):
+        """Update vehicle dynamics using hierarchical control architecture.
+
+        Architecture:
+        =============
+        Upper Controller (already executed before this call):
+            - Nash solver / Rajamani / IDM computed a_desired
+            - Result stored in self.a_desired
+
+        Lower Controller (direct force, executed here):
+            1. F_required = m*a_desired + F_aero + F_roll   (Newton's 2nd law)
+            2. direct_force = F_required                    (always; bypasses engine path)
+            3. display throttle = a_desired / max_accel     (smooth intent signal)
+
+        Force is always applied directly — the engine/transmission path is bypassed.
+        Engine RPM and transmission still simulate for realistic gear/RPM display.
+        No PI estimator, no throttle-fraction oscillation from RPM changes.
+
+        Complex Dynamics (executed here via update_dynamics_complex):
+            - Engine RPM and transmission gear still updated from wheel speed
+            - Aerodynamic drag, rolling resistance
+            - Newton's 2nd law → actual acceleration via direct_force
+
+        The get_state_space_matrices() method still returns the double-integrator
+        matrices so the Nash solver continues to plan with the simplified model.
+        """
+        a_desired = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
+
+        # === Direct force: a_desired → F_required ===
+        # Always bypass the engine/throttle force path.  Engine + transmission
+        # still run (RPM and gear changes display correctly), but force = m·a_desired
+        # exactly, independent of RPM / gear / torque curve.
+        #
+        # Root cause of the old throttle oscillation:
+        #   throttle = F_required / F_engine_max(rpm)
+        # The Audi TT torque curve rises 7× from idle (50 Nm) to plateau (370 Nm)
+        # in the first ~1800 RPM, so F_engine_max jumped 7× and throttle had to
+        # drop from 1.0 to ~0.15 — a large, non-physical oscillation in the graph.
+        v = self.state.vx
+        air_density = 1.225
+        F_aero = (0.5 * air_density * self.params.drag_coefficient *
+                  self.params.frontal_area * v * abs(v))
+        F_roll = (0.012 * self.params.mass * self.params.gravity
+                  if abs(v) > 0.01 else 0.0)
+        self.direct_force = self.params.mass * a_desired + F_aero + F_roll
+
+        # Display throttle/brake: normalized by F_required extremes.
+        #
+        # direct_force = m*a_desired + F_aero + F_roll  (net demand on the drivetrain)
+        #
+        # a_desired = 0    (cruise) : direct_force = F_aero+F_roll > 0
+        #   throttle ~15%  — engine partially on to overcome drag           (realistic)
+        # a_desired = -(F_aero+F_roll)/m ≈ -0.44 m/s² (coasting):
+        #   direct_force ≈ 0  → throttle=0, brake=0 but vehicle decelerates ("no pedals")
+        # a_desired strongly negative: direct_force < 0  → brake > 0
+        #
+        # Guarantees consistency: "no pedals shown" ↔ natural drag decel at that speed.
+        F_req_max = self.params.mass * self.params.max_acceleration + F_aero + F_roll
+        F_req_min = -(self.params.mass * abs(self.params.max_deceleration) + F_aero + F_roll)
+        if self.direct_force >= 0:
+            self.actual_throttle = np.clip(
+                self.direct_force / max(F_req_max, 1.0), 0.0, 1.0)
+            self.actual_brake = 0.0
+        else:
+            self.actual_throttle = 0.0
+            self.actual_brake = np.clip(
+                abs(self.direct_force) / max(abs(F_req_min), 1.0), 0.0, 1.0)
+        self.throttle_input = self.actual_throttle
+        self.brake_input = self.actual_brake
+        self.steering_input = 0.0
+
+        # Run complex dynamics in autonomous mode (direct force active).
+        # Engine RPM and transmission still update for realistic display.
+        was_autonomous = self.autonomous_mode
+        self.autonomous_mode = True
+        self.update_dynamics_complex(dt)
+        self.autonomous_mode = was_autonomous
+        
+        # ---------------------------------------------------------------
+        # Acceleration output filter (EMA)
+        # Smooths the noisy engine-level acceleration before it feeds back
+        # to the upper controller (Rajamani uses vehicle.a directly).
+        # Without this filter, gear-shift force discontinuities and RPM
+        # slew-rate limiting inject high-frequency noise into Rajamani's
+        # a_des = -k1*Car_1.a - k2*Car_2.a - ..., causing oscillations.
+        # ---------------------------------------------------------------
+        from config import LOWER_CTRL_ACCEL_FILTER_ALPHA
+        a_raw = self.a  # set by update_dynamics_complex()
+        
+        if not self._a_filter_initialized:
+            self._a_filtered = a_raw
+            self._a_filter_initialized = True
+        else:
+            alpha = LOWER_CTRL_ACCEL_FILTER_ALPHA
+            self._a_filtered = alpha * a_raw + (1.0 - alpha) * self._a_filtered
+        
+        # Use filtered acceleration for all feedback paths
+        self.a = self._a_filtered
+        self.state.ax = self._a_filtered
     
     def update_dynamics_state_space(self, dt: float):
         """Update vehicle dynamics using state-space bicycle model with ZOH discretization
@@ -323,7 +595,7 @@ class Vehicle:
         #         print(f"ZOH Debug {self.vehicle_id}: x={self.state.x:.2f}, vx={self.state.vx:.2f}, ax={u_acceleration:.2f}")
         #     self._debug_counter += 1
     
-    def get_state_space_matrices(self, dt: float = 0.02):
+    def get_state_space_matrices(self, dt: float = SIMULATION_DT):
         """Get state-space matrices A, B, C for the longitudinal bicycle model
         
         Args:

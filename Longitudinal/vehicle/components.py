@@ -25,7 +25,7 @@ class VehicleParameters:
     lr: float = 1.2525  # distance from CG to rear axle
     
     # Aerodynamics
-    drag_coefficient: float = 0.32  # Cd value from technical data
+    drag_coefficient: float = 0.30  # Cd value from official Audi TT specs
     frontal_area: float = 2.09  # m^2
     
     # Tire parameters
@@ -41,7 +41,13 @@ class VehicleParameters:
     
     # Performance
     max_velocity: float = 250.0 / 3.6  # m/s (250 km/h)
-    max_acceleration: float = 2.5  # m/s^2
+    max_acceleration: float = 2.5  # m/s² (longitudinal comfort limit)
+    max_deceleration: float = -3.5  # m/s² (emergency braking capability)
+    comfortable_deceleration: float = 2.0  # m/s² (magnitude, for IDM)
+    
+    # Lateral dynamics constraints
+    max_lateral_acceleration: float = 3.0  # m/s²
+    max_lateral_jerk: float = 2.5  # m/s³
     
     # Steering
     max_steering_angle: float = np.radians(30.0)  # rad
@@ -66,24 +72,42 @@ class Engine:
         self.state = 2  # 0=off, 1=starting, 2=running
         
     def get_torque(self, rpm: float) -> float:
-        """Calculate engine torque at given RPM"""
+        """Calculate engine torque at given RPM.
+
+        Based on the official Audi TT 2.0 TFSI (230 PS) torque curve
+        (automobile-catalog.com / ProfessorsCar approximation):
+
+        - 800-1000  RPM:  50 →  75 Nm  (idle, turbo not yet spooled)
+        - 1000-1200 RPM:  75 → 150 Nm  (turbo starting to build boost)
+        - 1200-1600 RPM: 150 → 370 Nm  (rapid turbo spool-up)
+        - 1600-4300 RPM: 370 Nm        (full boost plateau)
+        - 4300-4500 RPM: 370 → 351.5   (slight decline before power peak)
+        - 4500-6200 RPM: T = P_max/ω   (power-limited, 169 kW constant)
+        - 6200-6700 RPM: reduced power  (100% → 85%)
+        """
         if rpm < self.idle_rpm or rpm > self.redline_rpm:
             return 0.0
-            
-        # Simplified torque curve
-        if rpm <= 1200:
-            return np.interp(rpm, [self.idle_rpm, 1200], [180, 240])
+
+        if rpm <= 1000:
+            # Sub-boost region: very low torque at idle
+            return np.interp(rpm, [self.idle_rpm, 1000], [50, 75])
+        elif rpm <= 1200:
+            # Turbo starting to spool
+            return np.interp(rpm, [1000, 1200], [75, 150])
         elif rpm <= 1600:
-            return np.interp(rpm, [1200, 1600], [240, self.max_torque])
+            # Rapid boost build-up
+            return np.interp(rpm, [1200, 1600], [150, self.max_torque])
         elif rpm <= 4300:
             return self.max_torque
+        elif rpm <= 4500:
+            return np.interp(rpm, [4300, 4500],
+                             [self.max_torque, self.max_torque * 0.95])
         elif rpm <= 6200:
-            # Power limited region
             angular_velocity = (2 * np.pi * rpm) / 60
             return (self.max_power_kw * 1000) / angular_velocity
         else:
-            # Power drops after peak
-            power_mult = np.interp(rpm, [6200, self.redline_rpm], [1.0, 0.7])
+            # Graph shows ~225 Nm at 6700 RPM, so power drops to ~85%
+            power_mult = np.interp(rpm, [6200, self.redline_rpm], [1.0, 0.85])
             adjusted_power = self.max_power_kw * power_mult
             angular_velocity = (2 * np.pi * rpm) / 60
             return (adjusted_power * 1000) / angular_velocity
@@ -97,45 +121,138 @@ class Engine:
         )
 
 class Transmission:
-    """Automatic transmission model"""
-    
+    """Automatic transmission model — matches Unity Transmission.cs.
+
+    Shift criteria use both RPM **and** speed thresholds (OR logic), with a
+    cooldown between consecutive shifts to prevent gear hunting.
+    """
+
     def __init__(self):
         # Gear ratios from Unity code
         self.gear_ratios = [3.769, 2.087, 1.481, 1.152, 1.167, 0.970]
         self.final_drive_ratios = [3.238, 3.238, 3.238, 3.238, 2.615, 2.615]
-        
-        # Shift points
+
+        # RPM-based shift thresholds (same as Unity)
         self.upshift_rpm = [2800, 3200, 3600, 4000, 4400]
         self.downshift_rpm = [1400, 1600, 1800, 2000, 2200]
-        
+
+        # Speed-based shift thresholds [km/h] (from Unity Transmission.cs)
+        self.upshift_speed = [25.0, 45.0, 70.0, 100.0, 130.0]
+        self.downshift_speed = [12.0, 25.0, 45.0, 70.0, 100.0]
+
         self.current_gear = 0  # 0-based index
         self.is_shifting = False
         self.shift_timer = 0.0
-        
+        self.shift_duration = 0.4  # [s] total shift transition time
+
+        # Shift cooldown to prevent gear hunting (Unity: minShiftInterval=0.3s)
+        self._shift_cooldown = 0.0
+        self._min_shift_interval = 0.3  # [s]
+
+        # Smooth ratio blending: track old ratio to blend during shifts
+        self._old_total_ratio = self.gear_ratios[0] * self.final_drive_ratios[0]
+        self._new_total_ratio = self._old_total_ratio
+
     def get_total_ratio(self) -> float:
-        """Get current total gear reduction"""
+        """Get current total gear reduction (instantaneous, for RPM calculation).
+
+        Returns the current gear's ratio directly — no blending.
+        Use ``get_effective_ratio()`` for the force calculation path.
+        """
         return self.gear_ratios[self.current_gear] * self.final_drive_ratios[self.current_gear]
-    
+
+    def get_effective_ratio(self) -> float:
+        """Get effective gear ratio with smooth Hermite blending during shifts.
+
+        During a gear shift, blends between old and new gear ratios using
+        a Hermite smoothstep (S-curve) for a smoother force transition than
+        linear interpolation.
+        """
+        if not self.is_shifting:
+            return self.gear_ratios[self.current_gear] * self.final_drive_ratios[self.current_gear]
+
+        # Smooth S-curve blend (Hermite smoothstep: t²(3 - 2t))
+        t = min(self.shift_timer / self.shift_duration, 1.0)
+        smooth_t = t * t * (3.0 - 2.0 * t)
+
+        return (1.0 - smooth_t) * self._old_total_ratio + smooth_t * self._new_total_ratio
+
+    def get_torque_multiplier(self) -> float:
+        """Get torque multiplier during gear shifts.
+
+        Simulates realistic DCT shift behavior:
+        - Torque dips during clutch transition
+        - Gradually restores as new gear engages
+
+        Returns 1.0 when no shift is in progress.
+        """
+        if not self.is_shifting:
+            return 1.0
+
+        t = min(self.shift_timer / self.shift_duration, 1.0)
+
+        # Realistic DCT torque profile during shift:
+        # Phase 1 (0-30%): Clutch 1 disengaging — torque drops to 0.3
+        # Phase 2 (30-70%): Clutch 2 engaging — torque rises to 0.7
+        # Phase 3 (70-100%): Full engagement — torque rises to 1.0
+        if t < 0.3:
+            phase_t = t / 0.3
+            return 1.0 - 0.7 * phase_t
+        elif t < 0.7:
+            phase_t = (t - 0.3) / 0.4
+            return 0.3 + 0.4 * phase_t
+        else:
+            phase_t = (t - 0.7) / 0.3
+            return 0.7 + 0.3 * phase_t
+
+    def _begin_shift(self, new_gear: int):
+        """Start a gear shift to *new_gear* (0-based)."""
+        self._old_total_ratio = (self.gear_ratios[self.current_gear]
+                                 * self.final_drive_ratios[self.current_gear])
+        self.current_gear = new_gear
+        self._new_total_ratio = (self.gear_ratios[self.current_gear]
+                                 * self.final_drive_ratios[self.current_gear])
+        self.is_shifting = True
+        self.shift_timer = 0.0
+        self._shift_cooldown = self._min_shift_interval
+
     def update(self, engine_rpm: float, vehicle_speed: float, dt: float):
-        """Update transmission state and gear selection"""
+        """Update transmission state and gear selection.
+
+        Shift criteria mirror Unity's CheckForGearChange():
+        * Upshift:   RPM > threshold  **OR**  speed > threshold
+        * Downshift: RPM < threshold  **OR**  speed < threshold
+        A cooldown timer prevents rapid back-to-back shifts.
+        """
+        # --- tick shift-in-progress ---
         if self.is_shifting:
             self.shift_timer += dt
-            if self.shift_timer >= 0.2:  # 200ms shift time
+            if self.shift_timer >= self.shift_duration:
                 self.is_shifting = False
                 self.shift_timer = 0.0
             return
-        
-        # Check for upshift
-        if (self.current_gear < len(self.gear_ratios) - 1 and 
-            engine_rpm > self.upshift_rpm[self.current_gear]):
-            self.current_gear += 1
-            self.is_shifting = True
-            
-        # Check for downshift  
-        elif (self.current_gear > 0 and 
-              engine_rpm < self.downshift_rpm[self.current_gear - 1]):
-            self.current_gear -= 1
-            self.is_shifting = True
+
+        # --- tick cooldown ---
+        if self._shift_cooldown > 0.0:
+            self._shift_cooldown -= dt
+            return
+
+        speed_kmh = vehicle_speed * 3.6
+
+        # --- upshift check (RPM OR speed) ---
+        if self.current_gear < len(self.gear_ratios) - 1:
+            rpm_cond = engine_rpm > self.upshift_rpm[self.current_gear]
+            spd_cond = speed_kmh > self.upshift_speed[self.current_gear]
+            if rpm_cond or spd_cond:
+                self._begin_shift(self.current_gear + 1)
+                return
+
+        # --- downshift check (RPM OR speed) ---
+        if self.current_gear > 0:
+            rpm_cond = engine_rpm < self.downshift_rpm[self.current_gear - 1]
+            spd_cond = speed_kmh < self.downshift_speed[self.current_gear - 1]
+            if rpm_cond or spd_cond:
+                self._begin_shift(self.current_gear - 1)
 
 
 class VehicleState:

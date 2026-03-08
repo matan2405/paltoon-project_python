@@ -21,7 +21,7 @@ from control.human_driver import HumanDriver
 class PlatoonSimulation:
     """Main simulation class"""
 
-    def __init__(self,Np=None,initial_x_platoon=None,initial_velocity_platoon=None, num_cars_platoon=4, target_speed_platoon=120.0 / 3.6, initial_x_human=0.0, initial_velocity_human=0.0, use_state_space: bool = True, driver_type='normal'):
+    def __init__(self,Np=None,initial_x_platoon=None,initial_velocity_platoon=None, num_cars_platoon=4, target_speed_platoon=120.0 / 3.6, initial_x_human=0.0, initial_velocity_human=0.0, use_state_space: bool = True, use_hierarchical: bool = True, driver_type='normal'):
         # Simulation parameters - match platoon_control.py exactly
         self.dt = SIMULATION_DT  # 0.02s timestep like platoon_control.py
         self.time = 0.0
@@ -49,6 +49,7 @@ class PlatoonSimulation:
         self.initial_x_human = initial_x_human
         self.initial_velocity_human = initial_velocity_human
         self.use_state_space = use_state_space  # Whether to use state-space model for platoon vehicles
+        self.use_hierarchical = use_hierarchical  # Hierarchical control (upper: double integrator, lower: complex dynamics)
         # Data logging
         self.time_history = []
         self.position_history = []
@@ -56,6 +57,12 @@ class PlatoonSimulation:
         self.gap_history = []
         self.desired_gap_history = []
         self.acceleration_history = []
+        
+        # Hierarchical controller data logging
+        self.throttle_history = []
+        self.brake_history = []
+        self.rpm_history = []
+        self.gear_history = []
         
         # Human vehicle distance tracking (for animation)
         self.human_distance_history = {}
@@ -75,28 +82,41 @@ class PlatoonSimulation:
         for i in range(self.num_cars_platoon):
             vehicle = Vehicle(initial_x=self.initial_x_platoon[i], initial_y=0.0, vehicle_id=f"Platoon_{i+1}", initial_velocity=self.initial_velocity_platoon[i])
             vehicle.autonomous_mode = True
-            vehicle.use_state_space_model = self.use_state_space  # Use state-space bicycle model if specified
-            vehicle.use_kinematic_model = not self.use_state_space  # Platoon vehicles always use kinematic model
-            vehicle.use_kinematic = not self.use_state_space
+            if self.use_hierarchical:
+                # Hierarchical: upper plans with double integrator, lower drives complex dynamics
+                vehicle.set_motion_model(use_kinematic=False, use_state_space=False,
+                                         use_hierarchical=True)
+            elif self.use_state_space:
+                vehicle.use_state_space_model = True
+                vehicle.use_kinematic_model = False
+            else:
+                vehicle.use_kinematic_model = True
+                vehicle.use_state_space_model = False
             vehicle.target_velocity = self.target_speed_platoon  # Set target velocity for platoon vehicles
             self.platoon_vehicles.append(vehicle)
         
-        # Human vehicle configuration - SET THIS TO CHOOSE MOTION MODEL
-        human_use_kinematic = not self.use_state_space  # Set to True for kinematic model, False for complex dynamics
-        human_use_state_space = self.use_state_space  # Set to True for state-space bicycle model
+        # Human vehicle configuration
+        human_use_hierarchical = self.use_hierarchical
+        human_use_kinematic = not self.use_state_space and not self.use_hierarchical
+        human_use_state_space = self.use_state_space and not self.use_hierarchical
 
         # Human vehicle (left lane)
         self.human_vehicle = Vehicle(initial_x=self.initial_x_human+NASH_DRIVER_PARAMS[self.driver_type]['initial_x_offset'], initial_y=-2, vehicle_id="Human", initial_velocity=self.initial_velocity_human)
         
         # Create human driver and set motion model
         self.human_driver = HumanDriver(self.human_vehicle, driver_type=self.driver_type)
-        self.human_driver.set_motion_model( human_use_kinematic, human_use_state_space)
+        self.human_driver.set_motion_model(human_use_kinematic, human_use_state_space,
+                                           use_hierarchical=human_use_hierarchical)
         
-        # Managers
-        self.platoon_manager = PlatoonManager(self.platoon_vehicles,human_use_state_space)
+        # Managers — platoon manager needs to know state-space is used for prediction matrices
+        # (hierarchical also uses state-space for planning)
+        platoon_uses_ss = self.use_state_space or self.use_hierarchical
+        self.platoon_manager = PlatoonManager(self.platoon_vehicles, platoon_uses_ss)
         
         # Print configuration
-        if human_use_state_space:
+        if human_use_hierarchical:
+            motion_type = "hierarchical (upper: double integrator, lower: complex dynamics)"
+        elif human_use_state_space:
             motion_type = "state-space bicycle model"
         else:
             motion_type = "kinematic" if human_use_kinematic else "complex dynamics"
@@ -158,6 +178,27 @@ class PlatoonSimulation:
         self.position_history.append(positions)
         self.velocity_history.append(velocities)
         self.acceleration_history.append(accelerations)
+        
+        # Log hierarchical controller data (throttle, brake, RPM, gear)
+        throttles = []
+        brakes = []
+        rpms = []
+        gears = []
+        for vehicle in self.all_vehicles:
+            if vehicle in all_current_vehicles and vehicle.use_hierarchical_model:
+                throttles.append(vehicle.throttle_input)
+                brakes.append(vehicle.brake_input)
+                rpms.append(vehicle.engine.rpm)
+                gears.append(vehicle.transmission.current_gear + 1)
+            else:
+                throttles.append(float('nan'))
+                brakes.append(float('nan'))
+                rpms.append(float('nan'))
+                gears.append(float('nan'))
+        self.throttle_history.append(throttles)
+        self.brake_history.append(brakes)
+        self.rpm_history.append(rpms)
+        self.gear_history.append(gears)
         
         # Track human vehicle distance to closest platoon vehicle (only during merging attempt)
         if not hasattr(self, 'human_closest_distance_history'):
@@ -233,7 +274,10 @@ class PlatoonSimulation:
         """Print current simulation status"""
         print(f"\n⏱️Time: {self.time:.1f}s")
         for vehicle in self.all_vehicles:
-            if vehicle.use_state_space_model:
+            # Check hierarchical BEFORE state-space (hierarchical also sets use_state_space_model=True)
+            if vehicle.use_hierarchical_model:
+                model_type = "hierarchical"
+            elif vehicle.use_state_space_model:
                 model_type = "state-space"
             elif vehicle.use_kinematic_model:
                 model_type = "kinematic"
@@ -258,6 +302,12 @@ class PlatoonSimulation:
             print(f"{vehicle.vehicle_id} ({model_type}, {status}): "
                   f"Pos=({vehicle.state.x:.1f}, {vehicle.state.y:.1f}), "
                   f"Speed={vehicle.state.vx*3.6:.1f} km/h",f"acceleration={vehicle.state.ax:.2f} m/s^2")
+            
+            # Print lower-level controller metrics for hierarchical vehicles
+            if vehicle.use_hierarchical_model:
+                gear_num = vehicle.transmission.current_gear + 1
+                print(f"   ⚙️ Throttle={vehicle.throttle_input:.3f}, Brake={vehicle.brake_input:.3f}, "
+                      f"RPM={vehicle.engine.rpm:.0f}, Gear={gear_num}")
 
 def run_simulation():
     """Run the basic simulation"""

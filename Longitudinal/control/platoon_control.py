@@ -7,12 +7,14 @@ import numpy as np
 import time
 from typing import List
 from scipy.integrate import odeint
-from vehicle.vehicle import Vehicle
+from vehicle.vehicle import Vehicle, VehicleParameters
+from config import JERK_LIMIT,RAJAMANI_H,RAJAMANI_TAU
 
+_vp = VehicleParameters()
 def rajamani(Car_1, Car_2):
-    """Rajamani controller - identical to platoon_control.py"""
-    h = 1.5   # [s] desired time headway
-    tau = 0.1 # [s] time lag
+    """Rajamani controller (kept for desired-gap calculations in safety field)."""
+    h = RAJAMANI_H   # [s] desired time headway
+    tau = RAJAMANI_TAU # [s] time lag
 
     k1, k5 = -0.12, 0.1 # k1 < -tau/h, k5 > 0
     k2, k3, k4 = -k1-h*k1*k5, 1/h-k1*k5, k5/h
@@ -42,8 +44,8 @@ class PlatoonManager:
     def __init__(self, vehicles: List[Vehicle], use_state_space: bool = False):
         self.vehicles = vehicles
         self.target_velocity = 120.0 / 3.6  # 120 km/h in m/s (matching platoon_control)
-        self.max_velocity = 250.0  # m/s (matching platoon_control.py)
-        self.max_acceleration = 2.5  # m/s^2 (matching platoon_control.py)
+        self.max_velocity = _vp.max_velocity  # m/s (matching platoon_control.py)
+        self.max_acceleration = _vp.max_acceleration  # m/s^2 (matching platoon_control.py)
         
         self.use_state_space = use_state_space  # Whether to use state-space model
         
@@ -51,10 +53,21 @@ class PlatoonManager:
         self.actual_gaps_history = [[] for _ in range(len(vehicles)-1)]
         self.desired_gaps_history = [[] for _ in range(len(vehicles)-1)]
 
+        # Jerk limiting: store previous a_desired per vehicle id
+        self._a_prev = {}
+
         # Set all vehicles to autonomous mode
         for vehicle in vehicles:
             vehicle.autonomous_mode = True
 
+
+    def _jerk_limit(self, vehicle_id, a_des, dt):
+        """Apply jerk limiting: clip da/dt to JERK_LIMIT."""
+        a_prev = self._a_prev.get(vehicle_id, a_des)
+        da_max = JERK_LIMIT * dt
+        a_limited = a_prev + np.clip(a_des - a_prev, -da_max, da_max)
+        self._a_prev[vehicle_id] = a_limited
+        return a_limited
 
     def update(self, dt: float, is_prediction_mode: bool = False):
         """Update platoon control - implementing exact algorithm from platoon_control.py"""
@@ -76,9 +89,16 @@ class PlatoonManager:
             new_velocity_leader = odeint(free_road_acc, Car_1.v, [0, dt], args=(self.target_velocity, self.max_acceleration))[-1][0]
             new_velocity_leader = np.clip(new_velocity_leader, 0,  Car_1.max_velocity)  # velocity limits
             lead_acc = (new_velocity_leader - Car_1.v) / dt if dt > 0 else 0
+
+        # Clamp to vehicle's physical capability
+        lead_a_max = Car_1.get_dynamic_max_acceleration() if hasattr(Car_1, 'get_dynamic_max_acceleration') else self.max_acceleration
+        lead_acc = np.clip(lead_acc, -self.max_acceleration, lead_a_max)
+
+        # Jerk-limit leader acceleration
+        lead_acc = self._jerk_limit(Car_1.vehicle_id, lead_acc, dt)
+
         Car_1.a_desired = lead_acc
         # Update leader using platoon kinematic model
-        # if Car_1.use_state_space_model:
         Car_1.update_dynamics(dt)
             # Car_1.update_dynamics_state_space(dt)
         # else:
@@ -114,6 +134,13 @@ class PlatoonManager:
                 # Apply Rajamani control law - exactly like platoon_control.py
                 a_des, s_des = rajamani(leader, follower)
                 self.desired_gaps_history[car_num-1].append(s_des)
+
+            # Clamp to vehicle's physical capability (engine-dependent upper limit)
+            follower_a_max = follower.get_dynamic_max_acceleration() if hasattr(follower, 'get_dynamic_max_acceleration') else self.max_acceleration
+            a_des = np.clip(a_des, -self.max_acceleration, follower_a_max)
+
+            # Jerk-limit follower acceleration
+            a_des = self._jerk_limit(follower.vehicle_id, a_des, dt)
             
             follower.a_desired = a_des
             # Update follower vehicle

@@ -341,12 +341,6 @@ class EllipseLongitudinalSafetyField:
             gap_actual = leader.state.x - ego_vehicle.state.x
             gap_error = gap_actual - desired_gap
             rel_velocity = ego_vehicle.state.vx - leader.state.vx
-        elif follower is not None:
-            # No leader (front of platoon) - use follower gap for phase detection
-            # gap_error: positive = too far ahead, negative = too close
-            follower_gap_actual = ego_vehicle.state.x - follower.state.x
-            gap_error = desired_gap - follower_gap_actual  # Positive = gap too small
-            rel_velocity = follower.state.vx - ego_vehicle.state.vx
         
         # Update phase based on conditions
         self._update_phase(gap_error, rel_velocity, acceleration,
@@ -374,9 +368,7 @@ class EllipseLongitudinalSafetyField:
                 self.ignoring_follower = True
             else:
                 self.ignoring_follower = False
-        else:
-            # No leader - never ignore follower (it's the only reference)
-            self.ignoring_follower = False
+        # else: no leader - ignoring_follower retains previous state
         
         # === Follower Risk (Repulsive only) ===
         if follower is not None and not self.ignoring_follower:
@@ -443,17 +435,8 @@ class EllipseLongitudinalSafetyField:
         
         gap_error = gap_actual - desired_gap
         
-        # If gap > desired:
+        # If gap > desired: no repulsive force needed (safe)
         if gap_error > 0:
-            # For FOLLOWER: when ego is too far ahead, generate ATTRACTIVE force
-            # to maintain platoon formation (pull ego back toward follower)
-            if not is_leader and gap_error > 2.0:
-                # Attractive force: proportional to excess gap, decays for very large gaps
-                # Normalized by desired_gap so it's scale-invariant
-                attract_ratio = min(gap_error / max(desired_gap, 1.0), 3.0)
-                force = -self.params.base_obstacle_mass * attract_ratio * \
-                        np.exp(-gap_error / (3.0 * self.params.distance_decay_factor))
-                return max(force, self.params.min_attractive_force)
             return 0.0
             
         # Compute dynamic parameters

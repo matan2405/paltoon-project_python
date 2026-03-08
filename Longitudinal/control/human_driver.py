@@ -53,9 +53,16 @@ class HumanDriver:
         self.lane_change_progress = 0.0
         self.ignore_platoon_before_merge = True
 
+        # Startup ramp: gradually increase max_acceleration from 0 to full over ramp_duration
+        # A real driver doesn't floor the gas from standstill
+        self._startup_time = 0.0
+        self._startup_ramp_duration = 3.0  # seconds
+
         
-    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False):
-        self.vehicle.set_motion_model(use_kinematic, use_state_space)
+    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False,
+                         use_hierarchical: bool = False):
+        self.vehicle.set_motion_model(use_kinematic, use_state_space,
+                                      use_hierarchical=use_hierarchical)
         
     def _get_leader(self, platoon_vehicles: List):
         if not platoon_vehicles: 
@@ -85,32 +92,42 @@ class HumanDriver:
             leader = self._get_leader(platoon_vehicles)
         v = self.vehicle.state.vx
         v0 = self.target_speed
-        
+
         # Choose parameters based on mode
         T = self.desired_time_headway if mode == 'execution' else self.plan_time_headway
         b = self.comfortable_deceleration if mode == 'execution' else self.plan_decel
-        
+
+        # Startup ramp (execution only): gradually increase effective max_acceleration
+        # from 0 to full over _startup_ramp_duration seconds — a real driver doesn't
+        # instantly floor the gas from standstill.
+        if mode == 'execution':
+            self._startup_time += dt
+            ramp = min(self._startup_time / self._startup_ramp_duration, 1.0)
+            effective_max_accel = self.max_acceleration * ramp
+        else:
+            effective_max_accel = self.max_acceleration
+
         # Free road term
         if v0 > 0.1:
             free_road_term = 1 - (v / v0) ** self.delta_IDM
         else:
             free_road_term = 0
-            
+
         # Interaction term
         interaction_term = 0.0
         if leader:
             s = leader.state.x - self.vehicle.state.x - leader.L
             delta_v = v - leader.state.vx
-            s_star = (self.min_spacing + v * T + 
-                      (v * delta_v) / (2 * np.sqrt(self.max_acceleration * b)))
+            s_star = (self.min_spacing + v * T +
+                      (v * delta_v) / (2 * np.sqrt(effective_max_accel * b)))
             s = max(0.1, s)
             interaction_term = - (s_star / s) ** 2
-        
+
         # Total Accel
-        desired_accel = self.max_acceleration * (free_road_term + interaction_term)
-        
+        desired_accel = effective_max_accel * (free_road_term + interaction_term)
+
         # Constraints
-        desired_accel = np.clip(desired_accel, self.max_deceleration, self.max_acceleration)
+        desired_accel = np.clip(desired_accel, self.max_deceleration, effective_max_accel)
         
         if mode == 'execution':
             # Apply to vehicle (Throttle/Brake logic)
@@ -158,6 +175,14 @@ class HumanDriver:
         state_sequence = np.zeros((Np, 2))
         
         sim_veh = copy.deepcopy(vehicle)
+        
+        # Switch cloned vehicle to state-space (double integrator) mode.
+        # The original may be hierarchical, but for prediction we use the
+        # simple ZOH double integrator — not the full engine dynamics.
+        sim_veh.use_hierarchical_model = False
+        sim_veh.use_state_space_model = True
+        sim_veh.use_kinematic_model = False
+        
         sim_driver = copy.deepcopy(self)
         sim_driver.vehicle = sim_veh
         
@@ -165,9 +190,6 @@ class HumanDriver:
         sim_leader = None
         if leader is not None:
             sim_leader = copy.deepcopy(leader)
-        
-        dt_sim = 0.02
-        steps_per_dt = max(1, int(dt / dt_sim))
         
         for i in range(Np):
             # === NEW: If we have a leader, update its position (constant velocity assumption) ===
@@ -193,9 +215,11 @@ class HumanDriver:
                 # No leader - free road driving
                 a_human = sim_driver.update(dt, platoon_vehicles=[], mode='planning')
             
+            # Propagate state using vehicle's double integrator (planning model)
+            # update_dynamics() routes to update_dynamics_state_space() which
+            # uses ZOH discretization: x[k+1] = A_d @ x[k] + B_d @ u[k]
             sim_veh.a_desired = a_human
-            for _ in range(steps_per_dt):
-                sim_veh.update_dynamics(dt_sim)
+            sim_veh.update_dynamics(dt)
             
             accel_sequence[i] = a_human
             state_sequence[i, 0] = sim_veh.state.x
