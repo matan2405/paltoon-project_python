@@ -12,7 +12,8 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (STANLEY_K_E_NORMAL, STANLEY_K_PSI_NORMAL, STANLEY_K_SOFT,
                     STANLEY_K_E_CAUTIOUS, STANLEY_K_PSI_CAUTIOUS,
-                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE, NASH_NP, SIMULATION_DT)
+                    STANLEY_K_E_AGGRESSIVE, STANLEY_K_PSI_AGGRESSIVE,
+                    STANLEY_FILTER_ALPHA, NASH_NP, SIMULATION_DT)
 from vehicle.components import VehicleParameters, VehicleState
 class DriverType(Enum):
     CAUTIOUS = "cautious"
@@ -45,7 +46,7 @@ class HumanDriver:
         
         # Low-pass filter for steering
         self.delta_filtered = 0.0
-        self.filter_alpha = 0.2
+        self.filter_alpha = STANLEY_FILTER_ALPHA
         
         print(f"🧑‍✈️ Human Driver (Stanley) Initialized - k_e={self.stanley.k_e:.2f}")
     

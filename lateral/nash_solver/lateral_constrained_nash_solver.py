@@ -48,7 +48,14 @@ from dataclasses import dataclass
 # Add parent directory (lateral/) to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vehicle import Vehicle, VehicleParameters
-from config import (NASH_CONTROL_DT, NASH_NP, NASH_NU)
+from config import (
+    NASH_CONTROL_DT, NASH_NP, NASH_NU,
+    NASH_Q_Y, NASH_Q_PSI, NASH_Q_Y_TERMINAL_FACTOR, NASH_Q_PSI_TERMINAL_FACTOR,
+    NASH_R1, NASH_R2, NASH_S1, NASH_S2,
+    NASH_Y_MAX, NASH_PSI_MAX, NASH_LAMBDA_LEVELS,
+    NASH_SOLVER_BACKEND, NASH_WARM_START, NASH_VERBOSE,
+    NASH_MAX_ITER, NASH_EPS_ABS, NASH_EPS_REL, NASH_POLISH, NASH_REGULARIZATION,
+)
 
 
 @dataclass
@@ -87,22 +94,20 @@ class ConstrainedLateralNashParams:
     # Solution: Q_y=500, R1=10000 → ratio = 0.05
     # =========================================================================
     
-    Q_y: float = 800.0          # Lateral position — INCREASED 50x for stability
-    Q_psi: float = 10000.0      # Heading angle — keep high for heading stability
-    
-    # Terminal weights (2x stage weights for stability)
-    Q_y_terminal: float = 10.0*Q_y
-    Q_psi_terminal: float = 4.0*Q_psi
-    
-    # Control effort weights — REDUCED for proper authority
-    R1: float = 1000000.0         # System control effort (was 50000)
-    R2: float = 1000000.0         # Human control effort (BASE)
-    
-    # Cross-coupling weights — S = R for FULL COOPERATION
-    # This is THE critical fix: S=0 caused the two controllers to fight!
-    # When S = R, each player considers the other's effort → cooperation.
-    S1: float = 200000.0         # System penalty on human's effort (= R1)
-    S2: float = 200000.0         # Human penalty on system's effort (= R2)
+    Q_y: float = NASH_Q_Y                                    # Lateral position weight
+    Q_psi: float = NASH_Q_PSI                               # Heading angle weight
+
+    # Terminal weights — higher than stage weights for stability
+    Q_y_terminal: float = NASH_Q_Y_TERMINAL_FACTOR * NASH_Q_Y
+    Q_psi_terminal: float = NASH_Q_PSI_TERMINAL_FACTOR * NASH_Q_PSI
+
+    # Control effort weights
+    R1: float = NASH_R1     # System control effort
+    R2: float = NASH_R2     # Human control effort (BASE)
+
+    # Cross-coupling weights — S = R/5 for cooperation
+    S1: float = NASH_S1     # System penalty on human's effort
+    S2: float = NASH_S2     # Human penalty on system's effort
     
     # =========================================================================
     # PUSTILNIK SCALING — Non-Normalized GNE
@@ -123,23 +128,23 @@ class ConstrainedLateralNashParams:
     ddelta_max: float = VehicleParameters.max_steering_rate
     
     # State constraints
-    y_max: float = 5.0
-    psi_max: float = 0.5
-    
+    y_max: float = NASH_Y_MAX
+    psi_max: float = NASH_PSI_MAX
+
     # Lambda levels for pre-computation
-    lambda_levels: tuple = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
-    
+    lambda_levels: tuple = NASH_LAMBDA_LEVELS
+
     # Solver settings
-    solver: str = 'OSQP'
-    warm_start: bool = True
-    verbose: bool = False
-    max_iter: int = 200
-    eps_abs: float = 1e-3
-    eps_rel: float = 1e-3
-    polish: bool = False
-    
+    solver: str = NASH_SOLVER_BACKEND
+    warm_start: bool = NASH_WARM_START
+    verbose: bool = NASH_VERBOSE
+    max_iter: int = NASH_MAX_ITER
+    eps_abs: float = NASH_EPS_ABS
+    eps_rel: float = NASH_EPS_REL
+    polish: bool = NASH_POLISH
+
     # Regularization
-    regularization: float = 1e-5
+    regularization: float = NASH_REGULARIZATION
 
 
 class ConstrainedLateralNashSolver:

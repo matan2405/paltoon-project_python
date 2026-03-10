@@ -28,7 +28,11 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP
+from config import (
+    LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP,
+    REFGEN_BASE_TLC, REFGEN_HUMAN_MAX_HEADING_DEG, REFGEN_HUMAN_SETTLE_TIME,
+    REFGEN_MIN_TLC_CUBIC, REFGEN_MIN_TLC_FREE_ROAD_HUMAN,
+)
 
 
 class HumanTrajectoryPhase(Enum):
@@ -49,18 +53,18 @@ class HumanDynamicParams:
     def compute_min_T_lc(self, delta_y: float, vx: float, max_heading: float) -> float:
         """
         Compute minimum T_lc for cubic polynomial with heading constraint.
-        
+
         For cubic polynomial y(τ) = y0 + Δy*(3τ² - 2τ³):
         ẏ = Δy * (6τ - 6τ²) / T_lc
         Max ẏ at τ = 0.5: ẏ_max = 1.5 * Δy / T_lc
-        
+
         For ψ < max_heading: T_lc > 1.5 * |Δy| / (vx * tan(max_heading))
         """
         if vx < 1.0 or abs(delta_y) < 0.1:
-            return 8.0
+            return REFGEN_MIN_TLC_FREE_ROAD_HUMAN
         max_y_dot = vx * np.tan(max_heading)
         T_lc_min = 1.5 * abs(delta_y) / max_y_dot
-        return max(T_lc_min, 2.0)
+        return max(T_lc_min, REFGEN_MIN_TLC_CUBIC)
 
 
 class HumanReferenceGenerator:
@@ -79,19 +83,13 @@ class HumanReferenceGenerator:
         self.dt = dt
         self.driver_type = driver_type
         
-        # Base lane change durations
-        self._base_lane_change_durations = {
-            'cautious': 6.0,
-            'normal': 4.5,
-            'aggressive': 3.0
-        }
+        # Base lane change durations (from config)
+        self._base_lane_change_durations = REFGEN_BASE_TLC
         self.lane_change_duration = self._base_lane_change_durations.get(driver_type, 12.0)
-        
-        # Maximum heading angles per driver type
+
+        # Maximum heading angles per driver type (from config, converted to radians)
         self.max_heading_angles = {
-            'cautious': np.radians(3.0),
-            'normal': np.radians(4.0),
-            'aggressive': np.radians(6.0)
+            k: np.radians(v) for k, v in REFGEN_HUMAN_MAX_HEADING_DEG.items()
         }
         self.max_heading_angle = self.max_heading_angles.get(driver_type, np.radians(4.0))
         
@@ -118,12 +116,8 @@ class HumanReferenceGenerator:
         self._lane_keeping_entry_psi = None
         self._lane_keeping_entry_y_dot = None
         
-        # Settling time for lane-keeping entry
-        self._settle_time = {
-            'cautious': 4.0,
-            'normal': 3.0,
-            'aggressive': 2.0
-        }
+        # Settling time for lane-keeping entry (from config)
+        self._settle_time = REFGEN_HUMAN_SETTLE_TIME
         self._T_settle = self._settle_time.get(driver_type, 3.0)
         # =====================================================================
         

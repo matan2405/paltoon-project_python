@@ -23,11 +23,18 @@ from enum import Enum
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (LANE_WIDTH, FOLLOWING_Y_ERROR_FACTOR, FOLLOWING_PSI_ERROR_THRESHOLD,
-                    FOLLOWING_Y_DOT_THRESHOLD, MERGING_Y_ERROR_FACTOR,
-                    MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME,
-                    GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME, LANE_CHANGE_Y_ERROR_FACTOR,
-                    LANE_CHANGE_Y_DOT_THRESHOLD)
+from config import (
+    LANE_WIDTH,
+    FOLLOWING_Y_ERROR_FACTOR, FOLLOWING_PSI_ERROR_THRESHOLD, FOLLOWING_Y_DOT_THRESHOLD,
+    MERGING_Y_ERROR_FACTOR, MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME,
+    GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME, LANE_CHANGE_Y_ERROR_FACTOR,
+    LANE_CHANGE_Y_DOT_THRESHOLD,
+    SAFETY_COLLISION_LATERAL_THRESHOLD, SAFETY_COLLISION_LONGITUDINAL_THRESHOLD,
+    SAFETY_SAFE_LATERAL_DISTANCE, SAFETY_OBSTACLE_FORCE_GAIN, SAFETY_OBSTACLE_FORCE_SCALE,
+    SAFETY_ROAD_HALF_WIDTH, SAFETY_BOUNDARY_FORCE_GAIN, SAFETY_BOUNDARY_FORCE_SCALE,
+    SAFETY_BOUNDARY_PROXIMITY, SAFETY_DISTANCE_DECAY_FACTOR, SAFETY_EPSILON,
+    SAFETY_MAX_FORCE, SAFETY_DIRECTION_SMOOTH_SIGMA, SAFETY_FILTER_ALPHA,
+)
 
 
 class ControlPhase(Enum):
@@ -51,28 +58,29 @@ class LateralSafetyFieldParams:
     
     # === COLLISION DETECTION THRESHOLDS ===
     # Only trigger force when ACTUALLY close to collision
-    collision_lateral_threshold: float = 2.0    # meters - lateral distance for "danger"
-    collision_longitudinal_threshold: float = 10.0  # meters - longitudinal overlap
-    safe_lateral_distance: float = 3.0          # meters - no force if > this
-    
-    # Force Parameters - MODERATE (safety, not tracking!)
-    obstacle_force_gain: float = 150.0
-    obstacle_force_scale: float = 5.0     # Scale for tanh
-    
-    # Boundary Parameters
-    road_half_width: float = 7.0
-    boundary_force_gain: float = 150.0
-    boundary_force_scale: float = 2.0
-    
-    # Distance Decay
-    distance_decay_factor: float = 20.0
-    epsilon: float = 0.1
-    
-    # Force Limits
-    max_force: float = 500.0
+    collision_lateral_threshold: float = SAFETY_COLLISION_LATERAL_THRESHOLD
+    collision_longitudinal_threshold: float = SAFETY_COLLISION_LONGITUDINAL_THRESHOLD
+    safe_lateral_distance: float = SAFETY_SAFE_LATERAL_DISTANCE
 
-    # Direction Smoothing
-    direction_smooth_sigma: float = 0.5  # meters — tanh width for smooth direction (prevents sign-flip oscillations)
+    # Force Parameters - MODERATE (safety, not tracking!)
+    obstacle_force_gain: float = SAFETY_OBSTACLE_FORCE_GAIN
+    obstacle_force_scale: float = SAFETY_OBSTACLE_FORCE_SCALE
+
+    # Boundary Parameters
+    road_half_width: float = SAFETY_ROAD_HALF_WIDTH
+    boundary_force_gain: float = SAFETY_BOUNDARY_FORCE_GAIN
+    boundary_force_scale: float = SAFETY_BOUNDARY_FORCE_SCALE
+    boundary_proximity: float = SAFETY_BOUNDARY_PROXIMITY
+
+    # Distance Decay
+    distance_decay_factor: float = SAFETY_DISTANCE_DECAY_FACTOR
+    epsilon: float = SAFETY_EPSILON
+
+    # Force Limits
+    max_force: float = SAFETY_MAX_FORCE
+
+    # Direction Smoothing — tanh width prevents sign-flip oscillations near dy=0
+    direction_smooth_sigma: float = SAFETY_DIRECTION_SMOOTH_SIGMA
     
     # === PHASE DETECTION THRESHOLDS (from longitudinal) ===
     following_y_error_factor: float = FOLLOWING_Y_ERROR_FACTOR      # 15%
@@ -118,7 +126,7 @@ class LateralSafetyField:
         
         # Force filter (smoother output)
         self._last_force = 0.0
-        self.filter_alpha = 0.3
+        self.filter_alpha = SAFETY_FILTER_ALPHA
         
         print("🛡️ Lateral Safety Field V2.1 Initialized")
         print("   ✓ Collision-based force (not proximity-based)")
@@ -360,13 +368,13 @@ class LateralSafetyField:
         
         # Right boundary (positive y)
         dist_to_right = p.road_half_width - ego_y
-        if dist_to_right < 3.0 and dist_to_right > 0.1:
+        if dist_to_right < p.boundary_proximity and dist_to_right > p.epsilon:
             potential = 1.0 / dist_to_right
             force -= p.boundary_force_gain * np.tanh(potential / p.boundary_force_scale)
-        
+
         # Left boundary (negative y)
         dist_to_left = p.road_half_width + ego_y
-        if dist_to_left < 3.0 and dist_to_left > 0.1:
+        if dist_to_left < p.boundary_proximity and dist_to_left > p.epsilon:
             potential = 1.0 / dist_to_left
             force += p.boundary_force_gain * np.tanh(potential / p.boundary_force_scale)
         
