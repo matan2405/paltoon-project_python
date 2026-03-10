@@ -136,6 +136,7 @@ class ConstrainedLateralNashParams:
     max_iter: int = 200
     eps_abs: float = 1e-3
     eps_rel: float = 1e-3
+    polish: bool = False
     
     # Regularization
     regularization: float = 1e-5
@@ -575,7 +576,7 @@ class ConstrainedLateralNashSolver:
                 eps_abs=p.eps_abs,
                 eps_rel=p.eps_rel,
                 max_iter=p.max_iter,
-                polish=False
+                polish=p.polish
             )
             
             self.last_status = prob_dict['problem'].status

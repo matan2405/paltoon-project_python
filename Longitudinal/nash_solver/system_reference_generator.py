@@ -36,7 +36,12 @@ import os
 
 # Add parent directory to path to allow importing from control
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (NASH_CONTROL_DT, NASH_NP)
+from config import (
+    NASH_CONTROL_DT, NASH_NP,
+    REFGEN_DETECTION_RANGE, REFGEN_TIME_HEADWAY, REFGEN_STANDSTILL_DISTANCE,
+    REFGEN_A_COMFORT, REFGEN_K_V, REFGEN_K1, REFGEN_K2,
+    REFGEN_MAX_ACCEL, REFGEN_MAX_DECEL, REFGEN_CATCHUP_FACTOR,
+)
 from control.platoon_control import free_road_acc, rajamani
 from vehicle.components import VehicleParameters
 from vehicle import Vehicle
@@ -65,39 +70,39 @@ class SystemReferenceGenerator:
         self.dt = NASH_CONTROL_DT
         
         # === DETECTION ===
-        self.DETECTION_RANGE = 150.0  # [m]
+        self.DETECTION_RANGE = REFGEN_DETECTION_RANGE
         self.desired_gap = 50.0  # [m] Desired gap at equilibrium (will be updated based on speed)
         # === RAJAMANI CHAPTER 6.7 PARAMETERS ===
         # Time headway for CTG policy (Section 6.3)
-        self.h = 1.5  # [s]
-        
+        self.h = REFGEN_TIME_HEADWAY
+
         # Standstill distance
-        self.d0 = 5.0  # [m]
-        
+        self.d0 = REFGEN_STANDSTILL_DISTANCE
+
         # Comfortable deceleration (Section 6.7.2)
         # Typical: 0.1g - 0.2g = 1.0 - 2.0 m/s²
-        self.a_comfort = 1.5  # [m/s²]
-        
+        self.a_comfort = REFGEN_A_COMFORT
+
         # Velocity tracking gain (Section 6.7.2)
         # Typical: 0.3 - 0.5 s⁻¹
-        self.K_v = 0.4  # [1/s]
-        
+        self.K_v = REFGEN_K_V
+
         # CTG Controller gains (Section 6.4, Eq. 6.15-6.16)
         # K1: position gain, K2: velocity gain
-        self.K1 = 0.23  # [1/s²] - typical 0.2-0.4
-        self.K2 = 0.6  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
-        
+        self.K1 = REFGEN_K1
+        self.K2 = REFGEN_K2
+
         # === SAFETY & CRASH AVOIDANCE (Zone 3) ===
         self.MIN_CRITICAL_GAP = 2.0 + VehicleParameters.length*0.5  # [m] Minimum gap before emergency braking
         self.TTC_THRESHOLD = 1.2    # [seconds] Time-to-collision threshold for emergency braking
         self.MAX_EMERGENCY_DECEL = -5.0 # [m/s²] Maximum emergency deceleration
-        
+
         # === COMFORT LIMITS ===
-        self.MAX_ACCEL = 2.5   # [m/s²]
-        self.MAX_DECEL = -3.5  # [m/s²]
-        
+        self.MAX_ACCEL = REFGEN_MAX_ACCEL
+        self.MAX_DECEL = REFGEN_MAX_DECEL
+
         # === CRUISE PARAMETERS ===
-        self.CATCHUP_FACTOR = 1.15
+        self.CATCHUP_FACTOR = REFGEN_CATCHUP_FACTOR
         
         # === DEBUG ===
         self._debug_counter = 0

@@ -25,12 +25,12 @@ import os
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import SIMULATION_DT, NASH_NP, NASH_DRIVER_PARAMS  
+from config import SIMULATION_DT, NASH_NP, NASH_DRIVER_PARAMS, PLATOON_TARGET_VELOCITY
 from vehicle.vehicle import Vehicle
 
 
 class HumanDriver:
-    def __init__(self, vehicle, target_speed: float = 120.0 / 3.6, dt: float = SIMULATION_DT, driver_type= 'normal'):
+    def __init__(self, vehicle, target_speed: float = PLATOON_TARGET_VELOCITY, dt: float = SIMULATION_DT, driver_type='normal'):
         self.vehicle = vehicle
         
         # Standard Parameters (Execution)
@@ -226,17 +226,6 @@ class HumanDriver:
             state_sequence[i, 1] = sim_veh.state.vx
             
         return accel_sequence, state_sequence
-
-    def get_human_acceleration_and_state_prediction(
-        self, 
-        dt: float, 
-        Np: int, 
-        vehicle: Vehicle,
-        leader: Optional[Vehicle] = None
-    ) -> np.ndarray:
-        """Get single acceleration prediction (last step)."""
-        acc, _ = self.get_human_acceleration_and_state_sequence(dt, Np, vehicle, leader)
-        return acc[-1] if len(acc) > 0 else 0.0
 
 
 __all__ = ['HumanDriver']

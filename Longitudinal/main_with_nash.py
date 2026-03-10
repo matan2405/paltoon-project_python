@@ -94,7 +94,6 @@ class PlatoonNashSimulation(PlatoonSimulation):
         
         # Initialize Low Pass Filters
         self.force_filter = LowPassFilter(alpha=0.2)  # Smoothing for Field Force
-        self.control_filter = LowPassFilter(alpha=0.05) # Smoothing for Final Control
         
         # Data storage
         self.nash_data = {
@@ -206,9 +205,6 @@ class PlatoonNashSimulation(PlatoonSimulation):
         # --- 6. Shared Control ---
         alpha = lambda_k / (1.0 + lambda_k)
         u_shared = u1_opt + u2_opt
-        
-        # FILTER 2: Smooth the final control input (currently disabled)
-        u_shared = u_shared  # self.control_filter.filter(u_shared)
         
         # Apply hard constraints
         u_shared = self.safety_field.apply_hard_constraint(

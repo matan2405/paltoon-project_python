@@ -24,8 +24,10 @@ from enum import Enum
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (LANE_WIDTH, FOLLOWING_Y_ERROR_FACTOR, FOLLOWING_PSI_ERROR_THRESHOLD,
-                    FOLLOWING_Y_DOT_THRESHOLD, MERGING_Y_ERROR_FACTOR, 
-                    MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME)
+                    FOLLOWING_Y_DOT_THRESHOLD, MERGING_Y_ERROR_FACTOR,
+                    MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME,
+                    GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME, LANE_CHANGE_Y_ERROR_FACTOR,
+                    LANE_CHANGE_Y_DOT_THRESHOLD)
 
 
 class ControlPhase(Enum):
@@ -53,11 +55,6 @@ class LateralSafetyFieldParams:
     collision_longitudinal_threshold: float = 10.0  # meters - longitudinal overlap
     safe_lateral_distance: float = 3.0          # meters - no force if > this
     
-    # Ellipse Parameters (for potential field)
-    base_semi_major: float = 12.0    # Longitudinal zone
-    base_semi_minor: float = 2.5     # Lateral zone
-    time_margin: float = 1.0         # Time horizon for velocity-dependent ellipse
-    
     # Force Parameters - MODERATE (safety, not tracking!)
     obstacle_force_gain: float = 150.0
     obstacle_force_scale: float = 5.0     # Scale for tanh
@@ -73,6 +70,9 @@ class LateralSafetyFieldParams:
     
     # Force Limits
     max_force: float = 500.0
+
+    # Direction Smoothing
+    direction_smooth_sigma: float = 0.5  # meters — tanh width for smooth direction (prevents sign-flip oscillations)
     
     # === PHASE DETECTION THRESHOLDS (from longitudinal) ===
     following_y_error_factor: float = FOLLOWING_Y_ERROR_FACTOR      # 15%
@@ -83,6 +83,12 @@ class LateralSafetyFieldParams:
     merging_psi_threshold: float = MERGING_PSI_ERROR_THRESHOLD      # ~6 deg
     
     phase_transition_time: float = PHASE_TRANSITION_TIME            # 5 seconds
+
+    # === PHASE DURATION THRESHOLDS ===
+    gap_search_duration: float = GAP_SEARCH_DURATION                # 0.5 seconds
+    lane_change_min_time: float = LANE_CHANGE_MIN_TIME              # 3.0 seconds
+    lane_change_y_error_factor: float = LANE_CHANGE_Y_ERROR_FACTOR  # 5% (was 30%)
+    lane_change_y_dot_threshold: float = LANE_CHANGE_Y_DOT_THRESHOLD  # 0.15 m/s
 
 
 class LateralSafetyField:
@@ -174,12 +180,14 @@ class LateralSafetyField:
             pass  # Wait for merge command
         
         elif self._current_phase == ControlPhase.GAP_SEARCH:
-            if time_in_phase > 0.5:
+            if time_in_phase > p.gap_search_duration:
                 self._transition_to_phase(ControlPhase.LANE_CHANGE)
-        
+
         elif self._current_phase == ControlPhase.LANE_CHANGE:
-            # Transition to LANE_KEEPING when close to target
-            if abs(y_error) < p.lane_width * 0.3 and time_in_phase > 3.0:
+            # Transition to LANE_KEEPING when close to target AND lateral motion has slowed
+            if (abs(y_error) < p.lane_width * p.lane_change_y_error_factor
+                    and time_in_phase > p.lane_change_min_time
+                    and abs(y_dot) < p.lane_change_y_dot_threshold):
                 self._transition_to_phase(ControlPhase.LANE_KEEPING)
         
         elif self._current_phase == ControlPhase.LANE_KEEPING:
@@ -337,11 +345,9 @@ class LateralSafetyField:
                 raw_force = danger_level * overlap_factor * p.obstacle_force_gain
                 force_magnitude = p.obstacle_force_gain * np.tanh(raw_force / p.obstacle_force_scale)
             
-            # Direction: push away from obstacle (positive dy = push more positive)
-            if abs(dy) > 0.01:
-                lateral_direction = np.sign(dy)
-            else:
-                lateral_direction = 1.0 if ego_y > obs_y else -1.0
+            # Direction: push away from obstacle using smooth tanh (avoids sign-flip oscillations near dy=0)
+            # At dy=1m: tanh(2) ≈ 0.96 — same as sign(); at dy=0: tanh(0) = 0 — no direction flip
+            lateral_direction = np.tanh(dy / p.direction_smooth_sigma)
             
             total_force += force_magnitude * lateral_direction
         

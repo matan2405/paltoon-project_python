@@ -4,7 +4,7 @@ VERSION 2.0
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 from dataclasses import dataclass
 
 

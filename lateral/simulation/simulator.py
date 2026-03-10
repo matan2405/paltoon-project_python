@@ -65,6 +65,11 @@ class LateralSimulation:
         self.Nc = NASH_NU
         self.dt_nash = NASH_CONTROL_DT  # Nash solver dt (from config.py)
 
+        # Nash rate control: Nash runs at 20Hz, dynamics at 100Hz
+        self._nash_step_interval = round(self.dt_nash / self.dt)  # = 5
+        self._nash_step_counter = 0
+        self._last_nash_result = None
+
         # Reference generators (R1 and R2 - Li et al. 2019)
         # R1 = System reference (slow, safe - 5th order polynomial, T=6s)
         self.system_ref_generator = SystemReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
@@ -259,9 +264,13 @@ class LateralSimulation:
             if self.mobil_approved:
                 self.command_merge()
         
-        # Control
+        # Control (Nash runs at 20Hz, dynamics at 100Hz)
         if self.merge_commanded:
-            control_result = self.nash_control_step()
+            self._nash_step_counter += 1
+            if self._nash_step_counter >= self._nash_step_interval or self._last_nash_result is None:
+                self._last_nash_result = self.nash_control_step()
+                self._nash_step_counter = 0
+            control_result = self._last_nash_result
             delta_shared = control_result['delta_shared']
         else:
             delta_shared = 0.0
@@ -464,6 +473,8 @@ class LateralSimulation:
         self.time = 0.0
         self.merge_commanded = False
         self.merge_complete = False
+        self._nash_step_counter = 0
+        self._last_nash_result = None
         # NOTE: No delta_output_prev - no external filtering
         self.safety_field.reset()
         self.system_ref_generator.reset()

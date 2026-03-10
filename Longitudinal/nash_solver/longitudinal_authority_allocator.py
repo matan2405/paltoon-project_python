@@ -15,6 +15,16 @@ Key changes from V4:
 """
 
 import numpy as np
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import (
+    AUTHORITY_LAMBDA_MIN, AUTHORITY_LAMBDA_MAX,
+    AUTHORITY_FORCE_MIDPOINT, AUTHORITY_K_STEEPNESS,
+    AUTHORITY_ALPHA_BASE, AUTHORITY_ALPHA_FAST,
+    AUTHORITY_ENTER_THRESHOLD, AUTHORITY_EXIT_THRESHOLD,
+    AUTHORITY_LAMBDA_PERFORMANCE_MAX,
+)
 
 
 class LongitudinalAuthorityAllocator:
@@ -28,24 +38,22 @@ class LongitudinalAuthorityAllocator:
 
     def __init__(self):
         # Sigmoid Parameters for SAFETY (Risk based)
-        self.lambda_min = 0.1   # Human dominant when safe
-        self.lambda_max = 100.0 # System dominant when dangerous
-        self.force_midpoint = 400.0 
-        self.k_steepness = 0.015
+        self.lambda_min = AUTHORITY_LAMBDA_MIN
+        self.lambda_max = AUTHORITY_LAMBDA_MAX
+        self.force_midpoint = AUTHORITY_FORCE_MIDPOINT
+        self.k_steepness = AUTHORITY_K_STEEPNESS
 
         self.prev_lambda = self.lambda_min
-        
+
         # === SMOOTHING PARAMETERS - MAXIMUM COMFORT ===
-        # Very low alpha = very slow, very smooth transitions
-        # The trade-off: slower response but no jerky handoffs
-        self.alpha_base = 0.05      # Base smoothing (was 0.08) - extremely smooth
-        self.alpha_fast = 0.12      # Fast response (was 0.20) - still smooth
-        
+        self.alpha_base = AUTHORITY_ALPHA_BASE
+        self.alpha_fast = AUTHORITY_ALPHA_FAST
+
         # === HYSTERESIS STATE ===
-        # Track if we're currently in "performance mode"
         self.in_performance_mode = False
-        self.ENTER_THRESHOLD = 3.0   # Enter performance mode when |gap_error| > 3m
-        self.EXIT_THRESHOLD = 1.0    # Exit performance mode when |gap_error| < 1m
+        self.ENTER_THRESHOLD = AUTHORITY_ENTER_THRESHOLD
+        self.EXIT_THRESHOLD = AUTHORITY_EXIT_THRESHOLD
+        self.lambda_performance_max = AUTHORITY_LAMBDA_PERFORMANCE_MAX
         
         # Store last computed authority values for logging
         self.last_lambda_safety = 0.0
@@ -110,7 +118,7 @@ class LongitudinalAuthorityAllocator:
                 lambda_performance *= 1.3
             
         # Upper bound
-        lambda_performance = min(lambda_performance, 50.0)
+        lambda_performance = min(lambda_performance, self.lambda_performance_max)
 
         # --- 3. Fusion: Take the MAX urgency ---
         target_lambda = max(lambda_safety, lambda_performance)

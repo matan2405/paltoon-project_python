@@ -39,11 +39,20 @@ import numpy as np
 import cvxpy as cp
 from typing import Tuple, Dict, Optional, List
 from dataclasses import dataclass
-from scipy.linalg import expm
 import time
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (NASH_CONTROL_DT, NASH_NP, NASH_NU)
+from config import (
+    NASH_CONTROL_DT, NASH_NP, NASH_NU,
+    NASH_Q_POS, NASH_Q_VEL,
+    NASH_R1, NASH_R2, NASH_S1, NASH_S2,
+    NASH_U1_MIN, NASH_U1_MAX, NASH_U2_MIN, NASH_U2_MAX,
+    NASH_DU1_MAX, NASH_DU2_MAX,
+    NASH_V_MIN, NASH_V_MAX, NASH_GAP_MIN,
+    NASH_LAMBDA_LEVELS,
+    NASH_SOLVER_BACKEND, NASH_WARM_START, NASH_VERBOSE,
+    NASH_MAX_ITER, NASH_EPS_ABS, NASH_EPS_REL, NASH_REGULARIZATION,
+)
 
 
 @dataclass
@@ -58,51 +67,51 @@ class ConstrainedNashParams:
     Np: int = NASH_NP              # Prediction horizon
     Nu: int = NASH_NU              # Control horizon
     dt: float = NASH_CONTROL_DT    # Time step [s]
-    
-    # Cost weights (base values)
-    Q_pos: float = 2500.0     # Position tracking weight
-    Q_vel: float = 50.0       # Velocity tracking weight
-    
+
+    # Cost weights (base values — config is single source of truth)
+    Q_pos: float = NASH_Q_POS     # Position tracking weight
+    Q_vel: float = NASH_Q_VEL     # Velocity tracking weight
+
     # Terminal weights (higher at final prediction step for stability)
-    Q_pos_terminal: float = 10.0 * 2500.0   # 10x position weight at terminal
-    Q_vel_terminal: float = 4.0 * 50.0      # 4x velocity weight at terminal
-    
+    Q_pos_terminal: float = 10.0 * NASH_Q_POS   # 10x position weight at terminal
+    Q_vel_terminal: float = 4.0 * NASH_Q_VEL    # 4x velocity weight at terminal
+
     # Control effort weights
-    R1: float = 50000.0         # System control effort
-    R2: float = 50000.0         # Human control effort (BASE - modified by driver type)
-    
+    R1: float = NASH_R1         # System control effort
+    R2: float = NASH_R2         # Human control effort (BASE - modified by driver type)
+
     # Cross-coupling weights (S = R for cooperation)
-    S1: float = 10000.0         # System penalty on human control
-    S2: float = 10000.0         # Human penalty on system control (BASE - modified by driver type)
-    
+    S1: float = NASH_S1         # System penalty on human control
+    S2: float = NASH_S2         # Human penalty on system control (BASE - modified by driver type)
+
     # Input constraints [m/s²]
-    u1_min: float = -3.5      # System min acceleration
-    u1_max: float = 2.5       # System max acceleration
-    u2_min: float = -4.0      # Human min acceleration
-    u2_max: float = 3.0       # Human max acceleration
-    
+    u1_min: float = NASH_U1_MIN   # System min acceleration
+    u1_max: float = NASH_U1_MAX   # System max acceleration
+    u2_min: float = NASH_U2_MIN   # Human min acceleration
+    u2_max: float = NASH_U2_MAX   # Human max acceleration
+
     # Rate constraints [m/s³]
-    du1_max: float = 1.5      # System max jerk
-    du2_max: float = 2.0      # Human max jerk
-    
+    du1_max: float = NASH_DU1_MAX  # System max jerk
+    du2_max: float = NASH_DU2_MAX  # Human max jerk
+
     # State constraints
-    v_min: float = 0.0        # Min velocity [m/s]
-    v_max: float = 50.0       # Max velocity [m/s]
-    gap_min: float = 5.0      # Min safe gap [m]
-    
+    v_min: float = NASH_V_MIN     # Min velocity [m/s]
+    v_max: float = NASH_V_MAX     # Max velocity [m/s]
+    gap_min: float = NASH_GAP_MIN  # Min safe gap [m]
+
     # Lambda levels for pre-computation
-    lambda_levels: tuple = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
-    
+    lambda_levels: tuple = NASH_LAMBDA_LEVELS
+
     # Solver settings
-    solver: str = 'OSQP'
-    warm_start: bool = True
-    verbose: bool = False
-    max_iter: int = 200
-    eps_abs: float = 1e-4
-    eps_rel: float = 1e-4
-    
+    solver: str = NASH_SOLVER_BACKEND
+    warm_start: bool = NASH_WARM_START
+    verbose: bool = NASH_VERBOSE
+    max_iter: int = NASH_MAX_ITER
+    eps_abs: float = NASH_EPS_ABS
+    eps_rel: float = NASH_EPS_REL
+
     # Regularization
-    regularization: float = 1e-5
+    regularization: float = NASH_REGULARIZATION
 
 
 class ConstrainedLongitudinalNashSolver:

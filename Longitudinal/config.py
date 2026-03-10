@@ -95,11 +95,6 @@ RAJAMANI_K2 = -RAJAMANI_K1 - RAJAMANI_H * RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K3 = 1.0 / RAJAMANI_H - RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K4 = RAJAMANI_K5 / RAJAMANI_H
 
-# CTH follower controller gains (Ioannou & Chien, 1993)
-# Position/velocity only — no acceleration feedback — robust to noisy dynamics
-CTH_KP = 0.4              # Gap-error gain [-]
-CTH_KD = 0.8              # Relative-velocity gain [-] (must be > CTH_KP * h / 2)
-
 # Jerk limiting (ISO 15622 ACC comfort standard)
 JERK_LIMIT = 2.0           # Maximum da/dt [m/s³]
 
@@ -116,12 +111,12 @@ NASH_Q_VEL = 50.0                 # Weight on velocity tracking error
 
 # Control effort weights (R) - BASE VALUES
 # S = R for cooperation (Nash equilibrium insight)
-NASH_R1 = 800.0                   # System's cost on its own control effort
-NASH_R2 = 800.0                   # Human's cost on its own control effort
+NASH_R1 = 50000.0                  # System's cost on its own control effort
+NASH_R2 = 50000.0                  # Human's cost on its own control effort
 
 # Cross-coupling weights (S) - THE KEY FOR COUPLED NASH GAME
-NASH_S1 = 800.0                   # System penalty on human control effort
-NASH_S2 = 800.0                   # Human penalty on system control effort
+NASH_S1 = 10000.0                   # System penalty on human control effort
+NASH_S2 = 10000.0                   # Human penalty on system control effort
 
 # Input constraints [m/s²] — derived from VehicleParameters
 NASH_U1_MIN = _vp.max_deceleration        # System min acceleration (from vehicle specs)
@@ -292,9 +287,8 @@ ENGINE_BRAKING_MAX_TORQUE = 120.0      # Maximum retarding torque cap [Nm]
 # to avoid chasing transient force discontinuities
 LOWER_CTRL_GEAR_SHIFT_HOLD = True      # Freeze actuator output during gear shifts
 
-# Physical constants used by feedforward
-LOWER_CTRL_AIR_DENSITY = 1.225         # Air density [kg/m³]
-LOWER_CTRL_ROLLING_COEFF = 0.012       # Rolling resistance coefficient [-]
+# Physical constants (air density, rolling coeff) come from VehicleParameters.
+# Use _vp.air_density and _vp.rolling_resistance_coeff instead of separate config entries.
 
 # =============================================================================
 # PHASE DETECTION PARAMETERS (MERGING ↔ FOLLOWING)
@@ -460,10 +454,10 @@ __all__ = [
     # Lower-level controller
     'LOWER_CTRL_KP', 'LOWER_CTRL_KI', 'LOWER_CTRL_INTEGRATOR_LIMIT',
     'LOWER_CTRL_THROTTLE_SMOOTHING', 'LOWER_CTRL_BRAKE_SMOOTHING',
-    'LOWER_CTRL_DEADBAND', 'LOWER_CTRL_AIR_DENSITY', 'LOWER_CTRL_ROLLING_COEFF',
+    'LOWER_CTRL_DEADBAND',
     'LOWER_CTRL_ACCEL_FILTER_ALPHA', 'LOWER_CTRL_GEAR_SHIFT_HOLD',
     'ENGINE_BRAKING_BASE_TORQUE', 'ENGINE_BRAKING_MAX_TORQUE',
 
-    # CTH controller & jerk limit
-    'CTH_KP', 'CTH_KD', 'JERK_LIMIT',
+    # Jerk limit
+    'JERK_LIMIT',
 ]

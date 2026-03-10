@@ -8,7 +8,11 @@ import time
 from typing import List
 from scipy.integrate import odeint
 from vehicle.vehicle import Vehicle, VehicleParameters
-from config import JERK_LIMIT,RAJAMANI_H,RAJAMANI_TAU
+from config import (
+    JERK_LIMIT, RAJAMANI_H, RAJAMANI_TAU,
+    RAJAMANI_K1, RAJAMANI_K2, RAJAMANI_K3, RAJAMANI_K4, RAJAMANI_K5,
+    PLATOON_TARGET_VELOCITY, FREE_ROAD_DELTA,
+)
 
 _vp = VehicleParameters()
 def rajamani(Car_1, Car_2):
@@ -16,8 +20,8 @@ def rajamani(Car_1, Car_2):
     h = RAJAMANI_H   # [s] desired time headway
     tau = RAJAMANI_TAU # [s] time lag
 
-    k1, k5 = -0.12, 0.1 # k1 < -tau/h, k5 > 0
-    k2, k3, k4 = -k1-h*k1*k5, 1/h-k1*k5, k5/h
+    k1, k5 = RAJAMANI_K1, RAJAMANI_K5
+    k2, k3, k4 = RAJAMANI_K2, RAJAMANI_K3, RAJAMANI_K4
 
     e = Car_2.state.x - Car_1.state.x + Car_1.L  # [m] actual gap
     e_dot = Car_2.v - Car_1.v         # [m/s] relative velocity
@@ -28,7 +32,7 @@ def rajamani(Car_1, Car_2):
     return a_des, s_des
 
 
-def free_road_acc(v, t, v_target, a_max,delta=4):
+def free_road_acc(v, t, v_target, a_max, delta=FREE_ROAD_DELTA):
     """Free road acceleration - identical to platoon_control.py"""
 
     if (v_target >= v):
@@ -43,7 +47,7 @@ class PlatoonManager:
     
     def __init__(self, vehicles: List[Vehicle], use_state_space: bool = False):
         self.vehicles = vehicles
-        self.target_velocity = 120.0 / 3.6  # 120 km/h in m/s (matching platoon_control)
+        self.target_velocity = PLATOON_TARGET_VELOCITY
         self.max_velocity = _vp.max_velocity  # m/s (matching platoon_control.py)
         self.max_acceleration = _vp.max_acceleration  # m/s^2 (matching platoon_control.py)
         
@@ -128,7 +132,7 @@ class PlatoonManager:
                 a_des = follower.nash_acceleration
                 follower.nash_acceleration = None  # Reset for next iteration
                 # Calculate desired gap for history (even when using Nash)
-                s_des = leader.L + 1.5 * follower.v  # h=1.5s
+                s_des = leader.L + RAJAMANI_H * follower.v
                 self.desired_gaps_history[car_num-1].append(s_des)
             else:
                 # Apply Rajamani control law - exactly like platoon_control.py

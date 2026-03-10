@@ -2,20 +2,18 @@
 Vehicle module - Contains vehicle physics, components and dynamics.
 
 This module provides:
-- VehicleParameters: Physical vehicle parameters 
-- Engine: Engine simulation model
-- Transmission: Transmission model
+- VehicleParameters: Physical vehicle parameters
 - VehicleState: Vehicle state representation
 - Vehicle: Main vehicle class with dynamics
+
+Engine and Transmission have moved to control/lower_level_controller.py.
 """
 
-from .components import VehicleParameters, Engine, Transmission, VehicleState
+from .components import VehicleParameters, VehicleState
 from .vehicle import Vehicle
 
 __all__ = [
     'VehicleParameters',
-    'Engine', 
-    'Transmission',
     'VehicleState',
     'Vehicle'
 ]

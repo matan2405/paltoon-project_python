@@ -87,8 +87,8 @@ class SystemReferenceGenerator:
         self.lane_width = LANE_WIDTH
         self.target_lane_y = 0.0
         
-        # System T_lc = Human T_lc × 1.5
-        self._system_T_lc_multiplier = 1.5
+        # System T_lc = Human T_lc × multiplier (aggressive gets 2.0× for smoother QP tracking)
+        self._system_T_lc_multiplier = 2.0 if driver_type == 'aggressive' else 1.5
         self._human_base_T_lc = {
             'cautious': 6.0,
             'normal': 4.5,
