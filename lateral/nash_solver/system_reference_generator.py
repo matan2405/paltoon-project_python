@@ -39,9 +39,8 @@ from dataclasses import dataclass
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP,
-    REFGEN_BASE_TLC, REFGEN_SYSTEM_TLC_MULTIPLIER,
-    REFGEN_SYSTEM_MAX_HEADING_DEG, REFGEN_SYSTEM_SETTLE_TIME,
+    DRIVER_PARAMS, LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP,
+    REFGEN_SYSTEM_MAX_HEADING_DEG,
     REFGEN_MIN_TLC_QUINTIC, REFGEN_MIN_TLC_FREE_ROAD_SYSTEM,
 )
 
@@ -92,9 +91,10 @@ class SystemReferenceGenerator:
         self.lane_width = LANE_WIDTH
         self.target_lane_y = 0.0
         
-        # System T_lc = Human T_lc × multiplier (from config; aggressive gets 2.0× for smoother QP)
-        self._system_T_lc_multiplier = REFGEN_SYSTEM_TLC_MULTIPLIER.get(driver_type, 1.5)
-        self._human_base_T_lc = REFGEN_BASE_TLC
+        # System T_lc = Human T_lc × multiplier (read from DRIVER_PARAMS)
+        self._human_base_T_lc        = {k: v['tlc']                  for k, v in DRIVER_PARAMS.items()}
+        self._system_tlc_multipliers = {k: v['system_tlc_multiplier'] for k, v in DRIVER_PARAMS.items()}
+        self._system_T_lc_multiplier = self._system_tlc_multipliers.get(driver_type, 1.5)
         human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
         self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
         self.lane_change_duration = self._base_T_lc
@@ -117,8 +117,8 @@ class SystemReferenceGenerator:
         self._lane_keeping_entry_psi = None
         self._lane_keeping_entry_y_dot = None
         
-        # Settling time for lane-keeping entry (adapts to driver type)
-        self._settle_time = REFGEN_SYSTEM_SETTLE_TIME
+        # Settling time for lane-keeping entry (from DRIVER_PARAMS)
+        self._settle_time = {k: v['system_settle_time'] for k, v in DRIVER_PARAMS.items()}
         self._T_settle = self._settle_time.get(driver_type, 3.0)
         # =====================================================================
         
@@ -138,7 +138,7 @@ class SystemReferenceGenerator:
     
     def set_driver_type(self, driver_type: str):
         self.driver_type = driver_type
-        self._system_T_lc_multiplier = REFGEN_SYSTEM_TLC_MULTIPLIER.get(driver_type, 1.5)
+        self._system_T_lc_multiplier = self._system_tlc_multipliers.get(driver_type, 1.5)
         human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
         self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
         self.lane_change_duration = self._base_T_lc

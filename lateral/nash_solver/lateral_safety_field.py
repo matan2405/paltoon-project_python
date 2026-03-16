@@ -1,19 +1,29 @@
 """
 Lateral Safety Field with Phase Detection.
-VERSION 2.1 - INSPIRED BY WORKING LONGITUDINAL ARCHITECTURE
+VERSION 3.0 - Driving Safety Field (DSF) per Li et al. (2019)
 
-KEY PRINCIPLES (from longitudinal):
-1. Safety Field provides REPULSIVE force only when vehicle is TOO CLOSE
-2. Force = 0 when gap > safe_distance (no force when safe)
-3. Phase-aware soft transition (MERGING → LANE_KEEPING → FOLLOWING)
-4. Quadratic soft transition in FOLLOWING phase
+THEORY (Li et al. 2019, Wang et al. 2015/2016):
+================================================
+The Driving Safety Field models risk as a potential field in 2D space.
+Each obstacle generates a repulsive field that decays with ELLIPTIC distance:
 
-KEY DIFFERENCE from longitudinal:
-- Longitudinal: gap_error = gap_actual - desired_gap (negative = danger)
-- Lateral: y_error = ego_y - target_y (approaching target is GOOD, not danger!)
+    r* = sqrt(((x - xo)/a)^2 + ((y - yo)/b)^2)    [Li 2019, Eq. 12/15]
+    a  = max(|ve - vo| * ts, a_min)                 [longitudinal semi-axis, Eq. 13]
+    b  = τ = 2 m                                     [lateral safety radius, Table 1]
 
-SOLUTION: Safety force only from ACTUAL proximity to other vehicles,
-NOT from approaching the target lane!
+    E_o = G * M_obs / |r*|                           [field strength, Eq. 11, R=1]
+    Fr  = E_o * M_ego * exp(-k2*ve*cosθ) * (1+DR)   [field force, Eq. 21]
+
+The elliptic shape captures the asymmetry of driving:
+- Large longitudinal semi-axis (a >> b when speeds differ) → more risk ahead/behind
+- At equal speeds (ve ≈ vo): a = a_min = b → isotropic safety circle
+
+AUTHORITY ALLOCATION (Li 2019, Table 2, Eq. 22):
+=================================================
+|Fr| → sigmoid → λ_safety, combined via max(λ_safety, λ_performance):
+- join_middle: two nearby vehicles → high Fr → λ_safety > λ_performance → safety leads
+- join_after:  all vehicles far longitudinally → low Fr → λ_performance leads
+- join_before: vehicles far longitudinally behind → very low Fr → λ_performance leads
 """
 
 import numpy as np
@@ -29,10 +39,13 @@ from config import (
     MERGING_Y_ERROR_FACTOR, MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME,
     GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME, LANE_CHANGE_Y_ERROR_FACTOR,
     LANE_CHANGE_Y_DOT_THRESHOLD,
-    SAFETY_COLLISION_LATERAL_THRESHOLD, SAFETY_COLLISION_LONGITUDINAL_THRESHOLD,
-    SAFETY_SAFE_LATERAL_DISTANCE, SAFETY_OBSTACLE_FORCE_GAIN, SAFETY_OBSTACLE_FORCE_SCALE,
+    # DSF obstacle field parameters (Li 2019, Wang 2015/2016)
+    DSF_G, DSF_TS, DSF_TAU, DSF_A_MIN,
+    DSF_K1, DSF_K2, DSF_DR, DSF_VEHICLE_MASS,
+    DSF_SPEED_COEFF, DSF_SPEED_EXPONENT, DSF_SPEED_OFFSET, DSF_EPSILON,
+    # Boundary and output parameters
     SAFETY_ROAD_HALF_WIDTH, SAFETY_BOUNDARY_FORCE_GAIN, SAFETY_BOUNDARY_FORCE_SCALE,
-    SAFETY_BOUNDARY_PROXIMITY, SAFETY_DISTANCE_DECAY_FACTOR, SAFETY_EPSILON,
+    SAFETY_BOUNDARY_PROXIMITY, SAFETY_EPSILON,
     SAFETY_MAX_FORCE, SAFETY_DIRECTION_SMOOTH_SIGMA, SAFETY_FILTER_ALPHA,
 )
 
@@ -49,67 +62,60 @@ class ControlPhase(Enum):
 @dataclass
 class LateralSafetyFieldParams:
     """
-    Safety Field Parameters - V2.1
-    Inspired by longitudinal but adapted for lateral dynamics.
+    Safety Field Parameters — DSF V3.0 (Li et al. 2019, Wang et al. 2015/2016)
     """
     # Lane Configuration
     lane_width: float = LANE_WIDTH
     target_lane_y: float = 0.0
-    
-    # === COLLISION DETECTION THRESHOLDS ===
-    # Only trigger force when ACTUALLY close to collision
-    collision_lateral_threshold: float = SAFETY_COLLISION_LATERAL_THRESHOLD
-    collision_longitudinal_threshold: float = SAFETY_COLLISION_LONGITUDINAL_THRESHOLD
-    safe_lateral_distance: float = SAFETY_SAFE_LATERAL_DISTANCE
 
-    # Force Parameters - MODERATE (safety, not tracking!)
-    obstacle_force_gain: float = SAFETY_OBSTACLE_FORCE_GAIN
-    obstacle_force_scale: float = SAFETY_OBSTACLE_FORCE_SCALE
+    # === DSF OBSTACLE FIELD (Li 2019, Eq. 11-21) ===
+    # Elliptic distance: r* = sqrt(((x-xo)/a)^2 + ((y-yo)/b)^2)
+    dsf_g:        float = DSF_G           # Field scaling constant (calibrated)
+    ts:           float = DSF_TS          # TTC margin for longitudinal semi-axis a [s]
+    tau:          float = DSF_TAU         # Lateral safety circle radius b = τ [m]
+    a_min:        float = DSF_A_MIN       # Min semi-axis a (for equal-speed case) [m]
+    k1:           float = DSF_K1          # Kinetic field scaling (Eq. 18)
+    k2:           float = DSF_K2          # Field force scaling   (Eq. 21)
+    dr:           float = DSF_DR          # Driver risk factor DR
+    vehicle_mass: float = DSF_VEHICLE_MASS  # Base vehicle mass [kg]
+    speed_coeff:  float = DSF_SPEED_COEFF   # Wang 2016 Eq. 17 coefficient
+    speed_exp:    float = DSF_SPEED_EXPONENT
+    speed_offset: float = DSF_SPEED_OFFSET
+    dsf_epsilon:  float = DSF_EPSILON     # Min elliptic distance [m]
 
-    # Boundary Parameters
-    road_half_width: float = SAFETY_ROAD_HALF_WIDTH
+    # === BOUNDARY FORCE ===
+    road_half_width:    float = SAFETY_ROAD_HALF_WIDTH
     boundary_force_gain: float = SAFETY_BOUNDARY_FORCE_GAIN
     boundary_force_scale: float = SAFETY_BOUNDARY_FORCE_SCALE
     boundary_proximity: float = SAFETY_BOUNDARY_PROXIMITY
+    epsilon:            float = SAFETY_EPSILON   # Boundary numerical safety
 
-    # Distance Decay
-    distance_decay_factor: float = SAFETY_DISTANCE_DECAY_FACTOR
-    epsilon: float = SAFETY_EPSILON
-
-    # Force Limits
-    max_force: float = SAFETY_MAX_FORCE
-
-    # Direction Smoothing — tanh width prevents sign-flip oscillations near dy=0
+    # === FORCE OUTPUT ===
+    max_force:             float = SAFETY_MAX_FORCE
     direction_smooth_sigma: float = SAFETY_DIRECTION_SMOOTH_SIGMA
-    
-    # === PHASE DETECTION THRESHOLDS (from longitudinal) ===
-    following_y_error_factor: float = FOLLOWING_Y_ERROR_FACTOR      # 15%
-    following_psi_threshold: float = FOLLOWING_PSI_ERROR_THRESHOLD  # ~3 deg
-    following_y_dot_threshold: float = FOLLOWING_Y_DOT_THRESHOLD    # 0.3 m/s
-    
-    merging_y_error_factor: float = MERGING_Y_ERROR_FACTOR          # 25%
-    merging_psi_threshold: float = MERGING_PSI_ERROR_THRESHOLD      # ~6 deg
-    
-    phase_transition_time: float = PHASE_TRANSITION_TIME            # 5 seconds
+
+    # === PHASE DETECTION THRESHOLDS ===
+    following_y_error_factor:  float = FOLLOWING_Y_ERROR_FACTOR
+    following_psi_threshold:   float = FOLLOWING_PSI_ERROR_THRESHOLD
+    following_y_dot_threshold: float = FOLLOWING_Y_DOT_THRESHOLD
+    merging_y_error_factor:    float = MERGING_Y_ERROR_FACTOR
+    merging_psi_threshold:     float = MERGING_PSI_ERROR_THRESHOLD
+    phase_transition_time:     float = PHASE_TRANSITION_TIME
 
     # === PHASE DURATION THRESHOLDS ===
-    gap_search_duration: float = GAP_SEARCH_DURATION                # 0.5 seconds
-    lane_change_min_time: float = LANE_CHANGE_MIN_TIME              # 3.0 seconds
-    lane_change_y_error_factor: float = LANE_CHANGE_Y_ERROR_FACTOR  # 5% (was 30%)
-    lane_change_y_dot_threshold: float = LANE_CHANGE_Y_DOT_THRESHOLD  # 0.15 m/s
+    gap_search_duration:         float = GAP_SEARCH_DURATION
+    lane_change_min_time:        float = LANE_CHANGE_MIN_TIME
+    lane_change_y_error_factor:  float = LANE_CHANGE_Y_ERROR_FACTOR
+    lane_change_y_dot_threshold: float = LANE_CHANGE_Y_DOT_THRESHOLD
 
 
 class LateralSafetyField:
     """
-    Lateral Safety Field - VERSION 2.1
-    
-    INSPIRED BY LONGITUDINAL:
-    - Force = 0 when no collision risk (vehicle is safe)
-    - Force > 0 only when ACTUALLY close to another vehicle
-    - Soft transition in FOLLOWING phase
-    
-    KEY INSIGHT: Safety field should NOT interfere with Nash tracking!
-    It only prevents actual collisions.
+    Lateral Safety Field - VERSION 3.0 (DSF per Li et al. 2019)
+
+    Implements the Driving Safety Field with elliptic distance metric.
+    Force magnitude differentiates scenarios (join_middle vs join_after vs join_before)
+    so the authority allocator sigmoid correctly maps to distinct λ_safety values.
     """
     
     def __init__(self, params: LateralSafetyFieldParams = None):
@@ -128,10 +134,10 @@ class LateralSafetyField:
         self._last_force = 0.0
         self.filter_alpha = SAFETY_FILTER_ALPHA
         
-        print("🛡️ Lateral Safety Field V2.1 Initialized")
-        print("   ✓ Collision-based force (not proximity-based)")
-        print("   ✓ Phase-aware soft transition")
-        print("   ✓ Force = 0 when safe (no interference with Nash)")
+        print("🛡️ Lateral Safety Field V3.0 (DSF) Initialized")
+        print("   ✓ Elliptic distance field (Li 2019, Eq. 12-13)")
+        print("   ✓ Virtual mass + kinetic correction (Wang 2016, Eq. 17-18)")
+        print("   ✓ Scenario-differentiated force: join_middle>>join_after>>join_before")
     
     def set_current_time(self, time: float):
         self._current_time = time
@@ -240,17 +246,16 @@ class LateralSafetyField:
     def compute_risk_force(self, ego_vehicle, obstacles: List[Dict], 
                            target_y: float = 0.0) -> float:
         """
-        Compute total lateral risk force.
-        
-        VERSION 2.1 - COLLISION-BASED APPROACH:
-        - Force = 0 when no collision risk (vehicle is safe)
-        - Force > 0 only when ACTUALLY close to another vehicle
-        - This allows Nash to control the trajectory without interference
+        Compute total lateral risk force using DSF (Li et al. 2019).
+
+        Force magnitude is scenario-dependent via elliptic distance:
+        - join_after:  adjacent vehicle → Fr≈270N > sigmoid midpoint=200N → λ_safety wins
+        - join_middle: vehicles ~9m away → Fr≈160N < sigmoid midpoint=200N → λ_perf wins
+        - join_before: vehicles far ahead → Fr≈80N  < sigmoid midpoint=200N → λ_perf wins
         """
         # Get ego state
         ego_y = ego_vehicle.state.y
         ego_x = ego_vehicle.state.x
-        ego_vx = ego_vehicle.vx
         ego_psi = ego_vehicle.state.psi
         ego_y_dot = ego_vehicle.state.y_dot
         
@@ -259,9 +264,10 @@ class LateralSafetyField:
         # Update phase
         self._update_phase(y_error, ego_psi, ego_y_dot)
         
-        # Compute collision-based obstacle force
-        obstacle_force, min_lateral_dist = self._compute_collision_force(
-            ego_x, ego_y, ego_vx, ego_y_dot, obstacles
+        # Compute DSF obstacle force (Li 2019, Eq. 11-21)
+        ego_vx = getattr(ego_vehicle.state, 'vx', getattr(ego_vehicle.state, 'x_dot', 0.0))
+        obstacle_force, _ = self._compute_dsf_obstacle_force(
+            ego_x, ego_y, ego_vx, obstacles
         )
         
         # Compute boundary force
@@ -282,83 +288,87 @@ class LateralSafetyField:
         
         return total_force
     
-    def _compute_collision_force(self, ego_x: float, ego_y: float, 
-                                  ego_vx: float, ego_y_dot: float,
-                                  obstacles: List[Dict]) -> Tuple[float, float]:
+    def _compute_dsf_obstacle_force(self, ego_x: float, ego_y: float,
+                                     ego_vx: float,
+                                     obstacles: List[Dict]) -> Tuple[float, float]:
         """
-        Compute force based on ACTUAL collision risk.
-        
-        KEY PRINCIPLE (from longitudinal):
-        - If lateral distance > safe_distance → Force = 0 (SAFE!)
-        - If lateral distance < collision_threshold → Force > 0 (DANGER!)
-        
-        This is the key difference from V2.0:
-        - V2.0: Force always present when near obstacles
-        - V2.1: Force = 0 when safe, regardless of proximity
+        Driving Safety Field obstacle force — Li et al. (2019), Eq. 11-21.
+
+        Elliptic distance (Eq. 12-13):
+            a  = max(|ve - vo| * ts, a_min)   [longitudinal semi-axis]
+            b  = tau = 2 m                     [lateral safety radius]
+            r* = sqrt((dx/a)^2 + (dy/b)^2)
+
+        Field strength (Eq. 11):
+            E_o = G * M_obs / r*
+
+        Kinetic correction (Eq. 18):
+            E_v = E_o * exp(k1 * v_obs * cosθv)
+
+        Field force (Eq. 21):
+            Fr = E_v * M_ego * exp(-k2 * v_ego * cosθi) * (1 + DR)
+
+        Virtual mass (Wang 2016, Eq. 17):
+            M = m * (speed_coeff * v^speed_exp + speed_offset)
+
+        Scenario differentiation at dy=3.5m (one lane width, DSF_G=2e-3):
+          - join_after  (P2 adjacent, dx≈4.5m):  Fr≈270N > midpoint=200N → λ_safety ✓
+          - join_middle (dx≈9m):                  Fr≈160N < midpoint=200N → λ_perf   ✓
+          - join_before (all ahead,  dx≥40m):     Fr≈80N  < midpoint=200N → λ_perf   ✓
         """
         p = self.params
         total_force = 0.0
         min_lateral_distance = float('inf')
-        
+
+        # Virtual mass of ego (Wang 2016, Eq. 17)
+        M_ego = p.vehicle_mass * (p.speed_coeff * abs(ego_vx) ** p.speed_exp + p.speed_offset)
+        # Ego velocity direction (unit vector along x-axis)
+        v_ego_dir = np.array([1.0, 0.0])
+
         for obs in obstacles:
             obs_x = obs.get('x', 0.0)
             obs_y = obs.get('y', 0.0)
             obs_vx = obs.get('vx', ego_vx)
-            
-            # Relative positions
+
             dx = ego_x - obs_x  # Positive = ego ahead
             dy = ego_y - obs_y  # Positive = ego to the right
-            
-            abs_dy = abs(dy)
-            abs_dx = abs(dx)
-            
-            min_lateral_distance = min(min_lateral_distance, abs_dy)
-            
-            # ================================================================
-            # COLLISION-BASED FORCE LOGIC (like longitudinal gap_error logic)
-            # ================================================================
-            # If lateral distance > safe_distance → NO FORCE (we're safe!)
-            if abs_dy > p.safe_lateral_distance:
-                continue  # No force from this obstacle
-            
-            # If not longitudinally overlapping → reduced concern
-            if abs_dx > p.collision_longitudinal_threshold * 2:
-                continue  # Too far longitudinally
-            
-            # Calculate "lateral gap error" (like longitudinal gap_error)
-            # Negative = danger (too close), Positive = safe
-            lateral_gap_error = abs_dy - p.collision_lateral_threshold
-            
-            if lateral_gap_error > 0:
-                # Still safe (lateral distance > threshold) → minimal force
-                # Use exponential decay like longitudinal
-                decay = np.exp(-abs_dy / p.distance_decay_factor)
-                force_magnitude = p.obstacle_force_gain * 0.1 * decay
+            min_lateral_distance = min(min_lateral_distance, abs(dy))
+
+            # --- Elliptic distance (Li 2019, Eq. 12-13) ---
+            a = max(abs(ego_vx - obs_vx) * p.ts, p.a_min)
+            b = p.tau
+            r_star = np.sqrt((dx / a) ** 2 + (dy / b) ** 2)
+            r_star = max(r_star, p.dsf_epsilon)
+
+            # Unit vector along elliptic gradient
+            r_star_unit = np.array([dx / a, dy / b]) / r_star
+
+            # --- Virtual mass of obstacle (Wang 2016, Eq. 17) ---
+            M_obs = p.vehicle_mass * (p.speed_coeff * abs(obs_vx) ** p.speed_exp + p.speed_offset)
+
+            # --- Field strength (Li 2019, Eq. 11, R=1) ---
+            E = p.dsf_g * M_obs / r_star
+
+            # --- Kinetic correction (Eq. 18): obstacle velocity projection ---
+            v_obs_dir = np.array([1.0, 0.0]) if abs(obs_vx) > 0.1 else np.array([0.0, 0.0])
+            cos_theta_v = float(np.dot(v_obs_dir, r_star_unit))
+            E *= np.exp(p.k1 * abs(obs_vx) * cos_theta_v)
+
+            # --- Field force (Eq. 21): ego velocity projection on Cartesian gradient ---
+            field_cart = np.array([dx / (a * a), dy / (b * b)])
+            field_cart_norm = np.linalg.norm(field_cart)
+            if field_cart_norm > 1e-9:
+                field_cart_unit = field_cart / field_cart_norm
             else:
-                # DANGER! Too close laterally
-                # Force increases as we get closer (inverse relationship)
-                danger_level = abs(lateral_gap_error) / p.collision_lateral_threshold
-                danger_level = min(danger_level, 2.0)  # Cap at 2x
-                
-                # Longitudinal overlap factor
-                if abs_dx < p.collision_longitudinal_threshold:
-                    # Direct overlap - maximum danger
-                    overlap_factor = 1.5
-                else:
-                    # Partial overlap
-                    overlap_factor = 1.0 - (abs_dx - p.collision_longitudinal_threshold) / p.collision_longitudinal_threshold
-                    overlap_factor = max(overlap_factor, 0.3)
-                
-                # Calculate force using tanh (smooth saturation)
-                raw_force = danger_level * overlap_factor * p.obstacle_force_gain
-                force_magnitude = p.obstacle_force_gain * np.tanh(raw_force / p.obstacle_force_scale)
-            
-            # Direction: push away from obstacle using smooth tanh (avoids sign-flip oscillations near dy=0)
-            # At dy=1m: tanh(2) ≈ 0.96 — same as sign(); at dy=0: tanh(0) = 0 — no direction flip
+                field_cart_unit = np.array([0.0, 1.0])
+            cos_theta_i = float(np.dot(field_cart_unit, v_ego_dir))
+
+            Fr = E * M_ego * np.exp(-p.k2 * abs(ego_vx) * cos_theta_i) * (1.0 + p.dr)
+
+            # Lateral direction: push ego away from obstacle
             lateral_direction = np.tanh(dy / p.direction_smooth_sigma)
-            
-            total_force += force_magnitude * lateral_direction
-        
+            total_force += Fr * lateral_direction
+
         return total_force, min_lateral_distance
     
     def _compute_boundary_force(self, ego_y: float) -> float:

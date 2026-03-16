@@ -63,8 +63,60 @@ SIMULATION_DT = 0.01          # 100 Hz - vehicle dynamics integration step [s]
 NASH_CONTROL_DT = 0.05        # 20 Hz  - Nash MPC control step [s]
 NASH_NP = 20                  # Prediction horizon [steps]
 NASH_NU = 10                  # Control horizon [steps]
-DEFAULT_SIMULATION_TIME = 120.0  # Default simulation time [s]
-NOMINAL_VELOCITY = 20.0       # Nominal longitudinal velocity [m/s]
+DEFAULT_SIMULATION_TIME = 30.0  # Default simulation time [s]
+NOMINAL_VELOCITY = 33.0       # Nominal longitudinal velocity [m/s]
+
+# =============================================================================
+# DRIVER TYPE PARAMETERS — single source of truth (mirrors Longitudinal/config.py)
+# Inspired by NASH_DRIVER_PARAMS in the longitudinal system.
+# Every per-driver constant below is DERIVED from this dict.
+# =============================================================================
+DRIVER_PARAMS = {
+    'cautious': {
+        # Longitudinal velocity
+        'velocity_offset':        -5.0,   # [m/s] re. NOMINAL_VELOCITY  → 28 m/s
+        'x_error_offset':       20,    # [m] positive → more conservative (larger initial error)
+        # Stanley controller (Stanley 2006)
+        'stanley_k_e':            0.003,  # Cross-track error gain
+        'stanley_k_psi':          0.3,    # Heading error gain
+        # Human reference trajectory
+        'tlc':                    6.0,    # Lane-change duration [s]
+        'max_heading_deg':        3.0,    # Max heading angle [deg]
+        'human_settle_time':      4.0,    # LANE_KEEPING settling time [s]
+        # System reference trajectory
+        'system_tlc_multiplier':  1.5,    # System T_lc = tlc × multiplier → 9.0 s
+        'system_settle_time':     3.0,    # System settling time [s]
+        # MOBIL lane-change model
+        'mobil_p':                0.8,    # Politeness factor (very polite)
+        'mobil_a_th':             0.2,    # Lane-change incentive threshold [m/s²]
+    },
+    'normal': {
+        'velocity_offset':        0.0,    # → 33 m/s (matches platoon)
+        'x_error_offset':       0.0,    # [m] positive → more conservative (larger initial error)
+        'stanley_k_e':            0.005,
+        'stanley_k_psi':          0.5,
+        'tlc':                    4.5,
+        'max_heading_deg':        4.0,
+        'human_settle_time':      3.0,
+        'system_tlc_multiplier':  1.5,    # → 6.75 s
+        'system_settle_time':     3.0,
+        'mobil_p':                0.5,
+        'mobil_a_th':             0.1,
+    },
+    'aggressive': {
+        'velocity_offset':        5.0,    # → 38 m/s
+        'x_error_offset':       -20.0,    # [m] positive → more conservative (larger initial error)
+        'stanley_k_e':            0.008,
+        'stanley_k_psi':          0.7,
+        'tlc':                    3.0,
+        'max_heading_deg':        6.0,
+        'human_settle_time':      2.0,
+        'system_tlc_multiplier':  1.5,    # → 4.5 s
+        'system_settle_time':     3.0,
+        'mobil_p':                0.2,    # Less polite
+        'mobil_a_th':             0.05,
+    },
+}
 
 # =============================================================================
 # LANE CONFIGURATION
@@ -79,38 +131,13 @@ VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown']
 # =============================================================================
 # STANLEY CONTROLLER PARAMETERS (Stanley 2006)
 # Source: control/human_driver.py - StanleyController
+# Per-driver values live in DRIVER_PARAMS — access via DRIVER_PARAMS[driver_type].
 # =============================================================================
-# Cross-track error gain — higher = more aggressive lane tracking
-STANLEY_K_E_CAUTIOUS   = 0.003
-STANLEY_K_E_NORMAL     = 0.005
-STANLEY_K_E_AGGRESSIVE = 0.008
-
-# Heading error gain — higher = faster heading correction
-STANLEY_K_PSI_CAUTIOUS   = 0.3
-STANLEY_K_PSI_NORMAL     = 0.5
-STANLEY_K_PSI_AGGRESSIVE = 0.7
-
 # Velocity softening term (prevents division by zero at low speed)
 STANLEY_K_SOFT = 1.0
 
 # Low-pass filter on steering output
 STANLEY_FILTER_ALPHA = 0.2    # 1st-order EMA on steering command [-]
-
-# Per-driver-type parameter dict (additive — flat constants above remain canonical)
-STANLEY_DRIVER_PARAMS = {
-    'cautious': {
-        'k_e':   STANLEY_K_E_CAUTIOUS,
-        'k_psi': STANLEY_K_PSI_CAUTIOUS,
-    },
-    'normal': {
-        'k_e':   STANLEY_K_E_NORMAL,
-        'k_psi': STANLEY_K_PSI_NORMAL,
-    },
-    'aggressive': {
-        'k_e':   STANLEY_K_E_AGGRESSIVE,
-        'k_psi': STANLEY_K_PSI_AGGRESSIVE,
-    },
-}
 
 # =============================================================================
 # NASH SOLVER PARAMETERS (Pustilnik & Borrelli 2025)
@@ -151,30 +178,46 @@ NASH_POLISH         = False
 NASH_REGULARIZATION = 1e-5
 
 # =============================================================================
-# LATERAL SAFETY FIELD PARAMETERS
-# Source: nash_solver/lateral_safety_field.py - LateralSafetyFieldParams
+# LATERAL SAFETY FIELD PARAMETERS — Driving Safety Field (DSF)
+# Source: Li et al. (2019), Wang et al. (2015, 2016)
+# Source file: nash_solver/lateral_safety_field.py - LateralSafetyFieldParams
 # =============================================================================
-# --- Collision detection thresholds ---
-SAFETY_COLLISION_LATERAL_THRESHOLD      = 2.0    # Lateral distance for "danger" [m]
-SAFETY_COLLISION_LONGITUDINAL_THRESHOLD = 10.0   # Longitudinal overlap for "danger" [m]
-SAFETY_SAFE_LATERAL_DISTANCE            = 3.0    # No force if lateral distance > this [m]
+# --- Elliptic distance parameters (Li 2019, Eq. 12-13) ---
+# r* = sqrt(((x-xo)/a)² + ((y-yo)/b)²)
+# a = max(|ve - vo| * DSF_TS, DSF_A_MIN)  [longitudinal semi-axis]
+# b = DSF_TAU = 2 m                        [lateral safety circle radius]
+DSF_TS    = 2.0    # TTC safety margin for longitudinal semi-axis [s] (Li 2019 Eq. 13)
+DSF_TAU   = 2.0    # Lateral safety circle radius b = τ [m] (Li 2019 Table 1)
+DSF_A_MIN = 2.0    # Min longitudinal semi-axis (= τ, for equal-speed case) [m]
 
-# --- Obstacle force parameters ---
-SAFETY_OBSTACLE_FORCE_GAIN  = 150.0    # Obstacle repulsive force gain [N]
-SAFETY_OBSTACLE_FORCE_SCALE = 5.0      # tanh saturation scale for obstacle force
+# --- Field scaling and kinetic parameters (Li 2019) ---
+# Fr = G * M_obs / |r*| * exp(k1*v_obs*cosθ) * M_ego * exp(-k2*v_ego*cosθ) * (1+DR)
+# Calibrated to AUTHORITY_FORCE_MIDPOINT=200N (from simulation at DSF_G=6e-3):
+#   join_after  (dx≈4.5m, dy=3.5m): measured Fr≈27N  → scale 10× → Fr≈270N > 200N ✓
+#   join_middle (dx≈9m,   dy=3.5m): measured Fr≈16N  → scale 10× → Fr≈160N < 200N ✓
+#   join_before (dx≥40m,  dy=3.5m): measured Fr≈8N   → scale 10× → Fr≈80N  < 200N ✓
+DSF_G    = 6e-3    # Field scaling constant [calibrated to sigmoid midpoint=200N]
+DSF_K1   = 0.005   # Kinetic field scaling weight (Li 2019 Table 1, Eq. 18)
+DSF_K2   = 0.005   # Field force scaling weight   (Li 2019 Table 1, Eq. 21)
+DSF_DR   = 0.5     # Driver risk factor DR        (Li 2019 Table 1)
+DSF_VEHICLE_MASS = 1304.0  # Base vehicle mass for virtual mass computation [kg]
 
-# --- Road boundary parameters ---
+# Virtual mass speed coefficients (Wang 2016, Eq. 17):
+# M = m * (1.566e-14 * v^6.687 + 0.3345)  — at 20 m/s, speed term ≈ 0, M ≈ 0.3345 * m
+DSF_SPEED_COEFF    = 1.566e-14  # Speed-dependent mass coefficient
+DSF_SPEED_EXPONENT = 6.687      # Speed exponent
+DSF_SPEED_OFFSET   = 0.3345     # Speed-independent mass offset
+DSF_EPSILON        = 1e-3       # Minimum elliptic distance (numerical safety) [m]
+
+# --- Road boundary parameters (unchanged) ---
 SAFETY_ROAD_HALF_WIDTH      = 7.0      # Half road width [m] (total 14m = 4 lanes)
 SAFETY_BOUNDARY_FORCE_GAIN  = 150.0    # Boundary repulsive force gain [N]
 SAFETY_BOUNDARY_FORCE_SCALE = 2.0      # tanh saturation scale for boundary force
 SAFETY_BOUNDARY_PROXIMITY   = 3.0      # Activate boundary force when closer than this [m]
-
-# --- Distance decay ---
-SAFETY_DISTANCE_DECAY_FACTOR = 20.0    # Exponential decay constant [m]
-SAFETY_EPSILON               = 0.1     # Numerical stability offset
+SAFETY_EPSILON               = 0.1     # Boundary numerical stability offset
 
 # --- Force limits ---
-SAFETY_MAX_FORCE = 500.0               # Maximum total lateral safety force [N]
+SAFETY_MAX_FORCE = 2000.0               # Maximum total lateral DSF force [N]
 
 # --- Direction smoothing ---
 # tanh direction: at dy=1m: tanh(2)≈0.96 ≈ sign; at dy=0: tanh(0)=0 (no flip)
@@ -191,7 +234,7 @@ SAFETY_FILTER_ALPHA = 0.3              # Low-pass EMA on safety force output [-]
 # Sigmoid parameters for SAFETY (risk-based)
 AUTHORITY_LAMBDA_MIN      = 0.1    # Human dominant when safe
 AUTHORITY_LAMBDA_MAX      = 10.0   # System dominant when dangerous
-AUTHORITY_FORCE_MIDPOINT  = 150.0  # Sigmoid centre point [N]
+AUTHORITY_FORCE_MIDPOINT  = 200.0   # Sigmoid centre [N] — calibrated to V3.0 proximity forces
 AUTHORITY_K_STEEPNESS     = 0.025  # Sigmoid slope (sharper: human ~75% at rest vs 64% at k=0.02)
 
 # Smoothing parameters
@@ -207,48 +250,9 @@ AUTHORITY_LAMBDA_PERFORMANCE_MAX  = 5.0  # Performance authority upper bound
 # REFERENCE GENERATOR PARAMETERS (Pustilnik & Borrelli 2025)
 # Source: nash_solver/system_reference_generator.py, human_reference_generator.py
 # =============================================================================
-# --- Lane change durations (human driver preference) ---
-# T_lc determines how long the planned lane-change trajectory spans.
-# Cautious → slower, aggressive → faster.
-REFGEN_BASE_TLC = {
-    'cautious':  6.0,    # [s]
-    'normal':    4.5,    # [s]
-    'aggressive': 3.0,   # [s]
-}
-
-# --- System T_lc multiplier ---
-# System plans a LONGER reference to reduce QP reference rate-of-change (≈ chattering).
-# Aggressive gets a higher multiplier because 3.0s × 1.5 = 4.5s was too fast for 20Hz Nash.
-REFGEN_SYSTEM_TLC_MULTIPLIER = {
-    'cautious':  1.5,    # cautious: 6.0s × 1.5 = 9.0s
-    'normal':    1.5,    # normal:   4.5s × 1.5 = 6.75s
-    'aggressive': 2.0,   # aggressive: 3.0s × 2.0 = 6.0s (was 4.5s — too fast for QP)
-}
-
-# --- System max heading constraint (DynamicTrajectoryParams) ---
+# --- Per-driver values live in DRIVER_PARAMS — access via DRIVER_PARAMS[driver_type]. ---
+# --- System max heading constraint (shared, not per-driver) ---
 REFGEN_SYSTEM_MAX_HEADING_DEG = 8.0    # Max heading angle for system trajectory [deg]
-
-# --- Human max heading angles per driver type ---
-REFGEN_HUMAN_MAX_HEADING_DEG = {
-    'cautious':  3.0,    # [deg]
-    'normal':    4.0,    # [deg]
-    'aggressive': 6.0,   # [deg]
-}
-
-# --- Settling times for LANE_KEEPING soft transition ---
-# When entering LANE_KEEPING, a cubic polynomial settles from current (y, ψ) to (y_target, 0)
-# over T_settle seconds. Prevents reference discontinuity = heading saturation.
-REFGEN_SYSTEM_SETTLE_TIME = {
-    'cautious':  5.0,    # [s] — slow, gentle settling
-    'normal':    3.0,    # [s]
-    'aggressive': 2.0,   # [s] — quick settling
-}
-
-REFGEN_HUMAN_SETTLE_TIME = {
-    'cautious':  4.0,    # [s]
-    'normal':    3.0,    # [s]
-    'aggressive': 2.0,   # [s]
-}
 
 # --- Minimum T_lc bounds (from heading constraint derivation) ---
 REFGEN_MIN_TLC_QUINTIC = 3.0    # 5th-order polynomial minimum [s] (system)
@@ -318,11 +322,7 @@ MOBIL_A_TH     = 0.1    # Lane change incentive threshold [m/s²]
 MOBIL_A_BIAS   = 0.3    # Right lane bias [m/s²]
 MOBIL_MIN_GAP  = 8.0    # Minimum front/rear gap for middle merge [m]
 
-# --- Driver-type MOBIL overrides ---
-MOBIL_CAUTIOUS_P     = 0.8    # Very polite — considers others
-MOBIL_CAUTIOUS_A_TH  = 0.2    # Conservative threshold
-MOBIL_AGGRESSIVE_P   = 0.2    # Less polite — more egoistic
-MOBIL_AGGRESSIVE_A_TH = 0.05  # Easier to trigger lane change
+# --- Per-driver MOBIL overrides live in DRIVER_PARAMS — access via DRIVER_PARAMS[driver_type]. ---
 
 # =============================================================================
 # EXPORT
@@ -331,14 +331,13 @@ __all__ = [
     # System
     'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT',
     'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME', 'NOMINAL_VELOCITY',
+    'DRIVER_PARAMS',
 
     # Lane / plotting
     'LANE_WIDTH', 'PLATOON_LANE_Y', 'HUMAN_INITIAL_LANE_Y', 'VEHICLE_COLORS',
 
     # Stanley controller
-    'STANLEY_K_E_CAUTIOUS', 'STANLEY_K_E_NORMAL', 'STANLEY_K_E_AGGRESSIVE',
-    'STANLEY_K_PSI_CAUTIOUS', 'STANLEY_K_PSI_NORMAL', 'STANLEY_K_PSI_AGGRESSIVE',
-    'STANLEY_K_SOFT', 'STANLEY_FILTER_ALPHA', 'STANLEY_DRIVER_PARAMS',
+    'STANLEY_K_SOFT', 'STANLEY_FILTER_ALPHA',
 
     # Nash solver
     'NASH_Q_Y', 'NASH_Q_PSI',
@@ -349,12 +348,13 @@ __all__ = [
     'NASH_MAX_ITER', 'NASH_EPS_ABS', 'NASH_EPS_REL',
     'NASH_POLISH', 'NASH_REGULARIZATION',
 
-    # Lateral safety field
-    'SAFETY_COLLISION_LATERAL_THRESHOLD', 'SAFETY_COLLISION_LONGITUDINAL_THRESHOLD',
-    'SAFETY_SAFE_LATERAL_DISTANCE',
-    'SAFETY_OBSTACLE_FORCE_GAIN', 'SAFETY_OBSTACLE_FORCE_SCALE',
+    # Lateral safety field — DSF parameters (Li 2019, Wang 2015/2016)
+    'DSF_G', 'DSF_TS', 'DSF_TAU', 'DSF_A_MIN',
+    'DSF_K1', 'DSF_K2', 'DSF_DR', 'DSF_VEHICLE_MASS',
+    'DSF_SPEED_COEFF', 'DSF_SPEED_EXPONENT', 'DSF_SPEED_OFFSET', 'DSF_EPSILON',
+    # Boundary and output parameters
     'SAFETY_ROAD_HALF_WIDTH', 'SAFETY_BOUNDARY_FORCE_GAIN', 'SAFETY_BOUNDARY_FORCE_SCALE',
-    'SAFETY_BOUNDARY_PROXIMITY', 'SAFETY_DISTANCE_DECAY_FACTOR', 'SAFETY_EPSILON',
+    'SAFETY_BOUNDARY_PROXIMITY', 'SAFETY_EPSILON',
     'SAFETY_MAX_FORCE', 'SAFETY_DIRECTION_SMOOTH_SIGMA', 'SAFETY_FILTER_ALPHA',
 
     # Authority allocator
@@ -365,9 +365,7 @@ __all__ = [
     'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
 
     # Reference generators
-    'REFGEN_BASE_TLC', 'REFGEN_SYSTEM_TLC_MULTIPLIER',
-    'REFGEN_SYSTEM_MAX_HEADING_DEG', 'REFGEN_HUMAN_MAX_HEADING_DEG',
-    'REFGEN_SYSTEM_SETTLE_TIME', 'REFGEN_HUMAN_SETTLE_TIME',
+    'REFGEN_SYSTEM_MAX_HEADING_DEG',
     'REFGEN_MIN_TLC_QUINTIC', 'REFGEN_MIN_TLC_CUBIC',
     'REFGEN_MIN_TLC_FREE_ROAD_SYSTEM', 'REFGEN_MIN_TLC_FREE_ROAD_HUMAN',
 
@@ -390,6 +388,4 @@ __all__ = [
     'MOBIL_IDM_V0', 'MOBIL_IDM_T', 'MOBIL_IDM_A_MAX', 'MOBIL_IDM_B',
     'MOBIL_IDM_S0', 'MOBIL_IDM_DELTA', 'MOBIL_IDM_L',
     'MOBIL_P', 'MOBIL_B_SAFE', 'MOBIL_A_TH', 'MOBIL_A_BIAS', 'MOBIL_MIN_GAP',
-    'MOBIL_CAUTIOUS_P', 'MOBIL_CAUTIOUS_A_TH',
-    'MOBIL_AGGRESSIVE_P', 'MOBIL_AGGRESSIVE_A_TH',
 ]

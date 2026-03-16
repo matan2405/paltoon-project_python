@@ -23,11 +23,10 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
+    DRIVER_PARAMS,
     MOBIL_IDM_V0, MOBIL_IDM_T, MOBIL_IDM_A_MAX, MOBIL_IDM_B,
     MOBIL_IDM_S0, MOBIL_IDM_DELTA, MOBIL_IDM_L,
     MOBIL_P, MOBIL_B_SAFE, MOBIL_A_TH, MOBIL_A_BIAS, MOBIL_MIN_GAP,
-    MOBIL_CAUTIOUS_P, MOBIL_CAUTIOUS_A_TH,
-    MOBIL_AGGRESSIVE_P, MOBIL_AGGRESSIVE_A_TH,
 )
 
 
@@ -160,22 +159,10 @@ class MOBILLaneChange:
         print(f"   p={self.params.p}, b_safe={self.params.b_safe} m/s², a_th={self.params.a_th} m/s²")
     
     def set_politeness(self, driver_type: str):
-        """
-        Set politeness factor based on driver type.
-        
-        Args:
-            driver_type: 'cautious', 'normal', or 'aggressive'
-        """
-        if driver_type == 'cautious':
-            self.params.p = MOBIL_CAUTIOUS_P
-            self.params.a_th = MOBIL_CAUTIOUS_A_TH
-        elif driver_type == 'aggressive':
-            self.params.p = MOBIL_AGGRESSIVE_P
-            self.params.a_th = MOBIL_AGGRESSIVE_A_TH
-        else:  # normal
-            self.params.p = MOBIL_P
-            self.params.a_th = MOBIL_A_TH
-        
+        """Set politeness factor based on driver type (reads from DRIVER_PARAMS)."""
+        p = DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])
+        self.params.p     = p['mobil_p']
+        self.params.a_th  = p['mobil_a_th']
         print(f"   MOBIL politeness set for {driver_type}: p={self.params.p}")
     
     def check_lane_change(self, 

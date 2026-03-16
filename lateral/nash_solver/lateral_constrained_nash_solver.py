@@ -287,19 +287,19 @@ class ConstrainedLateralNashSolver:
         Pustilnik (2025), Section IV:
         α represents the relative "aggressiveness" of the human player.
         
-        We use: α(λ) = λ / (1 + λ)
-        
+        We use: α(λ) = 1 / (1 + λ)
+
         This gives:
-        - λ=0.1 → α=0.091 (system dominant — human barely tracked)
-        - λ=0.5 → α=0.333 (system has more authority)
+        - λ=0.1 → α=0.909 (human dominant — safe, human tracks aggressively)
+        - λ=0.5 → α=0.667 (human has more authority)
         - λ=1.0 → α=0.500 (normalized solution — equal)
-        - λ=2.0 → α=0.667 (human has more authority)
-        - λ=10  → α=0.909 (human dominant)
-        
+        - λ=2.0 → α=0.333 (system has more authority)
+        - λ=10  → α=0.091 (system dominant — dangerous, human barely acts)
+
         Corollary 2.2 guarantees: reducing α for the system
         cannot worsen the system's cost.
         """
-        return lambda_k / (1.0 + lambda_k)
+        return 1.0 / (1.0 + lambda_k)
     
     def _build_P_for_lambda(self, lambda_k: float) -> np.ndarray:
         """

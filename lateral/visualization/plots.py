@@ -66,17 +66,23 @@ def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation"
     ax4.grid(True, alpha=0.3)
     
     ax5 = axes[1, 1]
-    lambda_k = sim_data['authority_ratio']
-    alpha = lambda_k / (1 + lambda_k)
-    ax5.plot(time, alpha * 100, 'purple', linewidth=2, label='System')
-    ax5.plot(time, (1 - alpha) * 100, 'orange', linewidth=2, label='Human')
-    ax5.axhline(y=50, color='k', linestyle='--', linewidth=1)
+    lambda_k   = np.array(sim_data['authority_ratio'])
+    lam_safety = np.array(sim_data.get('lambda_safety', lambda_k))
+    lam_perf   = np.array(sim_data.get('lambda_performance', np.ones_like(lambda_k) * 0.1))
+
+    ax5.fill_between(time, 1.0, np.maximum(lambda_k, 1.0),
+                     color='steelblue', alpha=0.25, label='System Dominant')
+    ax5.fill_between(time, np.minimum(lambda_k, 1.0), 1.0,
+                     color='lightgreen', alpha=0.35, label='Human Dominant')
+    ax5.semilogy(time, lam_safety, 'r--',          linewidth=1.5, alpha=0.85, label='Safety Authority')
+    ax5.semilogy(time, lam_perf,   'g--',          linewidth=1.5, alpha=0.85, label='Performance Authority')
+    ax5.semilogy(time, lambda_k,   color='magenta', linewidth=2,               label='Final Authority')
+    ax5.axhline(y=1.0, color='k', linestyle=':', linewidth=1.5, label='Equal Authority')
     add_mobil_line(ax5)
     ax5.set_xlabel('Time [s]')
-    ax5.set_ylabel('Authority [%]')
-    ax5.set_title('Authority Allocation')
-    ax5.set_ylim([0, 100])
-    ax5.legend(fontsize=8)
+    ax5.set_ylabel('Authority Ratio λ (log scale)')
+    ax5.set_title('Authority Ratio (Log Scale)')
+    ax5.legend(fontsize=7, loc='upper right')
     ax5.grid(True, alpha=0.3)
     
     ax6 = axes[1, 2]
@@ -221,12 +227,27 @@ def create_nash_analysis_plots(sim_data: Dict, scenario_name: str = "Simulation"
     ax1.grid(True, alpha=0.3)
     
     ax2 = axes[0, 1]
-    ax2.semilogy(time, sim_data['authority_ratio'], 'purple', linewidth=2)
-    ax2.axhline(y=1.0, color='k', linestyle='--')
+    lambda_final = np.array(sim_data['authority_ratio'])
+    lambda_safety = np.array(sim_data.get('lambda_safety', lambda_final))
+    lambda_perf   = np.array(sim_data.get('lambda_performance', np.ones_like(lambda_final) * 0.1))
+
+    # Shaded regions
+    ax2.fill_between(time, 1.0, np.maximum(lambda_final, 1.0),
+                     color='steelblue', alpha=0.25, label='System Dominant')
+    ax2.fill_between(time, np.minimum(lambda_final, 1.0), 1.0,
+                     color='lightgreen', alpha=0.35, label='Human Dominant')
+
+    # Component lines
+    ax2.semilogy(time, lambda_safety, 'r--',      linewidth=1.5, alpha=0.85, label='Safety Authority')
+    ax2.semilogy(time, lambda_perf,   'g--',      linewidth=1.5, alpha=0.85, label='Performance Authority')
+    ax2.semilogy(time, lambda_final,  color='magenta', linewidth=2, label='Final Authority')
+    ax2.axhline(y=1.0, color='k', linestyle=':', linewidth=1.5, label='Equal Authority')
+
     add_mobil_line(ax2)
     ax2.set_xlabel('Time [s]')
-    ax2.set_ylabel('lambda')
-    ax2.set_title('Authority Ratio (log)')
+    ax2.set_ylabel('Authority Ratio λ (log scale)')
+    ax2.set_title('Authority Ratio (Log Scale)')
+    ax2.legend(fontsize=8, loc='upper right')
     ax2.grid(True, alpha=0.3)
     
     ax3 = axes[1, 0]

@@ -13,8 +13,9 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (SIMULATION_DT, DEFAULT_SIMULATION_TIME, LANE_WIDTH, 
-                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_NP, NASH_NU)
+from config import (SIMULATION_DT, DEFAULT_SIMULATION_TIME, LANE_WIDTH,
+                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_NP, NASH_NU,
+                    NOMINAL_VELOCITY, DRIVER_PARAMS, PLATOON_TARGET_VELOCITY)
 from vehicle import Vehicle
 from control import HumanDriver, PlatoonManager, PlatoonParams, MOBILLaneChange
 from nash_solver import (ConstrainedLateralNashSolver, LateralSafetyField, LateralSafetyFieldParams,
@@ -32,26 +33,27 @@ class LateralSimulation:
         self.T_sim = T_sim
         self.time = 0.0
 
-        # Human vehicle
+        # Human vehicle — velocity offset from DRIVER_PARAMS
+        human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
         self.human_vehicle = Vehicle(
             initial_y=HUMAN_INITIAL_LANE_Y,
             initial_psi=0.0,
             initial_x=0.0,
             vehicle_id="Human",
-            longitudinal_velocity=20.0
+            longitudinal_velocity=human_vx
         )
 
         # Platoon
-        self.platoon_params = PlatoonParams(target_velocity=20.0, platoon_lane_y=PLATOON_LANE_Y)
+        self.platoon_params = PlatoonParams(target_velocity=PLATOON_TARGET_VELOCITY, platoon_lane_y=PLATOON_LANE_Y)
         self.platoon_manager = PlatoonManager(self.platoon_params)
 
-        # Human driver model (Stanley Controller)
+        # Human driver model (Stanley Controller) — initialized with driver_type directly
         self.human_driver = HumanDriver(
             vehicle=self.human_vehicle,
             target_lane_y=PLATOON_LANE_Y,
-            dt=dt
+            dt=dt,
+            driver_type=driver_type
         )
-        self.human_driver.set_driver_type(driver_type)
 
         # Safety field (V2.0 - no lane centering)
         self.safety_field_params = LateralSafetyFieldParams(target_lane_y=PLATOON_LANE_Y)
@@ -117,7 +119,8 @@ class LateralSimulation:
             'time': [], 'human_x': [], 'human_y': [], 'human_psi': [], 
             'human_vx': [], 'human_y_dot': [], 'human_psi_dot': [], 'human_ay': [],
             'delta_system': [], 'delta_human': [], 'delta_shared': [],
-            'authority_ratio': [], 'field_force': [], 'phase': [],
+            'authority_ratio': [], 'lambda_safety': [], 'lambda_performance': [],
+            'field_force': [], 'phase': [],
             'platoon_positions': [], 'y_error': [], 'psi_error': [], 'nash_costs': [],
             'mobil_approved': []  # Track MOBIL approval status
         }
@@ -131,14 +134,17 @@ class LateralSimulation:
         
         self.reset()
         
+        # Setup driver type first (needed for velocity offset)
+        driver_type = scenario_params.get('driver_type', 'normal')
+
         # Setup human vehicle
         self.human_vehicle.state.x = scenario_params.get('human_initial_x', 0.0)
         self.human_vehicle.state.y = scenario_params.get('human_initial_y', HUMAN_INITIAL_LANE_Y)
-        self.human_vehicle.vx = scenario_params.get('human_velocity', 20.0)
+        human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+        self.human_vehicle.vx = human_vx
+        self.human_vehicle.state.vx = human_vx
+        self.human_vehicle._build_all_matrices(self.dt)
         self.human_vehicle.reset_steering()
-        
-        # Setup driver
-        driver_type = scenario_params.get('driver_type', 'normal')
         self.human_driver.target_lane_y = scenario_params.get('target_lane_y', PLATOON_LANE_Y)
 
         # ============================================================
@@ -389,6 +395,8 @@ class LateralSimulation:
         self.data['delta_human'].append(control_result['delta_human'])
         self.data['delta_shared'].append(control_result['delta_shared'])
         self.data['authority_ratio'].append(control_result['authority_ratio'])
+        self.data['lambda_safety'].append(self.authority_allocator.last_lambda_safety)
+        self.data['lambda_performance'].append(self.authority_allocator.last_lambda_performance)
         self.data['field_force'].append(control_result['field_force'])
         self.data['phase'].append(control_result['phase'])
         self.data['y_error'].append(control_result['y_error'])

@@ -19,8 +19,8 @@ from typing import Dict, Optional
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import (RESULTS_DIR, SIMULATION_DT, LANE_WIDTH, PLATOON_LANE_Y, 
-                    HUMAN_INITIAL_LANE_Y, DEFAULT_SIMULATION_TIME)
+from config import (RESULTS_DIR, SIMULATION_DT, LANE_WIDTH, PLATOON_LANE_Y,
+                    HUMAN_INITIAL_LANE_Y, DEFAULT_SIMULATION_TIME, NOMINAL_VELOCITY, DRIVER_PARAMS)
 from simulation import LateralSimulation
 from visualization import (create_comprehensive_plots, create_trajectory_plot,
                           create_nash_analysis_plots, print_simulation_summary)
@@ -45,25 +45,43 @@ def print_menu():
 
 
 def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict:
-    """Get scenario parameters."""
+    """Get scenario parameters.
+
+    human_initial_x is computed so that at merge_trigger_time the human vehicle
+    arrives at the desired relative position in the platoon regardless of driver speed.
+
+    Platoon: leader=60m, gap=25m → P2=35m, P3=10m, all at v_platoon=NOMINAL_VELOCITY.
+    Desired relative positions at merge start:
+      join_before : 20 m ahead of leader
+      join_middle : midway between P1 and P2
+      join_after  : 20 m behind P3
+    """
     platoon_config = {'num_vehicles': 3, 'leader_x': 60.0, 'gap': 25.0}
-    
+
+    v_platoon = NOMINAL_VELOCITY
+    v_human   = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+
+    leader_x0, p2_x0, p3_x0 = 60.0, 35.0, 10.0
+
     if scenario_name == 'join_before':
-        human_initial_x = 100.0
         merge_trigger_time = 3.0
+        target_x = (leader_x0 + v_platoon * merge_trigger_time) + platoon_config['gap']*3
     elif scenario_name == 'join_middle':
-        human_initial_x = 35.0
         merge_trigger_time = 3.0
+        p1_at_merge = leader_x0 + v_platoon * merge_trigger_time
+        p2_at_merge = p2_x0    + v_platoon * merge_trigger_time + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['x_error_offset']
+        target_x = (p1_at_merge + p2_at_merge) / 2.0
     elif scenario_name == 'join_after':
-        human_initial_x = -20.0
         merge_trigger_time = 5.0
+        target_x = (p3_x0 + v_platoon * merge_trigger_time) - platoon_config['gap']*3
     else:
         raise ValueError(f"Unknown scenario: {scenario_name}")
-    
+
+    human_initial_x = target_x - v_human * merge_trigger_time
+
     return {
-        'human_initial_x': human_initial_x,
+        'human_initial_x': round(human_initial_x, 1),
         'human_initial_y': HUMAN_INITIAL_LANE_Y,
-        'human_velocity': 20.0,
         'target_lane_y': PLATOON_LANE_Y,
         'driver_type': driver_type,
         'platoon': platoon_config,
@@ -94,7 +112,7 @@ def select_driver_type() -> str:
 
 
 def run_scenario(scenario_name: str, driver_type: str = 'normal', 
-                T_sim: float = 120.0) -> Optional[Dict]:
+                T_sim: float = DEFAULT_SIMULATION_TIME) -> Optional[Dict]:
     """
     Run a single scenario with detailed output matching longitudinal format.
     """
@@ -116,7 +134,8 @@ def run_scenario(scenario_name: str, driver_type: str = 'normal',
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial position: ({params['human_initial_x']:.1f}, {params['human_initial_y']:.1f})")
     print(f"   🎯 Target lane: y = {params['target_lane_y']:.1f}m")
-    print(f"   🚀 Target speed: {params['human_velocity'] * 3.6:.0f} km/h")
+    human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+    print(f"   🚀 Target speed: {human_vx * 3.6:.0f} km/h")
     print(f"   🧑‍✈️ Driver type: {driver_type}")
     print(f"   🧠 Nash control: ACTIVE")
     print(f"⏱️ Simulation time: {T_sim} seconds")
@@ -394,7 +413,7 @@ def create_animation_if_requested(data: Dict, full_name: str):
         print(f"⚠️ Could not create animation: {e}")
 
 
-def run_all_scenarios(T_sim: float = 120.0) -> Dict[str, Dict]:
+def run_all_scenarios(T_sim: float = DEFAULT_SIMULATION_TIME) -> Dict[str, Dict]:
     """Run all 9 scenarios."""
     scenarios = ['join_before', 'join_middle', 'join_after']
     driver_types = ['cautious', 'normal', 'aggressive']
@@ -489,18 +508,18 @@ def main():
         
         if choice == '1':
             driver_type = select_driver_type()
-            run_scenario('join_before', driver_type, T_sim=120.0)
+            run_scenario('join_before', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '2':
             driver_type = select_driver_type()
-            run_scenario('join_middle', driver_type, T_sim=120.0)
+            run_scenario('join_middle', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '3':
             driver_type = select_driver_type()
-            run_scenario('join_after', driver_type, T_sim=120.0)
+            run_scenario('join_after', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '4':
-            run_all_scenarios(T_sim=120.0)
+            run_all_scenarios(T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '5':
             print("\nSelect scenario:")
@@ -515,9 +534,9 @@ def main():
                     driver_type = select_driver_type()
                     
                     try:
-                        T_sim = float(input("Enter simulation time (seconds, default=120): ").strip() or "120")
+                        T_sim = float(input(f"Enter simulation time (seconds, default={DEFAULT_SIMULATION_TIME}): ").strip() or str(DEFAULT_SIMULATION_TIME))
                     except ValueError:
-                        T_sim = 120.0
+                        T_sim = DEFAULT_SIMULATION_TIME
                     
                     run_scenario(scenarios[scenario_choice], driver_type, T_sim=T_sim)
                 else:
