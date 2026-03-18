@@ -399,8 +399,11 @@ class ConstrainedLateralNashSolver:
         P22 = alpha * self.HQ1H + (self.R2_eff + p.S1) * np.eye(Nu)
         
         # P12: Cross-coupling from shared output z = H(u1 + u2)
-        # Use √α for geometric mean to maintain PD while reflecting asymmetry
-        coupling_scale = np.sqrt(alpha)
+        # Use α (not √α) so that P12 ≤ P22 always, preventing the adversarial
+        # equilibrium where u1=-max and u2=+max cancel each other.
+        # With √α: P12=√α·HQ1H > P22=α·HQ1H when HQ1H >> R,S → adversarial lock.
+        # With α:  P12=α·HQ1H ≤ P22=α·HQ1H + R + S always → cooperative.
+        coupling_scale = alpha
         P12 = coupling_scale * self.HQ1H
         
         # Build stacked matrix

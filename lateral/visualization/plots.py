@@ -46,12 +46,14 @@ def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation"
     ax2.grid(True, alpha=0.3)
     
     ax3 = axes[0, 2]
-    ax3.plot(time, sim_data['human_y_dot'], 'b-', linewidth=2)
+    ax3.plot(time, sim_data['human_y_dot_road'], 'b-', linewidth=2, label='road-frame (Ẏ_world)')
+    ax3.plot(time, sim_data['human_y_dot'], 'b--', linewidth=1, alpha=0.5, label='vy_body')
     ax3.axhline(y=0, color='k', linestyle='-', linewidth=0.5)
     add_mobil_line(ax3)
     ax3.set_xlabel('Time [s]')
-    ax3.set_ylabel('y_dot [m/s]')
-    ax3.set_title('Lateral Velocity')
+    ax3.set_ylabel('dy/dt [m/s]')
+    ax3.set_title('Lateral Velocity (road-frame)')
+    ax3.legend(fontsize=7)
     ax3.grid(True, alpha=0.3)
     
     ax4 = axes[1, 0]
@@ -151,54 +153,59 @@ def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation"
 
 
 def create_trajectory_plot(sim_data: Dict, scenario_name: str = "Simulation") -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(16, 6))
-    
-    human_x = sim_data['human_x']
-    human_y = sim_data['human_y']
+    """Road-relative trajectory: lateral position y vs longitudinal distance x (body frame).
+
+    Uses body-frame coordinates (state.x, state.y) which measure displacement from
+    the road center-line — directly relevant for lane-change analysis.
+    World-frame (X_world, Y_world) grows without bound when ψ ≠ 0 and is not
+    suitable for road-relative visualization.
+    """
+    human_x = np.array(sim_data['human_x'])
+    human_y = np.array(sim_data['human_y'])
     phases = sim_data['phase']
-    
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+
     phase_colors = {'CRUISE': 'gray', 'GAP_SEARCH': 'yellow', 'LANE_CHANGE': 'orange',
-                   'LANE_KEEPING': 'lightgreen', 'FOLLOWING': 'green'}
-    
+                    'LANE_KEEPING': 'lightgreen', 'FOLLOWING': 'green'}
+
     for i in range(len(human_x) - 1):
         color = phase_colors.get(phases[i], 'gray')
         ax.plot(human_x[i:i+2], human_y[i:i+2], color=color, linewidth=3)
-    
-    ax.axhline(y=0, color='g', linestyle='--', alpha=0.5, label='Target Lane')
-    ax.axhline(y=LANE_WIDTH, color='r', linestyle=':', alpha=0.3, label='Initial Lane')
+
+    ax.axhline(y=PLATOON_LANE_Y, color='g', linestyle='--', alpha=0.6, label='Target Lane')
+    ax.axhline(y=HUMAN_INITIAL_LANE_Y, color='r', linestyle=':', alpha=0.4, label='Initial Lane')
     ax.plot(human_x[0], human_y[0], 'go', markersize=15, label='Start')
     ax.plot(human_x[-1], human_y[-1], 'r*', markersize=20, label='End')
-    
-    ax.set_xlabel('x [m]')
-    ax.set_ylabel('y [m]')
-    ax.set_title(f"Trajectory: {scenario_name} (Zoomed Y-axis)")
+
+    ax.set_xlabel('Longitudinal distance x [m]')
+    ax.set_ylabel('Lateral position y [m]')
+    ax.set_title(f"Road-Relative Trajectory (Body Frame): {scenario_name}")
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
-    
-    # Set y limits to show lane change detail (NOT equal aspect)
-    y_min = min(np.min(human_y), -1) - 0.5
-    y_max = max(np.max(human_y), 4) + 0.5
+
+    # Zoom Y-axis to show lane change detail
+    y_min = min(np.min(human_y), PLATOON_LANE_Y - 1) - 0.5
+    y_max = max(np.max(human_y), HUMAN_INITIAL_LANE_Y + 1) + 0.5
     ax.set_ylim(y_min, y_max)
-    
-    # Add text showing actual angle
-    # Calculate approximate lane change angle
-    lc_indices = np.where((human_y > 0.1) & (human_y < 3.4))[0]
+
+    lc_indices = np.where((human_y > PLATOON_LANE_Y + 0.1) & (human_y < HUMAN_INITIAL_LANE_Y - 0.1))[0]
     if len(lc_indices) > 10:
         dx = human_x[lc_indices[-1]] - human_x[lc_indices[0]]
         dy = human_y[lc_indices[0]] - human_y[lc_indices[-1]]
         angle_deg = np.degrees(np.arctan2(dy, dx))
-        ax.text(0.02, 0.98, f"Lane change angle: {angle_deg:.1f}°\nDistance: {dx:.0f}m", 
+        ax.text(0.02, 0.98, f"Lane change angle: {angle_deg:.1f}°\nDistance: {dx:.0f}m",
                 transform=ax.transAxes, fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
+
     plt.tight_layout()
-    
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"{scenario_name.replace(' ', '_')}_trajectory_{timestamp}.png"
     filepath = os.path.join(RESULTS_DIR, filename)
     plt.savefig(filepath, dpi=150, bbox_inches='tight')
-    print(f"📊 Saved: {filepath}")
-    
+    print(f"Saved: {filepath}")
+
     return fig
 
 
@@ -297,6 +304,7 @@ def create_nash_analysis_plots(sim_data: Dict, scenario_name: str = "Simulation"
     return fig
 
 
+
 def print_simulation_summary(sim_data: Dict, scenario_name: str = "Simulation"):
     time = sim_data['time']
     y_err = sim_data['y_error']
@@ -316,5 +324,5 @@ def print_simulation_summary(sim_data: Dict, scenario_name: str = "Simulation"):
     print(f"{'='*60}\n")
 
 
-__all__ = ['create_comprehensive_plots', 'create_trajectory_plot', 
+__all__ = ['create_comprehensive_plots', 'create_trajectory_plot',
            'create_nash_analysis_plots', 'print_simulation_summary']

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import NOMINAL_VELOCITY
+from config import NOMINAL_VELOCITY, ROAD_FRICTION_MU
 
 
 @dataclass
@@ -47,6 +47,10 @@ class VehicleParameters:
     nominal_velocity: float = NOMINAL_VELOCITY  # m/s
     max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
 
+    # Nonlinear dynamics parameters
+    mu: float = ROAD_FRICTION_MU  # tire-road friction coefficient (config: ROAD_FRICTION_MU)
+    g: float = 9.81    # gravitational acceleration (m/s²)
+
 
 class VehicleState:
     """Vehicle state for lateral dynamics: [y, y_dot, psi, psi_dot]"""
@@ -56,11 +60,14 @@ class VehicleState:
         self.y_dot = 0.0
         self.psi = 0.0
         self.psi_dot = 0.0
-        self.x = 0.0
-        self.vx = NOMINAL_VELOCITY
+        self.x = 0.0          # body-frame longitudinal distance
+        self.vx = 0.0         # longitudinal velocity component (vx ≠ v_total = √(vx²+vy²))
         self.delta = 0.0
         self.ay = 0.0
         self.beta = 0.0
+        # World (inertial) frame coordinates
+        self.X_world = 0.0    # global longitudinal position (Rajamani Eq. 2.10)
+        self.Y_world = 0.0    # global lateral position (Rajamani Eq. 2.11)
     
     def get_state_vector(self) -> np.ndarray:
         return np.array([self.y, self.y_dot, self.psi, self.psi_dot])

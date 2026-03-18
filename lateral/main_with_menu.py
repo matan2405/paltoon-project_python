@@ -382,7 +382,7 @@ def create_and_display_plots(data: Dict, full_name: str, display_name: str,
     print(f"\n👍 Creating Nash analysis plots (9-grid)...")
     create_nash_analysis_plots(data, full_name, mobil_approval_time=mobil_approval_time)
     print(f"✅ Nash analysis plots (9-grid) created and saved successfully")
-    
+
     # Try to display interactively
     try:
         print(f"📊 Displaying interactive plots...")

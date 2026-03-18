@@ -63,7 +63,7 @@ SIMULATION_DT = 0.01          # 100 Hz - vehicle dynamics integration step [s]
 NASH_CONTROL_DT = 0.05        # 20 Hz  - Nash MPC control step [s]
 NASH_NP = 20                  # Prediction horizon [steps]
 NASH_NU = 10                  # Control horizon [steps]
-DEFAULT_SIMULATION_TIME = 30.0  # Default simulation time [s]
+DEFAULT_SIMULATION_TIME = 120.0  # Default simulation time [s]
 NOMINAL_VELOCITY = 33.0       # Nominal longitudinal velocity [m/s]
 
 # =============================================================================
@@ -82,10 +82,10 @@ DRIVER_PARAMS = {
         # Human reference trajectory
         'tlc':                    6.0,    # Lane-change duration [s]
         'max_heading_deg':        3.0,    # Max heading angle [deg]
-        'human_settle_time':      4.0,    # LANE_KEEPING settling time [s]
+        'human_settle_time':      20.0,   # LANE_KEEPING settling time [s]
         # System reference trajectory
         'system_tlc_multiplier':  1.5,    # System T_lc = tlc × multiplier → 9.0 s
-        'system_settle_time':     3.0,    # System settling time [s]
+        'system_settle_time':     20.0,   # System settling time [s]
         # MOBIL lane-change model
         'mobil_p':                0.8,    # Politeness factor (very polite)
         'mobil_a_th':             0.2,    # Lane-change incentive threshold [m/s²]
@@ -97,9 +97,9 @@ DRIVER_PARAMS = {
         'stanley_k_psi':          0.5,
         'tlc':                    4.5,
         'max_heading_deg':        4.0,
-        'human_settle_time':      3.0,
+        'human_settle_time':      20.0,
         'system_tlc_multiplier':  1.5,    # → 6.75 s
-        'system_settle_time':     3.0,
+        'system_settle_time':     20.0,
         'mobil_p':                0.5,
         'mobil_a_th':             0.1,
     },
@@ -110,13 +110,22 @@ DRIVER_PARAMS = {
         'stanley_k_psi':          0.7,
         'tlc':                    3.0,
         'max_heading_deg':        6.0,
-        'human_settle_time':      2.0,
+        'human_settle_time':      15.0,
         'system_tlc_multiplier':  1.5,    # → 4.5 s
-        'system_settle_time':     3.0,
+        'system_settle_time':     15.0,
         'mobil_p':                0.2,    # Less polite
         'mobil_a_th':             0.05,
     },
 }
+
+# =============================================================================
+# VEHICLE DYNAMICS PARAMETERS
+# =============================================================================
+# Road friction coefficient μ (Swain & Rath 2023, Eq. 1 — scales cornering stiffness)
+# μ multiplies Cf and Cr in ALL linear model matrices (A_body_c, A_error_c, B_c)
+# and is used in the nonlinear tire saturation model (_tire_force, Rajamani Eq. 13.45).
+# Reference values: 1.0 = dry asphalt, 0.7 = wet road, 0.4 = slippery (Swain & Rath)
+ROAD_FRICTION_MU = 1.0        # [-] tire-road friction coefficient
 
 # =============================================================================
 # LANE CONFIGURATION
@@ -152,9 +161,9 @@ NASH_Q_PSI = 10000.0     # Weight on heading angle error (HIGH — heading stabi
 NASH_Q_Y_TERMINAL_FACTOR   = 10.0   # Q_y_terminal = NASH_Q_Y_TERMINAL_FACTOR × NASH_Q_Y
 NASH_Q_PSI_TERMINAL_FACTOR  = 4.0   # Q_psi_terminal = NASH_Q_PSI_TERMINAL_FACTOR × NASH_Q_PSI
 
-# Own control effort weights (R) — high values → smooth, gentle control
-NASH_R1 = 1000000.0      # System's cost on its own control effort
-NASH_R2 = 1000000.0      # Human's cost on its own control effort
+# Own control effort weights (R) — tuned for Q_y/R ratio ≈ 0.016 (stable tracking)
+NASH_R1 = 50000.0      # System's cost on its own control effort (lowered from 1e6 to enable tracking)
+NASH_R2 = 50000.0      # Human's cost on its own control effort
 
 # Cross-coupling weights (S) — THE KEY for coupled Nash game
 NASH_S1 = 200000.0       # System cares about human effort
@@ -241,10 +250,12 @@ AUTHORITY_K_STEEPNESS     = 0.025  # Sigmoid slope (sharper: human ~75% at rest 
 AUTHORITY_ALPHA_BASE = 0.02        # Slow smoothing (stability)
 AUTHORITY_ALPHA_FAST = 0.08        # Fast response (large errors)
 
-# Hysteresis thresholds for PERFORMANCE authority (based on |y_error|)
-AUTHORITY_ENTER_THRESHOLD         = 1.0  # Enter performance mode when |y_error| > 1.0 m
-AUTHORITY_EXIT_THRESHOLD          = 0.3  # Exit performance mode when |y_error| < 0.3 m
-AUTHORITY_LAMBDA_PERFORMANCE_MAX  = 5.0  # Performance authority upper bound
+# Sigmoid parameters for LATERAL-OFFSET authority (Swain & Rath 2023, Eq. 15)
+# γ1(human) = 1/(1+exp(m1·(-l_n+m2))), γ2=1-γ1, λ_sigmoid=γ2/γ1
+# l_n = (l_o_max - |y_error|) / l_o_max  (1=lane centre, 0=lane boundary)
+# Reference values: m1=2, m2=0.5 → λ range [0.37 at centre, 2.72 at boundary]
+AUTHORITY_SIGMOID_M1 = 2.0   # Slope steepness (Swain & Rath: m1=2)
+AUTHORITY_SIGMOID_M2 = 0.5   # Centre shift    (Swain & Rath: m2=0.5)
 
 # =============================================================================
 # REFERENCE GENERATOR PARAMETERS (Pustilnik & Borrelli 2025)
@@ -282,8 +293,9 @@ PHASE_TRANSITION_TIME = 5.0            # [s] stability required for FOLLOWING en
 # =============================================================================
 GAP_SEARCH_DURATION         = 0.5    # [s] wait in GAP_SEARCH before LANE_CHANGE
 LANE_CHANGE_MIN_TIME        = 6.0    # [s] min time in LANE_CHANGE before LANE_KEEPING allowed
-LANE_CHANGE_Y_ERROR_FACTOR  = 0.05   # |y_error| < 5% × lane_width to enter LANE_KEEPING
-LANE_CHANGE_Y_DOT_THRESHOLD = 0.10   # |y_dot| < 0.10 m/s — nearly stopped laterally
+LANE_CHANGE_Y_ERROR_FACTOR  = 0.35   # |y_error| < 35% × lane_width to enter LANE_KEEPING
+LANE_CHANGE_Y_DOT_THRESHOLD = 0.25   # |y_dot| < 0.25 m/s — nearly stopped laterally
+LANE_CHANGE_PSI_THRESHOLD   = 0.20   # |psi| < ~11.5° — heading not reversed before LANE_KEEPING
 
 # =============================================================================
 # PLATOON CONTROL PARAMETERS
@@ -333,6 +345,9 @@ __all__ = [
     'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME', 'NOMINAL_VELOCITY',
     'DRIVER_PARAMS',
 
+    # Vehicle dynamics
+    'ROAD_FRICTION_MU',
+
     # Lane / plotting
     'LANE_WIDTH', 'PLATOON_LANE_Y', 'HUMAN_INITIAL_LANE_Y', 'VEHICLE_COLORS',
 
@@ -361,8 +376,7 @@ __all__ = [
     'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX',
     'AUTHORITY_FORCE_MIDPOINT', 'AUTHORITY_K_STEEPNESS',
     'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
-    'AUTHORITY_ENTER_THRESHOLD', 'AUTHORITY_EXIT_THRESHOLD',
-    'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
+    'AUTHORITY_SIGMOID_M1', 'AUTHORITY_SIGMOID_M2',
 
     # Reference generators
     'REFGEN_SYSTEM_MAX_HEADING_DEG',

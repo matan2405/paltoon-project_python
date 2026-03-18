@@ -229,12 +229,12 @@ class SystemReferenceGenerator:
                 t_in_phase = self._current_time - self._lane_keeping_entry_time
                 if t_in_phase < self._T_settle:
                     trajectory = self._generate_settling_trajectory(
-                        target_y, current_y, current_psi
+                        target_y, current_y, current_psi, current_y_dot
                     )
                 else:
-                    trajectory = self._generate_target_trajectory(target_y)
+                    trajectory = self._generate_target_trajectory(target_y, current_psi)
             else:
-                trajectory = self._generate_target_trajectory(target_y)
+                trajectory = self._generate_target_trajectory(target_y, current_psi)
         
         return trajectory
     
@@ -301,65 +301,82 @@ class SystemReferenceGenerator:
     
     def _generate_settling_trajectory(self, target_y: float,
                                        current_y: float,
-                                       current_psi: float) -> np.ndarray:
+                                       current_psi: float,
+                                       current_y_dot: float = 0.0) -> np.ndarray:
         """
-        V4.0 NEW: Generate soft settling trajectory for LANE_KEEPING entry.
-        
-        Uses a 3rd order polynomial to smoothly bring the vehicle from its
-        current state (y, ψ) to the target (target_y, 0).
-        
-        This prevents the reference from jumping instantaneously,
-        which would create a massive heading error and cause saturation.
-        
-        The settling polynomial satisfies:
-          y(0) = current_y,  y(T) = target_y
-          ẏ(0) = vx * sin(current_psi) ≈ vx * current_psi,  ẏ(T) = 0
-        
-        From which: ψ_ref(t) = ẏ(t) / vx
+        V4.4: Generate soft settling trajectory for LANE_KEEPING entry.
+
+        Receding-horizon cubic polynomial from current state to target.
+
+        FIXES applied:
+        ==============
+        V4.3: Receding horizon — τ always starts at 0 for the current step,
+              ensuring y_ref(i=0) = current_y always (no phantom reference jump).
+
+        V4.4: Two additional fixes for the body-frame bicycle model (Eq. 2.31):
+
+        1. CORRECT psi_ref SIGN:
+           In the body-frame model with centripetal term a24 ≈ -vx, the
+           steady-state relationship is ẏ_body ≈ -vx · ψ.  Therefore the
+           heading needed to achieve a desired lateral rate is:
+               ψ_ref = -ẏ_ref / vx    (note the MINUS sign)
+           The previous formula  ψ_ref = +ẏ_ref / vx  had the opposite sign,
+           causing the Nash solver to steer the vehicle AWAY from the target.
+
+        2. CLIP INITIAL VELOCITY to prevent polynomial overshoot:
+           For a cubic polynomial with non-zero endpoint velocity, large y_dot_0
+           relative to T_remaining causes the trajectory to pass through the
+           target and return, driving the vehicle past y=0.  Clip y_dot_0 so
+           that the trajectory is monotone (no overshoot).
         """
         trajectory = np.zeros((self.Np, 2))
-        
-        T_settle = self._T_settle
+
         t_in_phase = self._current_time - self._lane_keeping_entry_time
-        
-        # Boundary conditions
+        # Remaining settling time — never less than one control step
+        T_remaining = max(self._T_settle - t_in_phase, self.dt)
+
         y0 = current_y
         y_target = target_y
-        y_dot_0 = self._current_vx * np.sin(current_psi)  # Current lateral velocity
-        y_dot_T = 0.0  # Want zero lateral velocity at end
-        
-        # 3rd order polynomial: y(τ) = a0 + a1*τ + a2*τ² + a3*τ³
-        # where τ = (t - t_entry) / T_settle ∈ [0, 1]
-        # y(0) = y0,  y(1) = y_target
-        # ẏ(0) = y_dot_0 * T_settle,  ẏ(1) = 0
-        
+        delta_y = y_target - y0
+        vx = max(self._current_vx, 1.0)
+
+        # Clip initial velocity to prevent polynomial overshoot.
+        # For a cubic with boundary conditions y(0)=y0, y(T)=y_target,
+        # y'(0)=y_dot_0, y'(T)=0, the trajectory is monotone when
+        #   |y_dot_0| <= 1.5 * |delta_y| / T_remaining
+        if abs(delta_y) > 1e-6:
+            y_dot_max = 1.5 * abs(delta_y) / T_remaining
+            y_dot_0 = float(np.clip(current_y_dot, -y_dot_max, y_dot_max))
+        else:
+            y_dot_0 = 0.0
+
+        # 3rd order polynomial coefficients (τ ∈ [0, 1], τ = t_pred / T_remaining)
         a0 = y0
-        a1 = y_dot_0 * T_settle
-        a2 = 3 * (y_target - y0) - 2 * y_dot_0 * T_settle
-        a3 = -2 * (y_target - y0) + y_dot_0 * T_settle
-        
+        a1 = y_dot_0 * T_remaining
+        a2 = 3 * delta_y - 2 * y_dot_0 * T_remaining
+        a3 = -2 * delta_y + y_dot_0 * T_remaining
+
         for i in range(self.Np):
-            t_pred = t_in_phase + i * self.dt
-            tau = min(t_pred / T_settle, 1.0)
-            
+            t_pred = i * self.dt  # always starts at 0 (receding horizon)
+            tau = min(t_pred / T_remaining, 1.0)
+
             if tau < 1.0:
-                # Position
                 y_ref = a0 + a1 * tau + a2 * tau**2 + a3 * tau**3
-                # Velocity (derivative)
-                y_dot_ref = (a1 + 2 * a2 * tau + 3 * a3 * tau**2) / T_settle
-                # Heading reference
-                psi_ref = np.arctan2(y_dot_ref, self._current_vx)
+                y_dot_ref = (a1 + 2 * a2 * tau + 3 * a3 * tau**2) / T_remaining
+                # Body-frame sign convention: ψ ≈ ẏ_world / vx
+                # Ẏ_world = vx·sin(ψ) ≈ vx·ψ  → ψ_ref = y_dot_ref / vx
+                psi_ref = y_dot_ref / vx
             else:
                 y_ref = y_target
                 psi_ref = 0.0
-            
+
             trajectory[i, 0] = y_ref
             trajectory[i, 1] = psi_ref
-        
+
         return trajectory
     
-    def _generate_target_trajectory(self, target_y: float) -> np.ndarray:
-        """Generate trajectory AT the target."""
+    def _generate_target_trajectory(self, target_y: float, current_psi: float) -> np.ndarray:
+        """Generate trajectory at target (y=0, psi=0)."""
         trajectory = np.zeros((self.Np, 2))
         for i in range(self.Np):
             trajectory[i, 0] = target_y

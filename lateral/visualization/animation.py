@@ -58,7 +58,9 @@ def create_lane_change_animation(sim_data: dict, title: str = "Lane Change Anima
         ax3 = fig.add_subplot(gs[2])  # Third: Steering inputs
         ax4 = fig.add_subplot(gs[3])  # Bottom: Status bar (narrow)
         
-        # Extract data
+        # Extract data — use body-frame (road-relative) coordinates.
+        # World-frame Y accumulates drift when ψ ≠ 0 and is not suitable
+        # for road-relative bird's-eye view.
         time_history = np.array(sim_data['time'])
         human_x = np.array(sim_data['human_x'])
         human_y = np.array(sim_data['human_y'])

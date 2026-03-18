@@ -117,12 +117,13 @@ class LateralSimulation:
         # Data storage
         self.data = {
             'time': [], 'human_x': [], 'human_y': [], 'human_psi': [], 
-            'human_vx': [], 'human_y_dot': [], 'human_psi_dot': [], 'human_ay': [],
+            'human_vx': [], 'human_y_dot': [], 'human_y_dot_road': [], 'human_psi_dot': [], 'human_ay': [],
             'delta_system': [], 'delta_human': [], 'delta_shared': [],
             'authority_ratio': [], 'lambda_safety': [], 'lambda_performance': [],
             'field_force': [], 'phase': [],
             'platoon_positions': [], 'y_error': [], 'psi_error': [], 'nash_costs': [],
-            'mobil_approved': []  # Track MOBIL approval status
+            'mobil_approved': [],  # Track MOBIL approval status
+            'human_X_world': [], 'human_Y_world': []  # World-frame (inertial) coordinates
         }
         
         print(f"🚗 Lateral Simulation V2.0 Initialized - dt={dt}s, T={T_sim}s")
@@ -389,6 +390,11 @@ class LateralSimulation:
         self.data['human_psi'].append(self.human_vehicle.state.psi)
         self.data['human_vx'].append(self.human_vehicle.vx)
         self.data['human_y_dot'].append(self.human_vehicle.state.y_dot)
+        psi_now = self.human_vehicle.state.psi
+        vy_body = self.human_vehicle.state.y_dot
+        vx_body = self.human_vehicle.state.vx
+        # Road-frame lateral velocity: Ẏ_world = vx_body·sin(ψ) + vy_body·cos(ψ) (Rajamani Eq. 2.11)
+        self.data['human_y_dot_road'].append(vx_body * np.sin(psi_now) + vy_body * np.cos(psi_now))
         self.data['human_psi_dot'].append(self.human_vehicle.state.psi_dot)
         self.data['human_ay'].append(self.human_vehicle.state.ay)
         self.data['delta_system'].append(control_result['delta_system'])
@@ -396,7 +402,7 @@ class LateralSimulation:
         self.data['delta_shared'].append(control_result['delta_shared'])
         self.data['authority_ratio'].append(control_result['authority_ratio'])
         self.data['lambda_safety'].append(self.authority_allocator.last_lambda_safety)
-        self.data['lambda_performance'].append(self.authority_allocator.last_lambda_performance)
+        self.data['lambda_performance'].append(self.authority_allocator.last_lambda_lateral)
         self.data['field_force'].append(control_result['field_force'])
         self.data['phase'].append(control_result['phase'])
         self.data['y_error'].append(control_result['y_error'])
@@ -404,6 +410,8 @@ class LateralSimulation:
         self.data['nash_costs'].append(control_result['nash_costs'])
         self.data['platoon_positions'].append([(v.x, v.y) for v in self.platoon_manager.vehicles])
         self.data['mobil_approved'].append(self.mobil_approved)
+        self.data['human_X_world'].append(self.human_vehicle.state.X_world)
+        self.data['human_Y_world'].append(self.human_vehicle.state.Y_world)
     
     def run(self) -> Dict:
         print(f"\n🚀 Running simulation (T={self.T_sim}s)...")
