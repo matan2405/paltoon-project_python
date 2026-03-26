@@ -1,7 +1,17 @@
 """
-Animation module for Lateral Control V2.3
-Creates animated visualizations of lane change maneuvers with platoon.
-Based on the proven longitudinal animation structure.
+Animation module for lateral lane-change simulations.
+
+Research linkage:
+- This module does not introduce new control laws; it visualizes outputs from
+    the simulation/Nash pipeline so the behavior can be inspected qualitatively.
+- Visualized states correspond to models and game formulations implemented from
+    the referenced control modules (Li-style shared-control flow and
+    Pustilnik-style embedded authority used by the solver).
+
+What this file contributes in code:
+- Time-synchronized rendering of platoon and human trajectories.
+- Phase-aware visual context for merge progress and authority behavior.
+- Export/display utilities for thesis figures and debugging playback.
 """
 
 import numpy as np

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
 Constrained Nash MPC Solver for Lateral Control.
-VERSION 6.0 - NON-NORMALIZED GNE (Pustilnik & Borrelli, 2025)
 
-This version implements the Non-Normalized Generalized Nash Equilibrium
+Research basis:
+- Pustilnik and Borrelli non-normalized GNE with shared constraints.
+- Li-style two-reference shared-control architecture (R1 system, R2 human).
+- Embedded authority scaling inside Nash game, solved as constrained QP.
+
+This module implements the Non-Normalized Generalized Nash Equilibrium
 formulation from:
   Pustilnik & Borrelli (2025): "Non-Normalized Solutions of Generalized
   Nash Equilibria in Dynamic Games With Shared Constraints"
@@ -11,7 +15,7 @@ formulation from:
 Key Innovation:
 ==============
 Instead of solving a symmetric Nash game and then blending u1, u2 externally
-with alpha = λ/(1+λ), we embed the authority allocation INSIDE the Nash game
+with alpha = 1/(1+λ), we embed the authority allocation INSIDE the Nash game
 using Pustilnik's scaling factor α:
 
   Player 1 (System): J1 = ||z - r1||²_Q1 + R1||u1||² + S1||u2||²
@@ -30,9 +34,9 @@ Theoretical Justification (Pustilnik, Theorem 2):
 For any set of positive diagonal scaling matrices {Ai}, the solution to the
 scaled KKT conditions is a valid GNE. The scaling factor α controls the
 "aggressiveness" of each player:
-- α < 1: Human is more aggressive (system dominates safety)
-- α = 1: Normalized solution (equal responsibility)
-- α > 1: Human takes more responsibility
+- α near 1: low λ regime (human has larger influence)
+- α = 0.5: balanced regime
+- α near 0: high λ regime (system-dominant safety override)
 
 Corollary 2.2: Reducing α for the system cannot worsen the system's cost.
 This justifies the system taking asymmetric safety responsibility.
@@ -113,11 +117,11 @@ class ConstrainedLateralNashParams:
     # PUSTILNIK SCALING — Non-Normalized GNE
     # =========================================================================
     # α maps authority ratio λ to Pustilnik's scaling factor.
-    # α(λ) = λ / (1 + λ)  ← same formula, but now INSIDE the Nash game
+    # α(λ) = 1 / (1 + λ)
     #
-    # For λ=0.1: α=0.09 → Human barely tracked, system dominates
+    # For λ=0.1: α=0.91 → low-risk regime (human has larger influence)
     # For λ=1.0: α=0.50 → Equal responsibility (normalized solution)
-    # For λ=10 : α=0.91 → Human nearly fully responsible
+    # For λ=10 : α=0.09 → high-risk regime (system dominates)
     # =========================================================================
     
     # Input constraints [rad]
@@ -150,19 +154,21 @@ class ConstrainedLateralNashParams:
 class ConstrainedLateralNashSolver:
     """
     Non-Normalized GNE Nash Solver for Lateral Control.
-    VERSION 6.0 — Pustilnik & Borrelli (2025) formulation.
+    Pustilnik and Borrelli (2025) non-normalized GNE formulation.
     
     State: x = [y, y_dot, psi, psi_dot]
     Input: u = delta (steering angle)
     Output: z = [y, psi]
     
-    CRITICAL CHANGE FROM V5.0:
+    Critical change from the previous external-blending formulation:
     ==========================
-    V5.0: Solve symmetric Nash → blend externally: u_sh = α·u1 + (1-α)·u2
-           Problem: When u1 ≈ -u2 (opposition), u_sh ≈ 0 → no control!
-    
-    V6.0: Embed α inside Nash game → u_shared = u1 + u2
-           The Nash game produces COORDINATED controls that add up correctly.
+Previous approach: solve symmetric Nash and blend externally:
+        u_sh = α·u1 + (1-α)·u2
+        Problem: when u1 ≈ -u2 (opposition), u_sh ≈ 0 and control authority collapses.
+
+    Current approach: embed α inside the Nash game and apply:
+        u_shared = u1 + u2
+        The Nash game produces coordinated controls that add up correctly.
     
     The Pustilnik scaling ensures Player 2's cost is scaled by α:
         J2 = α · ||z - r2||²_Q1 + R2·||u2||² + α·S2·||u1||²
@@ -173,6 +179,7 @@ class ConstrainedLateralNashSolver:
     """
     
     def __init__(self, vehicle: Vehicle, params: ConstrainedLateralNashParams = None):
+        """Initialize solver matrices, cached lambda problems, and runtime statistics."""
         if vehicle is None:
             raise ValueError("Vehicle must be provided")
         
@@ -217,7 +224,7 @@ class ConstrainedLateralNashSolver:
         
         s_r_ratio = self.params.S1 / self.params.R1 if self.params.R1 > 0 else 0
         q_r_ratio = self.params.Q_y / self.params.R1 if self.params.R1 > 0 else 0
-        print(f"⚡ Lambda-Aware Lateral Nash MPC V6.0 Initialized (Non-Normalized GNE)")
+        print(f"⚡ Lambda-Aware Lateral Nash MPC Initialized (Non-Normalized GNE)")
         print(f"   Horizons: Np={self.params.Np}, Nu={self.params.Nu}")
         print(f"   Steering bounds: δ∈[{np.degrees(self.params.delta_min):.1f}°, {np.degrees(self.params.delta_max):.1f}°]")
         print(f"   R1={self.params.R1:.0f}, R2={self.params.R2:.0f}, S1={self.params.S1:.0f}, S2={self.params.S2:.0f}")
@@ -303,86 +310,16 @@ class ConstrainedLateralNashSolver:
     
     def _build_P_for_lambda(self, lambda_k: float) -> np.ndarray:
         """
-        Build the stacked P matrix for a specific lambda using Pustilnik scaling.
-        
-        Non-Normalized GNE formulation (Pustilnik, Theorem 2):
-        =====================================================
-        
-        Player 1 (System):
-            J1 = ||z - r1||²_Q1 + R1·||u1||² + S1·||u2||²
-        
-        Player 2 (Human) with Pustilnik scaling α:
-            J2 = α·||z - r2||²_Q1 + R2·||u2||² + α·S2·||u1||²
-        
-        KKT stationarity conditions:
-            ∂J1/∂u1 = 0: 2(H'Q1H)u1 + 2R1·u1 + 2(H'Q1H)u2 - 2H'Q1(r1-z_free) = 0  [WRONG - see below]
-        
-        Wait — let me be precise. The stacked QP approach:
-        
-        The Nash KKT for Player 1:
-            (H'Q1H + R1·I)u1 + S1·u2 = H'Q1(r1 - z_free)  [tracking u2 is through S1 only]
-        
-        Actually, re-deriving carefully from Li et al. 2019:
-        J1 = ||H(u1+u2) + Ux0 - r1||²_Q1 + R1||u1||² + S1||u2||²
-        
-        ∂J1/∂u1 = 2H'Q1(H(u1+u2) + Ux0 - r1) + 2R1·u1 = 0
-                 = 2(H'Q1H + R1I)u1 + 2H'Q1H·u2 = 2H'Q1(r1 - Ux0)
-        
-        J2 = α·||H(u1+u2) + Ux0 - r2||²_Q1 + R2||u2||² + α·S2||u1||²
-        
-        ∂J2/∂u2 = 2α·H'Q1(H(u1+u2) + Ux0 - r2) + 2R2·u2 = 0
-                 = 2α·H'Q1H·u1 + 2(α·H'Q1H + R2I)·u2 = 2α·H'Q1(r2 - Ux0)
-        
-        Stacked KKT:
-        [H'Q1H + R1I    H'Q1H      ] [u1]   [H'Q1(r1 - z_free)       ]
-        [α·H'Q1H        α·H'Q1H+R2I] [u2] = [α·H'Q1(r2 - z_free)    ]
-        
-        Note: S1 and S2 add to the diagonal cross terms!
-        Actually, let me reconsider. S1 is system's penalty on ||u2||².
-        
-        J1 = ||z - r1||²_Q1 + R1||u1||² + S1||u2||²
-        where z = H·u1 + H·u2 + U·x0  (both controls affect the same plant!)
-        
-        ∂J1/∂u1: 2H'Q1(Hu1 + Hu2 + Ux0 - r1) + 2R1·u1 = 0
-        → (H'Q1H + R1I)u1 + H'Q1H·u2 = H'Q1(r1 - Ux0)
-        
-        Note: S1 only appears in J1 as S1||u2||² but ∂J1/∂u1 doesn't depend
-        on S1 because it's u2's norm. S1 appears in ∂J1/∂u2 which isn't
-        a KKT condition for Player 1's optimization!
-        
-        Wait — in a Nash game, each player optimizes over THEIR OWN control.
-        Player 1 optimizes over u1 only. So S1||u2||² doesn't enter ∂J1/∂u1.
-        
-        But S1 represents "Player 1 cares about how much u2 is used."
-        In the SHARED output formulation z = H(u1+u2) + Ux0, the cross-coupling
-        comes from H'Q1H already (both affect z).
-        
-        In the stacked QP approximation, S appears as additional cross-coupling:
-        
-        P11 = H'Q1H + R1I       (Player 1's Hessian w.r.t. u1)
-        P22 = α·H'Q1H + R2I     (Player 2's Hessian w.r.t. u2, Pustilnik-scaled)
-        P12 = H'Q1H             (cross-coupling from shared output z)
-        
-        Adding S terms for cooperation regularization:
-        P11 += 0                  (S2 from Player 2's perspective appears in P22)
-        P22 += α·S2·I            (α-scaled: human's cooperation effort)
-        P12 += 0                  (S doesn't create cross-coupling)
-        
-        Actually, for the symmetrized Joint QP, S adds to the OTHER player's
-        diagonal. Let me use the formulation that actually works:
-        
-        P11 = H'Q1H + (R1 + S2_eff)·I    ← S2 adds to P11 because Player 2 
-                                              penalizes u1 through S2
-        P22 = α·H'Q1H + (R2 + S1)·I      ← S1 adds to P22 because Player 1
-                                              penalizes u2 through S1
-        P12 = H'Q1H                        ← shared output coupling
-        
-        With Pustilnik: S2 in P11 is also scaled by α because it comes from 
-        Player 2's cost which is scaled by α:
-        
-        P11 = H'Q1H + (R1 + α·S2_eff)·I
-        P22 = α·H'Q1H + (R2 + S1)·I
-        P12 = √α · H'Q1H    ← geometric mean for symmetry
+        Build the stacked Hessian matrix P for a specific authority ratio.
+
+        Uses non-normalized GNE scaling:
+        - alpha = 1 / (1 + lambda)
+        - P11 = H'Q1H + (R1 + alpha*S2_eff) I
+        - P22 = alpha*H'Q1H + (R2_eff + S1) I
+        - P12 = alpha*H'Q1H
+
+        The alpha-scaled cross-coupling keeps the game cooperative and
+        avoids cancellation equilibria where u1 and u2 oppose each other.
         """
         p = self.params
         Nu = p.Nu
@@ -399,10 +336,8 @@ class ConstrainedLateralNashSolver:
         P22 = alpha * self.HQ1H + (self.R2_eff + p.S1) * np.eye(Nu)
         
         # P12: Cross-coupling from shared output z = H(u1 + u2)
-        # Use α (not √α) so that P12 ≤ P22 always, preventing the adversarial
-        # equilibrium where u1=-max and u2=+max cancel each other.
-        # With √α: P12=√α·HQ1H > P22=α·HQ1H when HQ1H >> R,S → adversarial lock.
-        # With α:  P12=α·HQ1H ≤ P22=α·HQ1H + R + S always → cooperative.
+        # Use α (not √α) for coupling consistency with the Pustilnik-scaled
+        # Hessians and to avoid cancellation equilibria where u1 and u2 oppose.
         coupling_scale = alpha
         P12 = coupling_scale * self.HQ1H
         
@@ -518,7 +453,7 @@ class ConstrainedLateralNashSolver:
         """
         Solve Non-Normalized GNE for lateral control.
         
-        CRITICAL DIFFERENCE FROM V5.0:
+        Critical difference from the previous external-blending formulation:
         ==============================
         The authority ratio λ is embedded in the Nash game through
         Pustilnik's α scaling. The output u1, u2 are already coordinated.
@@ -656,7 +591,7 @@ class ConstrainedLateralNashSolver:
         if prob_dict['u_var'].value is None:
             return None
         
-        # In V6.0, shared = u1 + u2
+        # In current formulation, shared control is additive: u1 + u2
         u_shared = prob_dict['u_var'].value[:Nu] + prob_dict['u_var'].value[Nu:]
         z_pred = self.U @ x0 + self.H @ u_shared
         return z_pred.reshape(self.params.Np, 2)
@@ -696,7 +631,7 @@ class ConstrainedLateralNashSolver:
         
         summary = f"""
 ╔══════════════════════════════════════════════════════════════╗
-║   LATERAL NASH V6.0 - NON-NORMALIZED GNE CONSTRAINT SUMMARY ║
+║   LATERAL NASH - NON-NORMALIZED GNE CONSTRAINT SUMMARY      ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Total solves: {total:>6}                                       ║
 ║  R1={p.R1:.0f}, S1={p.S1:.0f}, S/R={s_r:.2f}                ║
@@ -738,7 +673,7 @@ class ConstrainedLateralNashSolver:
     
     def set_driver_type(self, driver_type: str):
         """
-        Driver type no longer modifies Nash weights (V6.0+).
+        Driver type no longer modifies Nash weights.
         Driver personality is expressed through behavior parameters
         (T_lc, k_e, k_psi) in reference generators, NOT in the Nash game.
         This method is kept for API compatibility but does nothing.

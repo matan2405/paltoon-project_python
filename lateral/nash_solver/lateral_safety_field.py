@@ -1,6 +1,10 @@
 """
 Lateral Safety Field with Phase Detection.
-VERSION 3.0 - Driving Safety Field (DSF) per Li et al. (2019)
+
+Research basis and implemented elements:
+- Driving Safety Field structure from Li/Wang line for obstacle risk modeling.
+- Elliptic distance and velocity-dependent field intensity.
+- Phase-aware risk interpretation for merge control and authority allocation.
 
 THEORY (Li et al. 2019, Wang et al. 2015/2016):
 ================================================
@@ -51,7 +55,7 @@ from config import (
 
 
 class ControlPhase(Enum):
-    """Control phases - matching longitudinal controller."""
+    """Lateral control phases used by safety field and reference generators."""
     CRUISE = "CRUISE"
     GAP_SEARCH = "GAP_SEARCH"
     LANE_CHANGE = "LANE_CHANGE"
@@ -62,7 +66,7 @@ class ControlPhase(Enum):
 @dataclass
 class LateralSafetyFieldParams:
     """
-    Safety Field Parameters — DSF V3.0 (Li et al. 2019, Wang et al. 2015/2016)
+    Safety Field Parameters — DSF (Li et al. 2019, Wang et al. 2015/2016)
     """
     # Lane Configuration
     lane_width: float = LANE_WIDTH
@@ -111,7 +115,7 @@ class LateralSafetyFieldParams:
 
 class LateralSafetyField:
     """
-    Lateral Safety Field - VERSION 3.0 (DSF per Li et al. 2019)
+    Lateral Safety Field implementation (DSF per Li et al. 2019)
 
     Implements the Driving Safety Field with elliptic distance metric.
     Force magnitude differentiates scenarios (join_middle vs join_after vs join_before)
@@ -134,7 +138,7 @@ class LateralSafetyField:
         self._last_force = 0.0
         self.filter_alpha = SAFETY_FILTER_ALPHA
         
-        print("🛡️ Lateral Safety Field V3.0 (DSF) Initialized")
+        print("🛡️ Lateral Safety Field (DSF) Initialized")
         print("   ✓ Elliptic distance field (Li 2019, Eq. 12-13)")
         print("   ✓ Virtual mass + kinetic correction (Wang 2016, Eq. 17-18)")
         print("   ✓ Scenario-differentiated force: join_middle>>join_after>>join_before")
@@ -241,7 +245,7 @@ class LateralSafetyField:
         return force * scaling_factor
     
     # ========================================================================
-    # MAIN FORCE COMPUTATION - V2.1 (COLLISION-BASED)
+    # MAIN FORCE COMPUTATION (COLLISION-BASED)
     # ========================================================================
     def compute_risk_force(self, ego_vehicle, obstacles: List[Dict], 
                            target_y: float = 0.0) -> float:

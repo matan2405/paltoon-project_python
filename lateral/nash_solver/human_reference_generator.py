@@ -1,24 +1,22 @@
 """
-Human Reference Generator for Lateral Control.
-VERSION 4.0 - HEADING-CONSISTENT + SOFT LANE-KEEPING TRANSITION
+Human Reference Generator for lateral Nash shared control.
 
-CRITICAL FIXES (V4.0):
-======================
-1. HEADING REFERENCE: Now provides ψ_ref from trajectory derivative during lane change.
-   Previously ψ_ref=0 always, which caused Nash to fight the lane change heading.
+Research basis and adopted elements:
+1) Li et al. (2019), shared-control game formulation:
+    - Implements the human-side preview reference R2 used by player 2 in Nash.
+    - R2 shares final merge goal with R1 but keeps human-specific transient behavior.
+2) Heading-limited trajectory construction (implemented here via cubic profile):
+    - Uses cubic lane-change profile for a more direct/human-like path.
+    - Enforces heading feasibility through minimum T_lc from psi_max.
+    - Uses the derived peak relation y_dot_max = 1.5*Delta_y/T_lc.
+3) Continuity policy used in this codebase:
+    - Soft lane-keeping transition from current state instead of hard jump to target.
+    - Prevents reference discontinuities that destabilize steering near phase switches.
 
-2. SOFT LANE-KEEPING TRANSITION: When entering LANE_KEEPING, generates a settling
-   trajectory from current state to target, preventing reference discontinuity.
-
-Based on Li et al. 2019:
-- R2(k) = human driver's previewed target path
-- Different from R1 (system path) in shape and timing
-- Same final target (y=0, psi=0) but faster/more direct trajectory
-
-Key differences from System Reference:
-- Uses 3rd order polynomial (faster transition, less smooth)
-- Lane change duration depends on driver personality
-- More aggressive path shape
+What this file contributes in code:
+- Driver-personality dependent R2 timing and heading limits.
+- Phase-aware human reference generation over Np horizon.
+- Smooth LANE_CHANGE -> LANE_KEEPING settling trajectory.
 """
 
 import numpy as np
@@ -70,11 +68,8 @@ class HumanReferenceGenerator:
     """
     Generate reference trajectories representing human driver's desired path.
     
-    VERSION 4.0 - HEADING-CONSISTENT + SOFT LANE-KEEPING TRANSITION
-    
-    Key improvements over V3.0:
-    1. ψ_ref computed from trajectory derivative (not always 0)
-    2. Soft settling trajectory when entering LANE_KEEPING
+    It computes ψ_ref from trajectory derivatives during lane change and keeps a
+    smooth settling trajectory when entering lane-keeping.
     """
     
     def __init__(self, Np: int = NASH_NP, dt: float = NASH_CONTROL_DT, driver_type: str = 'normal'):
@@ -106,9 +101,7 @@ class HumanReferenceGenerator:
         self._current_time = 0.0
         self._current_vx = NOMINAL_VELOCITY
         
-        # =====================================================================
-        # V4.0 NEW: Soft lane-keeping transition
-        # =====================================================================
+        # Soft lane-keeping transition state.
         self._lane_keeping_entry_time = None
         self._lane_keeping_entry_y = None
         self._lane_keeping_entry_psi = None
@@ -117,9 +110,9 @@ class HumanReferenceGenerator:
         # Settling time for lane-keeping entry (from DRIVER_PARAMS)
         self._settle_time = {k: v['human_settle_time'] for k, v in DRIVER_PARAMS.items()}
         self._T_settle = self._settle_time.get(driver_type, 3.0)
-        # =====================================================================
         
-        print(f"👤 Human Reference Generator V4.0 (Heading-Consistent) Initialized")
+        
+        print(f"👤 Human Reference Generator (Heading-Consistent) Initialized")
         print(f"   Driver type: {driver_type}, Base T_lc={self.lane_change_duration}s")
         print(f"   Max heading: {np.degrees(self.max_heading_angle):.1f}°")
     
@@ -142,7 +135,7 @@ class HumanReferenceGenerator:
         self.dynamic_params.platoon_lane_y = platoon_lane_y
     
     def update_phase_from_safety_field(self, safety_phase: str):
-        """Sync phase with safety field — with V4.0 soft transition detection."""
+        """Sync phase with safety field and trigger soft transition detection."""
         phase_map = {
             "CRUISE": HumanTrajectoryPhase.CRUISE,
             "GAP_SEARCH": HumanTrajectoryPhase.GAP_SEARCH,
@@ -159,7 +152,7 @@ class HumanReferenceGenerator:
             if new_phase == HumanTrajectoryPhase.LANE_CHANGE:
                 self._lane_change_start_time = self._current_time
             
-            # V4.0: Capture entry time for soft transition
+            # Capture entry time for soft transition
             if new_phase in [HumanTrajectoryPhase.LANE_KEEPING, HumanTrajectoryPhase.FOLLOWING]:
                 self._lane_keeping_entry_time = self._current_time
     
@@ -168,7 +161,7 @@ class HumanReferenceGenerator:
         """
         Generate human driver's desired trajectory.
         
-        V4.0: Heading-consistent references + soft lane-keeping transition.
+        Heading-consistent references plus soft lane-keeping transition.
         """
         trajectory = np.zeros((self.Np, 2))
         
@@ -193,7 +186,7 @@ class HumanReferenceGenerator:
             
             print(f"👤 Human: Locked start y={current_y:.2f}m, T_lc={self.lane_change_duration:.1f}s")
         
-        # V4.0: Capture entry state for soft transition
+        # Capture entry state for soft transition
         if self._lane_keeping_entry_time is not None and self._lane_keeping_entry_y is None:
             if self._current_phase in [HumanTrajectoryPhase.LANE_KEEPING, HumanTrajectoryPhase.FOLLOWING]:
                 self._lane_keeping_entry_y = current_y
@@ -212,7 +205,7 @@ class HumanReferenceGenerator:
         
         elif self._current_phase in [HumanTrajectoryPhase.LANE_KEEPING, 
                                       HumanTrajectoryPhase.FOLLOWING]:
-            # V4.0: Use soft transition if within settling period
+            # Use soft transition if within settling period
             if self._lane_keeping_entry_time is not None and self._lane_keeping_entry_y is not None:
                 t_in_phase = self._current_time - self._lane_keeping_entry_time
                 if t_in_phase < self._T_settle:
@@ -246,7 +239,7 @@ class HumanReferenceGenerator:
             progress = min(t_pred / self.lane_change_duration, 0.15)
             s = 3 * progress**2 - 2 * progress**3
             
-            # V4.0: Compute heading reference from derivative
+            # Compute heading reference from derivative
             if progress < 0.15:
                 ds_dprog = 6 * progress - 6 * progress**2
                 dprog_dt = 1.0 / self.lane_change_duration
@@ -264,7 +257,7 @@ class HumanReferenceGenerator:
         """
         Generate human's preferred lane change trajectory.
         
-        V4.0: Now includes heading reference from trajectory derivative.
+        Includes heading reference computed from the trajectory derivative.
         """
         trajectory = np.zeros((self.Np, 2))
         
@@ -284,7 +277,7 @@ class HumanReferenceGenerator:
             # 3rd order polynomial (cubic) - human preference
             s = 3 * tau**2 - 2 * tau**3
             
-            # V4.0: Heading reference from derivative
+            # Heading reference from derivative
             # ds/dτ = 6τ - 6τ², ẏ = Δy * ds/dτ / T_lc
             if tau < 1.0:
                 ds_dtau = 6 * tau - 6 * tau**2
@@ -303,16 +296,16 @@ class HumanReferenceGenerator:
                                        current_psi: float,
                                        current_y_dot: float = 0.0) -> np.ndarray:
         """
-        V4.4: Generate soft settling trajectory for LANE_KEEPING entry.
+        Generate soft settling trajectory for LANE_KEEPING entry.
 
         Receding-horizon cubic polynomial from current state to target.
 
         FIXES applied:
         ==============
-        V4.3: Receding horizon — τ always starts at 0 for the current step,
+        Receding horizon: τ always starts at 0 for the current step,
               ensuring y_ref(i=0) = current_y always (no phantom reference jump).
 
-        V4.4: Two additional fixes for the body-frame bicycle model (Eq. 2.31):
+        Two additional fixes for the body-frame bicycle model (Eq. 2.31):
 
         1. CORRECT psi_ref SIGN:
            In the body-frame model with centripetal term a24 ≈ -vx, the
@@ -391,7 +384,7 @@ class HumanReferenceGenerator:
         self._current_time = 0.0
         self.lane_change_duration = self._base_lane_change_durations.get(self.driver_type, 12.0)
         
-        # V4.0: Reset settling state
+        # Reset settling state
         self._lane_keeping_entry_time = None
         self._lane_keeping_entry_y = None
         self._lane_keeping_entry_psi = None

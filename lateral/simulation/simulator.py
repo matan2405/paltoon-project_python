@@ -1,8 +1,22 @@
 """
 Lateral Control Simulator.
-VERSION 2.3 - Simplified (Simulation Only)
+Lane-change simulation with Nash shared control and safety-field authority.
 
-Based on Li et al. 2019: R1 ≠ R2, same target but different trajectory shapes
+Research basis and adopted elements:
+1) Li et al. (2019), shared-control architecture:
+    - Two-player references (R1 system, R2 human) with common final target.
+    - Safety-field driven authority modulation used in closed-loop shared control.
+2) Pustilnik and Borrelli (2025), non-normalized GNE:
+    - Authority embedded in-game through alpha = 1/(1+lambda).
+    - Shared command applied as u_shared = u1 + u2.
+3) Lateral DSF line (Li/Wang family as implemented in this repository):
+    - Risk force computed from surrounding vehicles and phase context.
+    - Risk signal feeds authority allocator and Nash control loop.
+
+What this file contributes in code:
+- End-to-end orchestration of vehicles, phase logic, DSF, allocator, and Nash solver.
+- Multi-rate loop (simulation dt vs Nash control dt).
+- Scenario execution, data logging, and outputs consumed by plots/animation.
 """
 
 import numpy as np
@@ -24,9 +38,7 @@ from nash_solver import (ConstrainedLateralNashSolver, LateralSafetyField, Later
 
 
 class LateralSimulation:
-    """
-    Main simulation class - VERSION 2.3 (Simulation Only)
-    """
+    """Main lateral simulation class for platoon merge and shared steering control."""
     
     def __init__(self, dt: float = SIMULATION_DT, T_sim: float = DEFAULT_SIMULATION_TIME, driver_type: str = 'normal'):
         self.dt = dt
@@ -55,7 +67,7 @@ class LateralSimulation:
             driver_type=driver_type
         )
 
-        # Safety field (V2.0 - no lane centering)
+        # Safety field (collision-focused lateral risk; no lane-centering term)
         self.safety_field_params = LateralSafetyFieldParams(target_lane_y=PLATOON_LANE_Y)
         self.safety_field = LateralSafetyField(self.safety_field_params)
 
@@ -79,8 +91,8 @@ class LateralSimulation:
         # R2 = Human reference (faster, more direct - 3rd order polynomial)
         self.human_ref_generator = HumanReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
 
-        # Use CONSTRAINED Nash solver WITH DPP (V4.0 Optimized)
-        # With V1.0 calibrated weights for smooth trajectories
+        # Use constrained Nash solver with DPP-compliant parameterization
+        # Tuned weights target smooth steering trajectories
         from nash_solver.lateral_constrained_nash_solver import (
             ConstrainedLateralNashSolver,
             ConstrainedLateralNashParams
@@ -104,7 +116,7 @@ class LateralSimulation:
         # - Input bounds: delta_min ≤ δ ≤ delta_max
         # - Rate constraints: |Δδ| ≤ ddelta_max * dt
 
-        # MOBIL lane change decision model (V2.4)
+        # MOBIL lane-change decision model
         self.mobil = MOBILLaneChange()
         self.mobil_approved = False  # Whether MOBIL has approved the lane change
         self.mobil_approval_time = None  # Time when MOBIL approved (for plotting)
@@ -126,7 +138,7 @@ class LateralSimulation:
             'human_X_world': [], 'human_Y_world': []  # World-frame (inertial) coordinates
         }
         
-        print(f"🚗 Lateral Simulation V2.0 Initialized - dt={dt}s, T={T_sim}s")
+        print(f"🚗 Lateral Simulation Initialized - dt={dt}s, T={T_sim}s")
     
     def setup_scenario(self, scenario_name: str, scenario_params: Dict):
         print(f"\n{'='*60}")
@@ -172,18 +184,18 @@ class LateralSimulation:
     def nash_control_step(self) -> Dict:
         """
         Execute one Nash control step.
-        
-        Li et al. 2019 Implementation:
-        - R1 = System reference (5th order, T=8s, safe trajectory)
-        - R2 = Human reference (3rd order, T=5-7s, driver's preferred trajectory)
-        - Both target same goal (y=0, psi=0) but with different shapes
-        - Q2 = λ * Q1 (authority allocation through cost weights)
+
+        Non-Normalized GNE (Pustilnik & Borrelli, 2025):
+        - R1: system reference trajectory
+        - R2: human reference trajectory
+        - Authority is embedded through alpha = 1/(1+lambda)
+        - Shared steering is applied as u_shared = u1 + u2
         """
         current_state = self.human_vehicle.get_state_vector()
         target_y = self.human_driver.target_lane_y
         obstacles = self.platoon_manager.get_vehicles_as_obstacles()
         
-        # 1. Compute safety field force (V2.0 - no lane centering!)
+        # 1. Compute safety field force (collision-focused lateral risk)
         field_force = self.safety_field.compute_risk_force(
             self.human_vehicle, obstacles, target_y
         )

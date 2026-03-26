@@ -1,6 +1,21 @@
 """
 Vehicle class implementing 2-DOF bicycle model for lateral dynamics.
-VERSION 4.0 - NONLINEAR PLANT WITH DYNAMIC (SUCCESSIVE) LINEARIZATION
+
+Research basis and adopted elements:
+1) Rajamani (Vehicle Dynamics and Control), Chapter 2:
+    - Bicycle-model state structure and lateral/yaw dynamic terms.
+    - World-frame kinematics used for (X_world, Y_world) propagation.
+2) Belousov (vehicle simulation model):
+    - Nonlinear plant integration pattern for simulation-time updates.
+    - Practical RK4 propagation for the body-frame states.
+3) Linearized prediction model for MPC/Nash:
+    - Successive linearization around current operating point each step.
+    - ZOH discretization of Jacobians for prediction matrices A, B1.
+
+What this file contributes in code:
+- Nonlinear lateral plant propagation (simulation truth model).
+- Online linearization and discretization for Nash solver prediction.
+- Consistent bridge between body-frame dynamics and world-frame trajectory.
 
 PLANT:      Nonlinear bicycle model (RK4) — Rajamani Ch.2, Belousov Eq. 3.11
 CONTROLLER: Dynamic linearization (Jacobians) — at every timestep, A_t and B_t
@@ -36,6 +51,7 @@ class Vehicle:
                  initial_x: float = 0.0,
                  vehicle_id: str = "Vehicle",
                  longitudinal_velocity: float = NOMINAL_VELOCITY):
+        """Initialize lateral vehicle states and matrices used by simulation and Nash MPC."""
 
         self.params = VehicleParameters()
         self.state = VehicleState()
@@ -53,16 +69,12 @@ class Vehicle:
         # Body-frame state: [y_body, vy, ψ, ψ̇]
         self.x_body = np.array([initial_y, 0.0, initial_psi, 0.0])
 
-        # Error model state: [e1, ė1, e2, ė2] — kept for compatibility
-        self.x_error = np.array([initial_y, 0.0, initial_psi, 0.0])
-
         # Steering history
         self.delta_prev = 0.0
         self.ay_prev = 0.0
 
-        # Fixed linear matrices (body-frame Eq. 2.31, error model Eq. 2.45)
+        # Fixed linear matrices (body-frame Eq. 2.31)
         self.A_body_c = None; self.A_body_d = None; self.B_body_d = None
-        self.A_error_c = None; self.A_error_d = None; self.B_error_d = None
         self.B_c = None; self.C = None
 
         # Dynamic linearization matrices — updated every timestep
@@ -74,10 +86,9 @@ class Vehicle:
         # re-discretize at any requested dt (Nash uses NASH_CONTROL_DT ≠ sim dt)
         self.A_c_current = None; self.B_c_current = None
 
-        self.joined_platoon = False
         self._build_all_matrices()
 
-        print(f"Vehicle '{vehicle_id}' V4.0 (Nonlinear + Dynamic Linearization) at y={initial_y:.1f}m")
+        print(f"Vehicle '{vehicle_id}' (Nonlinear + Dynamic Linearization) at y={initial_y:.1f}m")
 
     # ------------------------------------------------------------------
     # Matrix construction
@@ -118,21 +129,7 @@ class Vehicle:
             [0, 0, 0,  1], [0, a42, 0, a44]
         ])
 
-        # Error model (Eq. 2.45, straight road)
-        a12 = f_vx * (-2 * mu * (p.Cf + p.Cr)) / (p.mass * vx)
-        a13 = 2 * mu * (p.Cf + p.Cr) / p.mass
-        a14 = f_vx * (-2 * mu * (p.Cf * p.lf - p.Cr * p.lr)) / (p.mass * vx)
-        a32 = f_vx * (-2 * mu * (p.lf * p.Cf - p.lr * p.Cr)) / (p.Iz * vx)
-        a33 = 2 * mu * (p.lf * p.Cf - p.lr * p.Cr) / p.Iz
-        a34 = f_vx * (-2 * mu * (p.lf ** 2 * p.Cf + p.lr ** 2 * p.Cr)) / (p.Iz * vx)
-
-        self.A_error_c = np.array([
-            [0, 1, 0, 0], [0, a12, a13, a14],
-            [0, 0, 0, 1], [0, a32, a33, a34]
-        ])
-
         self.A_body_d, self.B_body_d = self._discretize_zoh(self.A_body_c, self.B_c, dt)
-        self.A_error_d, self.B_error_d = self._discretize_zoh(self.A_error_c, self.B_c, dt)
 
         # Initialize dynamic linearization to body-frame linear model
         self.A_d = self.A_body_d; self.B_d = self.B_body_d
@@ -270,7 +267,6 @@ class Vehicle:
             delta_commanded - self.delta_prev, -max_dd, max_dd)
         self.delta_prev = delta_actual
         self.state.delta = delta_actual
-        u = np.array([[delta_actual]])
 
         # 2. Nonlinear body-frame propagation — RK4 (Belousov Eq. 3.11)
         f = self._body_derivatives
@@ -286,14 +282,7 @@ class Vehicle:
         x_b_next[3, 0] = np.clip(x_b_next[3, 0], -0.3, 0.3)
         self.x_body = x_b_next.flatten()
 
-        # 3. Error model propagation (Eq. 2.45 — kept for compatibility)
-        x_e_next = self.A_error_d @ self.x_error.reshape(-1, 1) + self.B_error_d @ u
-        x_e_next[1, 0] = np.clip(x_e_next[1, 0], -5.0, 5.0)
-        x_e_next[2, 0] = np.clip(x_e_next[2, 0], -np.radians(15), np.radians(15))
-        x_e_next[3, 0] = np.clip(x_e_next[3, 0], -0.3, 0.3)
-        self.x_error = x_e_next.flatten()
-
-        # 4. Write body-frame state to VehicleState (physical truth)
+        # 3. Write body-frame state to VehicleState (physical truth)
         self.state.y = self.x_body[0]
         self.state.y_dot = self.x_body[1]
         self.state.psi = self.x_body[2]
@@ -327,10 +316,9 @@ class Vehicle:
         self.B_d = B_d_t
 
         # 9. NaN guard
-        if not (np.isfinite(self.x_body).all() and np.isfinite(self.x_error).all()):
+        if not np.isfinite(self.x_body).all():
             print(f"WARNING {self.vehicle_id}: NaN detected, resetting velocities")
             self.x_body[1] = 0.0; self.x_body[3] = 0.0
-            self.x_error[1] = 0.0; self.x_error[3] = 0.0
 
     def reset_steering(self):
         self.delta_prev = 0.0

@@ -1,15 +1,21 @@
 """
 Lateral Authority Allocator.
-VERSION 4.0 - Sigmoid lateral-offset authority (Swain & Rath 2023, Eq. 15)
 
-Key changes from V3.0:
-1. REPLACED hysteresis-based PERFORMANCE authority with smooth sigmoid (Swain & Rath 2023).
-   - Old: binary enter/exit at |y_error| = 1.4m / 0.6m  → chattering + discontinuous gains
-   - New: λ_sigmoid = γ2/γ1, where γ1,2 are driver/automation weights from Eq. 15
-   - γ1(human) = 1/(1+exp(m1·(-l_n+m2))),  l_n = (l_o_max - |y|) / l_o_max
-   - Provides deterministic, history-independent λ for every y position.
-2. TWO sources fused by max(): SAFETY (sigmoid on force) + LATERAL-OFFSET (Swain & Rath)
-3. ADAPTIVE smoothing: unchanged from V3.0
+Research basis and adopted elements:
+1) Li et al. (2019), authority-as-risk concept:
+    - Safety authority increases with risk-force magnitude.
+    - Used here as a sigmoid mapping from |risk_force| to lambda_safety.
+2) Swain and Rath (2023), Eq. 15:
+    - Replaces threshold/hysteresis lateral authority with continuous sigmoid weighting.
+    - Implemented here via normalized lateral offset l_n and gamma1/gamma2 ratio.
+3) Practical control policy in this codebase:
+    - Fuses safety and lateral-offset authority by max(lambda_safety, lambda_lateral).
+    - Applies adaptive smoothing (alpha_base/alpha_fast) to reduce authority chattering.
+
+What this file contributes in code:
+- Computes lambda(k) from safety and lateral offset channels.
+- Stores per-channel lambdas for logging and post-analysis.
+- Outputs stable authority trajectory for Nash shared steering.
 """
 
 import numpy as np
@@ -29,7 +35,6 @@ class LateralAuthorityAllocator:
     """
     Dynamic authority allocation with smooth sigmoid lateral-offset term.
 
-    V4.0 - Swain & Rath 2023, Eq. 15:
     - Safety authority:   sigmoid on risk_force magnitude (unchanged)
     - Lateral-offset:     Swain & Rath sigmoid — continuous, no hysteresis
     - Fusion:             max(lambda_safety, lambda_lateral)
@@ -37,6 +42,7 @@ class LateralAuthorityAllocator:
     """
 
     def __init__(self):
+        """Initialize safety and lateral-offset sigmoid mappings for authority ratio λ."""
         # Safety sigmoid parameters
         self.lambda_min = AUTHORITY_LAMBDA_MIN
         self.lambda_max = AUTHORITY_LAMBDA_MAX
@@ -58,7 +64,7 @@ class LateralAuthorityAllocator:
         self.last_lambda_safety = 0.0
         self.last_lambda_lateral = 0.0
 
-        print(f"Authority Allocator V4.0 (Safety + Swain&Rath Sigmoid) Initialized")
+        print(f"Authority Allocator (Safety + Swain&Rath Sigmoid) Initialized")
         print(f"   Safety sigmoid: λ [{self.lambda_min}, {self.lambda_max}], "
               f"F_mid={self.force_midpoint}N, k={self.k_steepness}")
         print(f"   Lateral sigmoid: m1={self.sigmoid_m1}, m2={self.sigmoid_m2}, "
@@ -70,7 +76,6 @@ class LateralAuthorityAllocator:
         """
         Compute authority ratio λ(k) using two smooth sigmoid sources.
 
-        V4.0:
         - Safety: sigmoid on |risk_force|
         - Lateral-offset: Swain & Rath sigmoid on |y_error| / l_o_max
         - Fusion: max(lambda_safety, lambda_lateral)

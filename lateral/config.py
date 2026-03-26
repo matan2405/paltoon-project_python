@@ -1,6 +1,10 @@
 """
 Global configuration for the Lateral Control simulation system.
-VERSION 2.1 - Full parameter centralization
+
+Research basis and scope:
+- Pustilnik and Borrelli (2025): non-normalized GNE/Nash parameters.
+- Stanley controller line: heading and cross-track steering gains.
+- MOBIL/IDM literature: lane-change incentive and safety parameters.
 
 Based on: Pustilnik & Borrelli 2025 (GNE lateral merging),
           Stanley 2006 (heading + cross-track error controller),
@@ -122,7 +126,7 @@ DRIVER_PARAMS = {
 # VEHICLE DYNAMICS PARAMETERS
 # =============================================================================
 # Road friction coefficient μ (Swain & Rath 2023, Eq. 1 — scales cornering stiffness)
-# μ multiplies Cf and Cr in ALL linear model matrices (A_body_c, A_error_c, B_c)
+# μ multiplies Cf and Cr in ALL linear model matrices (A_body_c, B_c)
 # and is used in the nonlinear tire saturation model (_tire_force, Rajamani Eq. 13.45).
 # Reference values: 1.0 = dry asphalt, 0.7 = wet road, 0.4 = slippery (Swain & Rath)
 ROAD_FRICTION_MU = 1.0        # [-] tire-road friction coefficient
@@ -238,12 +242,12 @@ SAFETY_FILTER_ALPHA = 0.3              # Low-pass EMA on safety force output [-]
 # =============================================================================
 # AUTHORITY ALLOCATOR PARAMETERS
 # Source: nash_solver/lateral_authority_allocator.py - LateralAuthorityAllocator
-# Aligned with longitudinal V5.2
+# Aligned with the current longitudinal authority architecture (embedded-authority Nash pipeline)
 # =============================================================================
 # Sigmoid parameters for SAFETY (risk-based)
 AUTHORITY_LAMBDA_MIN      = 0.1    # Human dominant when safe
 AUTHORITY_LAMBDA_MAX      = 10.0   # System dominant when dangerous
-AUTHORITY_FORCE_MIDPOINT  = 200.0   # Sigmoid centre [N] — calibrated to V3.0 proximity forces
+AUTHORITY_FORCE_MIDPOINT  = 200.0   # Sigmoid centre [N] calibrated from empirical proximity-force range
 AUTHORITY_K_STEEPNESS     = 0.025  # Sigmoid slope (sharper: human ~75% at rest vs 64% at k=0.02)
 
 # Smoothing parameters
@@ -295,7 +299,6 @@ GAP_SEARCH_DURATION         = 0.5    # [s] wait in GAP_SEARCH before LANE_CHANGE
 LANE_CHANGE_MIN_TIME        = 6.0    # [s] min time in LANE_CHANGE before LANE_KEEPING allowed
 LANE_CHANGE_Y_ERROR_FACTOR  = 0.35   # |y_error| < 35% × lane_width to enter LANE_KEEPING
 LANE_CHANGE_Y_DOT_THRESHOLD = 0.25   # |y_dot| < 0.25 m/s — nearly stopped laterally
-LANE_CHANGE_PSI_THRESHOLD   = 0.20   # |psi| < ~11.5° — heading not reversed before LANE_KEEPING
 
 # =============================================================================
 # PLATOON CONTROL PARAMETERS
@@ -335,6 +338,40 @@ MOBIL_A_BIAS   = 0.3    # Right lane bias [m/s²]
 MOBIL_MIN_GAP  = 8.0    # Minimum front/rear gap for middle merge [m]
 
 # --- Per-driver MOBIL overrides live in DRIVER_PARAMS — access via DRIVER_PARAMS[driver_type]. ---
+
+# =============================================================================
+# COMFORT EVALUATION THRESHOLDS
+# Source: lateral/metrics/comfort.py
+# References: ISO 2631-1 (ay thresholds), Toledo & Zohar 2007 (duration),
+#             Lee et al. 2004 (naturalistic data), empirical ADI thresholds
+# =============================================================================
+# Metric 1: Lane-change duration [s]
+COMFORT_LC_DURATION_GOOD       =  6.0   # <= 6 s  natural (Toledo & Zohar 2007)
+COMFORT_LC_DURATION_ACCEPTABLE = 10.0   # <= 10 s slow but acceptable
+
+# Metric 2: Peak lateral acceleration [m/s²]
+COMFORT_AY_PEAK_GOOD           = 0.5    # ISO 2631-1: "not uncomfortable"
+COMFORT_AY_PEAK_ACCEPTABLE     = 1.0    # ISO 2631-1: "a little uncomfortable"
+
+# Metric 3: RMS lateral acceleration [m/s²]
+COMFORT_AY_RMS_GOOD            = 0.315  # ISO 2631-1 §6.2 lower boundary
+COMFORT_AY_RMS_ACCEPTABLE      = 0.63   # ISO 2631-1 §6.2 upper boundary
+
+# Metric 4: Peak lateral jerk [m/s³]
+COMFORT_JERK_GOOD              = 0.5    # smooth transition
+COMFORT_JERK_ACCEPTABLE        = 2.0    # noticeable but not harsh
+
+# Metric 5: Peak body-frame lateral velocity [m/s]
+# For sinusoidal LC profile: vy_peak = pi*delta_y/(2*T_lc)
+# With delta_y=3.5m: T=6s -> 0.92 m/s (comfortable), T=4s -> 1.37 m/s (natural)
+COMFORT_LATERAL_VEL_GOOD       = 1.0    # reachable only for T_lc >= 5.5s (smooth)
+COMFORT_LATERAL_VEL_ACCEPTABLE = 1.5    # reachable for T_lc >= 3.7s (natural highway)
+
+# Metric 6: Authority Disruption Index (ADI) — Nash-specific
+# ADI = mean(|d(lambda)/dt|) / AUTHORITY_LAMBDA_MAX
+# Measures rate of authority switches; 0 = smooth handover
+COMFORT_ADI_GOOD               = 0.05
+COMFORT_ADI_ACCEPTABLE         = 0.15
 
 # =============================================================================
 # EXPORT
@@ -402,4 +439,12 @@ __all__ = [
     'MOBIL_IDM_V0', 'MOBIL_IDM_T', 'MOBIL_IDM_A_MAX', 'MOBIL_IDM_B',
     'MOBIL_IDM_S0', 'MOBIL_IDM_DELTA', 'MOBIL_IDM_L',
     'MOBIL_P', 'MOBIL_B_SAFE', 'MOBIL_A_TH', 'MOBIL_A_BIAS', 'MOBIL_MIN_GAP',
+
+    # Comfort evaluation (ISO 2631-1 + Nash ADI)
+    'COMFORT_LC_DURATION_GOOD', 'COMFORT_LC_DURATION_ACCEPTABLE',
+    'COMFORT_AY_PEAK_GOOD', 'COMFORT_AY_PEAK_ACCEPTABLE',
+    'COMFORT_AY_RMS_GOOD', 'COMFORT_AY_RMS_ACCEPTABLE',
+    'COMFORT_JERK_GOOD', 'COMFORT_JERK_ACCEPTABLE',
+    'COMFORT_LATERAL_VEL_GOOD', 'COMFORT_LATERAL_VEL_ACCEPTABLE',
+    'COMFORT_ADI_GOOD', 'COMFORT_ADI_ACCEPTABLE',
 ]

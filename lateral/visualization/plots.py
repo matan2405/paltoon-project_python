@@ -1,4 +1,4 @@
-"""Visualization module - VERSION 2.0"""
+"""Visualization module for lateral simulation outputs and Nash diagnostics."""
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,7 +15,7 @@ from config import RESULTS_DIR, LANE_WIDTH, PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y
 def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation", 
                                mobil_approval_time: float = None) -> plt.Figure:
     fig, axes = plt.subplots(3, 3, figsize=(18, 14))
-    fig.suptitle(f"Lateral Control V2.0: {scenario_name}", fontsize=14, fontweight='bold')
+    fig.suptitle(f"Lateral Control Analysis: {scenario_name}", fontsize=14, fontweight='bold')
     
     time = sim_data['time']
     
@@ -212,7 +212,7 @@ def create_trajectory_plot(sim_data: Dict, scenario_name: str = "Simulation") ->
 def create_nash_analysis_plots(sim_data: Dict, scenario_name: str = "Simulation",
                                mobil_approval_time: float = None) -> plt.Figure:
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"Nash Analysis V2.0: {scenario_name}", fontsize=14, fontweight='bold')
+    fig.suptitle(f"Nash Analysis: {scenario_name}", fontsize=14, fontweight='bold')
     
     time = sim_data['time']
     
@@ -280,8 +280,8 @@ def create_nash_analysis_plots(sim_data: Dict, scenario_name: str = "Simulation"
     mobil_info = f"\n    MOBIL approved: {mobil_approval_time:.1f}s" if mobil_approval_time else ""
     
     summary = f"""
-    Performance Summary (V2.0)
-    ==========================
+    Performance Summary
+    ===================
     
     Max |y_error|:   {np.max(np.abs(y_err)):.3f} m
     Final |y_error|: {np.abs(y_err[-1]):.3f} m

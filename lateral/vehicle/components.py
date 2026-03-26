@@ -1,6 +1,10 @@
 """
 Vehicle components module for lateral control simulation.
-VERSION 2.0
+
+Research linkage:
+- Parameter container for the lateral bicycle model and tire-force
+    approximations used throughout simulation and Nash prediction.
+- Keeps physical constants centralized for reproducible thesis experiments.
 """
 
 import numpy as np

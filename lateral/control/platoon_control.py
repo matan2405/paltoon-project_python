@@ -1,6 +1,10 @@
 """
 Platoon Control Module.
-VERSION 2.0
+
+Research linkage:
+- Provides the surrounding-platoon motion context used by the lateral merge
+    experiments, safety field evaluation, and gap-selection logic.
+- Encapsulates platoon spacing and follower behavior assumptions.
 """
 
 import numpy as np
@@ -73,6 +77,7 @@ class PlatoonManager:
         return vehicle
     
     def create_platoon(self, num_vehicles: int, leader_x: float, gap: float = None):
+        """Create a platoon at leader_x using either provided or policy-derived spacing."""
         if gap is None:
             gap = self.params.time_gap * self.target_velocity + self.params.standstill_distance
         self.vehicles.clear()
@@ -82,6 +87,7 @@ class PlatoonManager:
         print(f"🚛 Created platoon: {num_vehicles} vehicles, gap={gap:.1f}m")
     
     def get_vehicles_as_obstacles(self) -> List[Dict]:
+        """Return platoon vehicles as obstacle dictionaries for safety-field evaluation."""
         return [v.to_dict() for v in self.vehicles]
     
     def update(self, dt: float):
