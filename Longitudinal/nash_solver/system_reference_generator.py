@@ -3,9 +3,10 @@
 File: system_reference_generator.py  
 Description: Generates target trajectories for the System player (R1).
 
-VERSION 5.0 - RAJAMANI CHAPTER 6.7 TRANSITIONAL CONTROLLER
-===========================================================
-Exact implementation of Rajamani "Vehicle Dynamics and Control" Chapter 6.7.
+Research basis:
+- Rajamani Chapter 6.7 transitional controller logic in range/range-rate space.
+- Continuous parabola-based transition between gap-closing and following modes.
+- Used to build system reference trajectory R1 for longitudinal Nash control.
 
 The Transitional Controller operates in the R-Ṙ (Range vs Range-Rate) phase plane:
     R = actual gap to preceding vehicle [m]
@@ -50,7 +51,7 @@ class SystemReferenceGenerator:
     """
     Generates target trajectories for the System player (R1) in Nash equilibrium.
     
-    VERSION 5.0: Exact Rajamani Chapter 6.7 Transitional Controller.
+    Implements the Rajamani Chapter 6.7 transitional controller formulation.
     
     Uses CONTINUOUS parabola-based velocity control:
     - Compute target velocity from parabola: v_target = v_leader - sqrt(2*a_comfort*gap_error)
@@ -107,7 +108,7 @@ class SystemReferenceGenerator:
         # === DEBUG ===
         self._debug_counter = 0
         
-        print(f"🚀 System Reference Generator V5.0 (RAJAMANI Ch.6.7)")
+        print(f"🚀 System Reference Generator (RAJAMANI Ch.6.7)")
         print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
         print(f"   🎯 CTG: h={self.h}s, d0={self.d0}m")
         print(f"   📐 Comfort decel: a_comfort={self.a_comfort} m/s²")
@@ -140,13 +141,20 @@ class SystemReferenceGenerator:
         sim_vehicle = Vehicle() 
         sim_vehicle = copy.deepcopy(simulation.human_vehicle)
         
-        # Switch cloned vehicle to state-space (double integrator) mode.
-        # The original vehicle may be in hierarchical mode, but for prediction
-        # we want the simple ZOH double integrator — not the full engine/
-        # transmission dynamics.
-        sim_vehicle.use_hierarchical_model = False
-        sim_vehicle.use_state_space_model = True
-        sim_vehicle.use_kinematic_model = False
+        # Mirror the actual vehicle's planning model so the reference trajectory
+        # is consistent with what Nash plans against.
+        # - Hierarchical mode: LLC cancels all drag → pure double-integrator effective plant.
+        #   Using state-space here would subtract drag from a_ref, making the reference
+        #   trajectory decelerate near target speed and producing a false ~115 km/h equilibrium.
+        # - State-space mode: drag is explicit in both reference and Nash matrices → consistent.
+        if simulation.human_vehicle.use_hierarchical_model:
+            sim_vehicle.use_hierarchical_model = True
+            sim_vehicle.use_state_space_model = True  # Nash still uses double integrator for planning
+            sim_vehicle.use_kinematic_model = False
+        else:
+            sim_vehicle.use_hierarchical_model = False
+            sim_vehicle.use_state_space_model = True
+            sim_vehicle.use_kinematic_model = False
         
         # ========================================================================
         # Identify Leader - USE LOCKED if available
@@ -352,7 +360,7 @@ __all__ = ['SystemReferenceGenerator']
 # === UNIT TEST ===
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("System Reference Generator V5.0 - Unit Test")
+    print("System Reference Generator - Unit Test")
     print("Rajamani Chapter 6.7 Transitional Controller")
     print("="*60)
     

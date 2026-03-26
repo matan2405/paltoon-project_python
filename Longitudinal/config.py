@@ -1,6 +1,11 @@
 """
 Global configuration for the Longitudinal Control simulation system.
-VERSION 2.0 - Comprehensive parameter centralization
+
+Research basis and scope:
+- Centralizes parameters used by longitudinal safety field, authority
+    allocation, reference generation, platoon control, and Nash solver.
+- Aligns with the same architecture used in the lateral stack for easier
+    thesis traceability and cross-domain comparisons.
 
 Based on the lateral system's config architecture (lateral/config.py).
 All hardcoded parameters from nash_solver, safety_field, authority_allocator,
@@ -107,7 +112,7 @@ FREE_ROAD_DELTA = 4
 # =============================================================================
 # Cost weights - Output tracking
 NASH_Q_POS = 2500.0               # Weight on position tracking error
-NASH_Q_VEL = 50.0                 # Weight on velocity tracking error
+NASH_Q_VEL = 2000.0               # Weight on velocity tracking error
 
 # Control effort weights (R) - BASE VALUES
 # S = R for cooperation (Nash equilibrium insight)
@@ -162,7 +167,7 @@ NASH_DRIVER_PARAMS = {
         'plan_decel': 3.0,                   # [m/s²]
         'target_speed_offset': -10.0,        # [km/h]
         'max_deceleration': -3.0,            # [m/s²]
-        'initial_x_offset': 20.0,             # [m] Start with larger gap to leader
+        'initial_x_offset': 40.0,             # [m] Start with larger gap to leader
         'initial_speed': 0.0,                # [km/h] Target speed for the driver
     },
     'normal': {
@@ -312,20 +317,21 @@ PHASE_TRANSITION_TIME = 5.0                   # [s] stability required
 # =============================================================================
 # Sigmoid parameters for SAFETY (risk-based)
 AUTHORITY_LAMBDA_MIN = 0.1          # Human dominant when safe
-AUTHORITY_LAMBDA_MAX = 100.0        # System dominant when dangerous
+AUTHORITY_LAMBDA_MAX = 100.0        # High λ -> low α: emergency regime where system overrides
 AUTHORITY_FORCE_MIDPOINT = 400.0    # Sigmoid center point [N]
 AUTHORITY_K_STEEPNESS = 0.015       # Sigmoid slope
 
-# Smoothing parameters (Maximum Comfort V5.2)
+# Smoothing parameters
 AUTHORITY_ALPHA_BASE = 0.05         # Base smoothing (extremely smooth)
 AUTHORITY_ALPHA_FAST = 0.12         # Fast response (still smooth)
 
-# Hysteresis thresholds
-AUTHORITY_ENTER_THRESHOLD = 3.0     # Enter performance mode when |gap_error| > 3m
-AUTHORITY_EXIT_THRESHOLD = 1.0      # Exit performance mode when |gap_error| < 1m
-
-# Performance authority upper bound
-AUTHORITY_LAMBDA_PERFORMANCE_MAX = 50.0
+# Gap-error sigmoid parameters (Swain & Rath 2023, Eq. 15 — adapted for longitudinal)
+AUTHORITY_SIGMOID_M1 = 2.0          # Slope steepness (Swain & Rath: m1=2)
+AUTHORITY_SIGMOID_M2 = 0.5          # Centre shift    (Swain & Rath: m2=0.5)
+AUTHORITY_GAP_ERROR_MAX = 5.0       # Max gap error for full authority [m]
+                                    # (analogous to LANE_WIDTH/2 in lateral)
+AUTHORITY_VEL_ERROR_MAX = 1.5       # Max velocity error for full authority [m/s]
+                                    # (~10.8 km/h): sigmoid saturates at this speed deviation
 
 # =============================================================================
 # SYSTEM REFERENCE GENERATOR PARAMETERS (Rajamani Ch. 6.7)
@@ -435,8 +441,8 @@ __all__ = [
     'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX',
     'AUTHORITY_FORCE_MIDPOINT', 'AUTHORITY_K_STEEPNESS',
     'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
-    'AUTHORITY_ENTER_THRESHOLD', 'AUTHORITY_EXIT_THRESHOLD',
-    'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
+    'AUTHORITY_SIGMOID_M1', 'AUTHORITY_SIGMOID_M2',
+    'AUTHORITY_GAP_ERROR_MAX',
 
     # System reference generator
     'REFGEN_DETECTION_RANGE', 'REFGEN_TIME_HEADWAY', 'REFGEN_STANDSTILL_DISTANCE',

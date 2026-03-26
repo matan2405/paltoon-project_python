@@ -16,7 +16,7 @@ from config import (
 
 _vp = VehicleParameters()
 def rajamani(Car_1, Car_2):
-    """Rajamani controller (kept for desired-gap calculations in safety field)."""
+    """Compute Rajamani acceleration command and desired inter-vehicle gap."""
     h = RAJAMANI_H   # [s] desired time headway
     tau = RAJAMANI_TAU # [s] time lag
 
@@ -33,7 +33,7 @@ def rajamani(Car_1, Car_2):
 
 
 def free_road_acc(v, t, v_target, a_max, delta=FREE_ROAD_DELTA):
-    """Free road acceleration - identical to platoon_control.py"""
+    """Compute IDM-like free-road acceleration with exponent delta."""
 
     if (v_target >= v):
         dv_dt = a_max * (1 - (v/v_target)**delta)

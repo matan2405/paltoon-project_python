@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """
 DPP-Compliant Nash MPC Solver with Pustilnik Scaling.
-VERSION 6.0 - PUSTILNIK α FORMULATION - Aligned with Lateral V6.0
+
+Research basis:
+- Pustilnik and Borrelli non-normalized GNE formulation with embedded scaling.
+- Li et al. shared-control game structure for two-player trajectory tracking.
+- Practical DPP-compliant QP construction for repeated online solves.
 
 This solver implements the Non-Normalized GNE formulation from
-Pustilnik (2025) with α = λ/(1+λ) embedded inside the Nash game.
+Pustilnik (2025) with α = 1/(1+λ) embedded inside the Nash game.
 
-Key Changes from V5.0:
+Key Changes from the previous external-blending formulation:
 ======================
-1. Pustilnik α mapping: α = λ/(1+λ) used consistently in P matrix and q vector
+1. Pustilnik α mapping: α = 1/(1+λ) used consistently in P matrix and q vector
 2. P matrix: P11 = H'Q1H + (R1 + α·S2_eff)·I
              P22 = α·H'Q1H + (R2_eff + S1)·I
-             P12 = √α · H'Q1H
+             P12 = α · H'Q1H
 3. Driver type modifiers: R2_eff, S2_eff, Q_pos_eff based on driver personality
 4. Terminal weights: Q_pos_terminal, Q_vel_terminal at final prediction step
 5. q2 uses α (not λ): q2 = -2·α · H'Q1(r2 - z_free)
@@ -28,9 +32,9 @@ Nash game cost functions (Pustilnik formulation):
     J1 = ||z - r1||²_Q1 + R1||u1||² + S1||u2||²
     J2 = α·||z - r2||²_Q1 + R2||u2||² + α·S2||u1||²
 
-with α = λ/(1+λ), we embed the authority allocation INSIDE the Nash game.
+with α = 1/(1+λ), we embed the authority allocation INSIDE the Nash game.
 The output should be combined as: u_shared = u1 + u2
-(though external blending u_shared = α·u1 + (1-α)·u2 is also valid)
+(not via external blending)
 """
 
 import os
@@ -60,7 +64,7 @@ class ConstrainedNashParams:
     """
     Parameters for constrained Nash MPC solver.
     
-    V6.0 - Pustilnik α Formulation with Driver Type Modifiers
+    Pustilnik α Formulation with Driver Type Modifiers
     """
     
     # Prediction horizons
@@ -118,9 +122,9 @@ class ConstrainedLongitudinalNashSolver:
     """
     DPP-Compliant Nash Equilibrium Solver with Pustilnik Scaling.
     
-    V6.0: Embed α inside Nash game → u_shared = u1 + u2
+    Embed α inside Nash game and apply u_shared = u1 + u2
     
-    The key insight from Pustilnik (2025) is that α = λ/(1+λ) provides
+    The key insight from Pustilnik (2025) is that α = 1/(1+λ) provides
     a bounded [0,1] scaling that can be embedded directly into the
     cost matrices, producing a well-conditioned QP for all λ values.
     
@@ -175,7 +179,7 @@ class ConstrainedLongitudinalNashSolver:
         # Build prediction matrices (U, H) - these are lambda-independent
         self._build_prediction_matrices()
         
-        # Build base cost matrices (with terminal weights - NEW in V6.0)
+        # Build base cost matrices (with terminal weights)
         self._build_base_cost_matrices()
         
         # Pre-compute problems for each lambda level
@@ -209,7 +213,7 @@ class ConstrainedLongitudinalNashSolver:
         }
         self.last_constraint_info = {}
         
-        print(f"⚡ Pustilnik Nash MPC Solver V6.0 Initialized (DPP-Compliant)")
+        print(f"⚡ Pustilnik Nash MPC Solver Initialized (DPP-Compliant)")
         print(f"   Horizons: Np={self.params.Np}, Nu={self.params.Nu}")
         print(f"   Weights: R1={self.params.R1}, R2={self.params.R2}, S1={self.params.S1}, S2={self.params.S2}")
         print(f"   Terminal weights: Q_pos_T={self.params.Q_pos_terminal:.0f}, Q_vel_T={self.params.Q_vel_terminal:.0f}")
@@ -217,7 +221,7 @@ class ConstrainedLongitudinalNashSolver:
         print(f"   Pre-computed problems: {len(self.params.lambda_levels)}")
     
     # ==========================================
-    # NEW in V6.0: Pustilnik α Mapping
+    # Pustilnik α Mapping
     # ==========================================
     
     def _pustilnik_alpha(self, lambda_k: float) -> float:
@@ -227,39 +231,65 @@ class ConstrainedLongitudinalNashSolver:
         Pustilnik (2025), Section IV:
         α represents the relative "aggressiveness" of the human player.
         
-        We use: α(λ) = λ / (1 + λ)
-        
+        We use: α(λ) = 1 / (1 + λ)
+
         This gives:
-        - λ=0.1 → α=0.091 (system dominant — human barely tracked)
-        - λ=0.5 → α=0.333 (system has more authority)
+        - λ=0.1 → α=0.909 (human dominant — safe, human tracks aggressively)
+        - λ=0.5 → α=0.667 (human has more authority)
         - λ=1.0 → α=0.500 (normalized solution — equal)
-        - λ=2.0 → α=0.667 (human has more authority)
-        - λ=10  → α=0.909 (human dominant)
-        
+        - λ=2.0 → α=0.333 (system has more authority)
+        - λ=10  → α=0.091 (system dominant — dangerous, human barely acts)
+
         Corollary 2.2 guarantees: reducing α for the system
         cannot worsen the system's cost.
         """
-        return lambda_k / (1.0 + lambda_k)
+        return 1.0 / (1.0 + lambda_k)
     
     # ==========================================
     # State Space & Prediction (unchanged)
     # ==========================================
     
     def _build_state_space(self):
-        """Build discrete-time state-space matrices (double integrator)."""
-        dt = self.params.dt
-        
-        # State: [position, velocity]
-        # Input: acceleration
-        self.A = np.array([[1, dt],
-                          [0, 1]])
-        self.B = np.array([[0.5 * dt**2],
-                          [dt]])
-        self.C = np.eye(2)
-        
+        """Build discrete-time state-space matrices.
+
+        Reads from vehicle's dynamic linearization (nonlinear plant Jacobians).
+        Falls back to double integrator if vehicle not available.
+        """
+        if self.vehicle is not None:
+            self.A, self.B, self.C = self.vehicle.get_state_space_matrices(self.params.dt)
+        else:
+            dt = self.params.dt
+            self.A = np.array([[1.0, dt], [0.0, 1.0]])
+            self.B = np.array([[0.5 * dt**2], [dt]])
+            self.C = np.eye(2)
+
         self.nx = 2  # states
         self.nz = 2  # outputs
-    
+
+    def update_linearization(self, dt=None):
+        """Re-linearize at vehicle's current operating point.
+
+        Called at each Nash control step (step 3 in simulation loop).
+        Only rebuilds OSQP problems when A or B has changed significantly —
+        at steady cruising the matrices are nearly constant so rebuilding is skipped.
+        """
+        if self.vehicle is None:
+            return False
+        dt = dt or self.params.dt
+        A_new, B_new, C_new = self.vehicle.get_state_space_matrices(dt)
+        # Skip full rebuild if matrices unchanged (typical at steady speed)
+        if (self.A is not None
+                and np.allclose(A_new, self.A, rtol=1e-4, atol=1e-6)
+                and np.allclose(B_new, self.B, rtol=1e-4, atol=1e-6)):
+            return True
+        self.A = A_new
+        self.B = B_new
+        self.C = C_new
+        self._build_prediction_matrices()
+        self._build_base_cost_matrices()
+        self._precompute_lambda_problems()
+        return True
+
     def _build_prediction_matrices(self):
         """Build prediction matrices U, H (lambda-independent)."""
         A, B, C = self.A, self.B, self.C
@@ -284,15 +314,15 @@ class ConstrainedLongitudinalNashSolver:
                 self.H[i*nz:(i+1)*nz, j:j+1] = CAB[i-j]
     
     # ==========================================
-    # UPDATED in V6.0: Terminal weights + driver type
+    # Terminal weights + driver type
     # ==========================================
     
     def _build_base_cost_matrices(self):
         """
         Build base cost matrices with terminal weights.
         
-        V6.0: Block diagonal Q1 with higher terminal weights at k=Np-1
-        for improved stability (same as lateral V6.0).
+        Block diagonal Q1 with higher terminal weights at k=Np-1
+        for improved stability (same design as lateral solver).
         """
         p = self.params
         Np = p.Np
@@ -317,7 +347,7 @@ class ConstrainedLongitudinalNashSolver:
         self.HQ1H += self.params.regularization * np.eye(self.params.Nu)
     
     # ==========================================
-    # UPDATED in V6.0: Pustilnik P matrix
+    # Pustilnik P matrix
     # ==========================================
     
     def _build_P_for_lambda(self, lambda_k: float) -> Tuple[np.ndarray, float]:
@@ -351,7 +381,7 @@ class ConstrainedLongitudinalNashSolver:
         
         P11 = H'Q1H + (R1 + α·S2_eff)·I    ← S2 scaled by α (from Player 2's cost)
         P22 = α·H'Q1H + (R2_eff + S1)·I     ← S1 unscaled (from Player 1's cost)
-        P12 = √α · H'Q1H                     ← geometric mean for symmetry
+        P12 = α · H'Q1H                      ← prevents adversarial lock (see below)
         
         Args:
             lambda_k: Authority ratio
@@ -374,8 +404,10 @@ class ConstrainedLongitudinalNashSolver:
         P22 = alpha * self.HQ1H + (self.R2_eff + p.S1) * np.eye(Nu)
         
         # P12: Cross-coupling from shared output z = H(u1 + u2)
-        # Use √α for geometric mean to maintain PD while reflecting asymmetry
-        coupling_scale = np.sqrt(alpha)
+        # Use α directly (not √α): with √α, P12=√α·HQ1H > P22=α·HQ1H when HQ1H >> R,S
+        # → adversarial equilibrium where u1=-max and u2=+max cancel each other.
+        # With α: P12=α·HQ1H ≤ α·HQ1H + R + S = P22 always → cooperative.
+        coupling_scale = alpha
         P12 = coupling_scale * self.HQ1H
         
         # Build stacked matrix
@@ -400,7 +432,7 @@ class ConstrainedLongitudinalNashSolver:
         return P_stack, alpha
     
     # ==========================================
-    # UPDATED in V6.0: Stores alpha in prob_dict
+    # Stores alpha in prob_dict
     # ==========================================
     
     def _create_problem_for_lambda(self, lambda_k: float) -> dict:
@@ -460,7 +492,7 @@ class ConstrainedLongitudinalNashSolver:
             'q_param': q_param,
             'u_prev_param': u_prev_param,
             'P_stack': P_stack,
-            'alpha': alpha,           # NEW in V6.0: store α
+            'alpha': alpha,           # Store α for consistent q2 scaling
             'lambda': lambda_k,
             'is_dpp': is_dpp,
             'warm_start': np.zeros(2 * Nu)
@@ -488,7 +520,7 @@ class ConstrainedLongitudinalNashSolver:
         return self.lambda_levels[closest_idx]
     
     # ==========================================
-    # UPDATED in V6.0: Uses α from prob_dict
+    # Uses α from prob_dict
     # ==========================================
     
     def solve_nash_equilibrium(self, x0: np.ndarray,
@@ -499,7 +531,7 @@ class ConstrainedLongitudinalNashSolver:
         """
         Solve Non-Normalized GNE for longitudinal control.
         
-        CRITICAL DIFFERENCE FROM V5.0:
+        Critical difference from the previous external-blending formulation:
         ==============================
         The authority ratio λ is embedded in the Nash game through
         Pustilnik's α scaling. The output u1, u2 are already coordinated.
@@ -525,7 +557,7 @@ class ConstrainedLongitudinalNashSolver:
         # Find closest pre-computed lambda
         lambda_used = self._find_closest_lambda(lambda_k)
         prob_dict = self.problems[lambda_used]
-        alpha = prob_dict['alpha']  # V6.0: use stored α
+        alpha = prob_dict['alpha']  # Use stored α
         
         # Track lambda usage
         self.last_lambda_used = lambda_used
@@ -543,7 +575,7 @@ class ConstrainedLongitudinalNashSolver:
         q1 = -2.0 * self.H.T @ self.Q1_full @ (r1 - z_free)
         
         # Player 2: Pustilnik-scaled tracking (α in Q2 = α·Q1)
-        # V6.0: uses α (not λ!) for consistency with P matrix
+        # Use α (not λ) for consistency with the P matrix scaling
         q2 = -2.0 * alpha * self.H.T @ self.Q1_full @ (r2 - z_free)
         
         q_stacked = np.concatenate([q1, q2])
@@ -650,13 +682,13 @@ class ConstrainedLongitudinalNashSolver:
             return "No solves performed yet."
         
         lambda_usage = "\n".join([
-            f"║    λ={lam:5.2f} (α={lam/(1+lam):.3f}): {stats['lambda_level_usage'][lam]:>6} times ({100*stats['lambda_level_usage'][lam]/total:>5.1f}%)        ║"
+            f"║    λ={lam:5.2f} (α={1/(1+lam):.3f}): {stats['lambda_level_usage'][lam]:>6} times ({100*stats['lambda_level_usage'][lam]/total:>5.1f}%)        ║"
             for lam in self.params.lambda_levels
         ])
         
         summary = f"""
 ╔══════════════════════════════════════════════════════════════╗
-║     PUSTILNIK NASH SOLVER V6.0 - CONSTRAINT SUMMARY          ║
+║     PUSTILNIK NASH SOLVER - CONSTRAINT SUMMARY               ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Total solves: {total:>6}                                       ║
 ╠══════════════════════════════════════════════════════════════╣
@@ -723,7 +755,7 @@ class ConstrainedLongitudinalNashSolver:
 # ============================================================================
 if __name__ == "__main__":
     print("\n" + "="*70)
-    print("Pustilnik Nash MPC Solver V6.0 - Integration Test")
+    print("Pustilnik Nash MPC Solver - Integration Test")
     print("="*70)
     
     import time
@@ -754,7 +786,7 @@ if __name__ == "__main__":
             x0=x0, R1_ref=R1_ref, R2_ref=R2_ref, lambda_k=lam
         )
         stats = solver.get_solver_stats()
-        alpha = lam / (1 + lam)
+        alpha = 1.0 / (1.0 + lam)
         print(f"{lam:>8.2f} | {alpha:>8.3f} | {u1_opt:>8.3f} | {u2_opt:>8.3f} | {stats['solve_time_ms']:>6.2f}ms")
     
     # Test 2: Verify lambda effect
@@ -799,5 +831,5 @@ if __name__ == "__main__":
     print(solver.get_constraint_summary())
     
     print("\n" + "="*70)
-    print("✅ Pustilnik Nash Solver V6.0 Test Complete!")
+    print("✅ Pustilnik Nash Solver Test Complete!")
     print("="*70)

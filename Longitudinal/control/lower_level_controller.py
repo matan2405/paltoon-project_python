@@ -341,8 +341,8 @@ class LowerLevelController:
         """Compute total aerodynamic drag + rolling resistance [N]."""
         F_aero = (0.5 * self.air_density * self.params.drag_coefficient
                   * self.params.frontal_area * velocity * abs(velocity))
-        F_rolling = (self.rolling_coeff * self.params.mass * self.params.gravity
-                     if abs(velocity) > 0.01 else 0.0)
+        f_v = (np.tanh(10 * abs(velocity) - 8) + 1) / 2  # Fernández Eq. 4.4, pp. 36-37
+        F_rolling = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
         return F_aero + F_rolling
 
     def compute_max_engine_force(self) -> float:
@@ -369,8 +369,8 @@ class LowerLevelController:
         v = self.vehicle.state.vx
         F_aero = (0.5 * self.air_density * self.params.drag_coefficient *
                   self.params.frontal_area * v * abs(v))
-        rolling_resistance = (self.rolling_coeff * self.params.mass * self.params.gravity
-                              if abs(v) > 0.01 else 0.0)
+        f_v = (np.tanh(10 * abs(v) - 8) + 1) / 2  # Fernández Eq. 4.4, pp. 36-37
+        rolling_resistance = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
 
         if self.vehicle.autonomous_mode:
             # Direct force control: vehicle.direct_force already accounts for
@@ -442,8 +442,8 @@ class LowerLevelController:
         v = self.vehicle.state.vx
         F_aero = (0.5 * self.air_density * self.params.drag_coefficient *
                   self.params.frontal_area * v * abs(v))
-        F_roll = (self.rolling_coeff * self.params.mass * self.params.gravity
-                  if abs(v) > 0.01 else 0.0)
+        f_v = (np.tanh(10 * abs(v) - 8) + 1) / 2  # Fernández Eq. 4.4, pp. 36-37
+        F_roll = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
         self.vehicle.direct_force = self.params.mass * a_desired + F_aero + F_roll
 
         F_req_max = self.params.mass * self.params.max_acceleration + F_aero + F_roll

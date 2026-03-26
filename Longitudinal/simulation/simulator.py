@@ -19,9 +19,10 @@ from control.human_driver import HumanDriver
 
 
 class PlatoonSimulation:
-    """Main simulation class"""
+    """Main longitudinal simulation orchestrator for platoon and human vehicles."""
 
     def __init__(self,Np=None,initial_x_platoon=None,initial_velocity_platoon=None, num_cars_platoon=4, target_speed_platoon=120.0 / 3.6, initial_x_human=0.0, initial_velocity_human=0.0, use_state_space: bool = True, use_hierarchical: bool = True, driver_type='normal'):
+        """Initialize simulation state, vehicles, controllers, and logging buffers."""
         # Simulation parameters - match platoon_control.py exactly
         self.dt = SIMULATION_DT  # 0.02s timestep like platoon_control.py
         self.time = 0.0
@@ -42,7 +43,7 @@ class PlatoonSimulation:
         else:
             self.initial_velocity_platoon = initial_velocity_platoon
 
-        self.is_prediction_mode = False  # Placeholder for prediction mode
+        self.is_prediction_mode = False  # Active flag used by platoon control to gate prediction-only updates
         
         # Human vehicle initial conditions
         self.driver_type = driver_type

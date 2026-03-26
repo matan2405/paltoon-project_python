@@ -385,9 +385,12 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         u_system = np.array(getattr(simulation, system_acc_attr)[:min_length])
         u_human = np.array(getattr(simulation, human_acc_attr)[:min_length])
         
-        # Calculate shared control
-        alpha = authority / (1.0 + authority)
-        u_shared = alpha * u_system + (1.0 - alpha) * u_human
+        # Shared control in current Nash formulation is additive (u_shared = u1 + u2)
+        u_shared = u_system + u_human
+
+        # For visualization only: convert λ to authority fractions (system/human)
+        system_authority = authority / (1.0 + authority)
+        human_authority = 1.0 - system_authority
         
         # Get additional data
         safety_forces = simulation.safety_force_history[:min_length] if hasattr(simulation, 'safety_force_history') else []
@@ -468,8 +471,10 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         # ========== Row 2 ==========
         # Plot 4: Control Authority Distribution
         plt.subplot(3, 3, 4)
-        plt.fill_between(time, 0, alpha, color='blue', alpha=0.6, label='System Authority')
-        plt.fill_between(time, alpha, 1.0, color='green', alpha=0.6, label='Human Authority')
+        plt.fill_between(time, 0, system_authority, color='blue', alpha=0.6, label='System Authority')
+        plt.fill_between(time, 1.0 - human_authority, 1.0, color='green', alpha=0.6, label='Human Authority')
+        plt.plot(time, system_authority, color='navy', linewidth=1.5, alpha=0.9, label='System Fraction')
+        plt.plot(time, human_authority, color='darkgreen', linewidth=1.5, alpha=0.9, linestyle='--', label='Human Fraction')
         plt.axhline(y=0.5, color='k', linestyle='--', linewidth=1, alpha=0.5, label='Equal (50%)')
         plt.xlabel('Time [s]', fontsize=10)
         plt.ylabel('Authority Fraction', fontsize=10)
@@ -510,11 +515,17 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             plt.text(0.5, 0.5, 'No gap data', ha='center', va='center', transform=plt.gca().transAxes)
         
         # ========== Row 3 ==========
-        # Plot 7: Nash Equilibrium Cost Functions (placeholder)
+        # Plot 7: System-Human Control Disagreement
         plt.subplot(3, 3, 7)
-        plt.text(0.5, 0.5, 'Nash Equilibrium\nCost Functions\n(Future Implementation)', 
-                ha='center', va='center', transform=plt.gca().transAxes, fontsize=11)
-        plt.title('Nash Equilibrium Cost Functions', fontsize=11, fontweight='bold')
+        control_disagreement = np.abs(u_system - u_human)
+        cumulative_disagreement = np.cumsum(control_disagreement) * (time[1] - time[0] if len(time) > 1 else 0.1)
+        plt.plot(time, control_disagreement, color='purple', linewidth=2.0, label='|u_sys - u_human|')
+        plt.plot(time, cumulative_disagreement, color='black', linewidth=1.5, linestyle='--',
+             label='Cumulative disagreement')
+        plt.xlabel('Time [s]', fontsize=10)
+        plt.ylabel('Acceleration [m/s^2]', fontsize=10)
+        plt.title('Control Disagreement Analysis', fontsize=11, fontweight='bold')
+        plt.legend(loc='best', fontsize=9)
         plt.grid(True, alpha=0.3)
         
         # Plot 8: Control Effort Analysis

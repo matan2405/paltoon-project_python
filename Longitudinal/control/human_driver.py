@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
 Human driver module containing the HumanDriver class.
-VERSION 2.0 - LEADER-AWARE PREDICTION
 
-Key Fix:
-========
-The get_human_acceleration_and_state_sequence() method now accepts an optional
-leader parameter. When provided, the human driver prediction will use IDM
-car-following behavior instead of free-road driving.
+Research basis and adopted elements:
+1) IDM-style following behavior for leader-aware longitudinal prediction.
+2) Free-road target-speed behavior when no leader is present.
+3) Nash-compatible R2 generation by simulating expected human acceleration.
+
+Key Behavior:
+=============
+The get_human_acceleration_and_state_sequence() method accepts an optional
+leader and switches between two prediction modes:
+- leader provided: IDM car-following prediction
+- leader missing: free-road prediction toward target speed
 
 This fixes the "Join Middle" and "Join After" scenarios where the human driver
 prediction was ignoring the leader, causing the Nash solver to receive conflicting
@@ -158,7 +163,7 @@ class HumanDriver:
         """
         Generate predicted acceleration and state sequence for the human driver.
         
-        VERSION 2.0: Now accepts an optional leader for gap-aware prediction.
+        Leader-aware prediction mode: accepts an optional leader for gap-aware prediction.
         
         Args:
             dt: Time step for prediction
@@ -176,12 +181,17 @@ class HumanDriver:
         
         sim_veh = copy.deepcopy(vehicle)
         
-        # Switch cloned vehicle to state-space (double integrator) mode.
-        # The original may be hierarchical, but for prediction we use the
-        # simple ZOH double integrator — not the full engine dynamics.
-        sim_veh.use_hierarchical_model = False
-        sim_veh.use_state_space_model = True
-        sim_veh.use_kinematic_model = False
+        # Mirror the dynamics model of the real vehicle so that R2 and R1
+        # use the same physics. When hierarchical, LLC cancels drag → pure
+        # double integrator; otherwise, standard state-space with drag.
+        if vehicle.use_hierarchical_model:
+            sim_veh.use_hierarchical_model = True
+            sim_veh.use_state_space_model = True
+            sim_veh.use_kinematic_model = False
+        else:
+            sim_veh.use_hierarchical_model = False
+            sim_veh.use_state_space_model = True
+            sim_veh.use_kinematic_model = False
         
         sim_driver = copy.deepcopy(self)
         sim_driver.vehicle = sim_veh

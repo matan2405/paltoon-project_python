@@ -32,6 +32,7 @@ class VehicleParameters:
 
     # Tire parameters
     wheel_radius: float = 0.3175  # m (225/50 R17)
+    wheel_inertia: float = 1.5    # [kg·m²] total all wheels — Belousov Eq. 3.8: m_eff = m + Iw/r²
     tire_friction_coeff: float = 0.8
 
     # Cornering stiffness

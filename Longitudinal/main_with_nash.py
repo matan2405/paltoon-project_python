@@ -45,6 +45,7 @@ class LowPassFilter:
         self.last_val = None
         
     def filter(self, val):
+        """Apply first-order low-pass filtering to a scalar signal."""
         if self.last_val is None:
             self.last_val = val
             return val
@@ -56,6 +57,7 @@ class PlatoonNashSimulation(PlatoonSimulation):
     """Extended platoon simulation with Nash equilibrium control"""
     
     def __init__(self, Constrained_Nash=True, driver_type='normal', **kwargs):
+        """Initialize simulation with safety field, authority allocator, and Nash solver."""
         super().__init__(driver_type=driver_type, **kwargs)
         
         # Initialize Nash control components
@@ -157,9 +159,14 @@ class PlatoonNashSimulation(PlatoonSimulation):
         breakdown = self.safety_field._last_breakdown
 
         # --- 3. Authority Allocation ---
+        # When there is no leader (free cruise), the follower gap error reflects
+        # the human driving ahead freely — not a dangerous situation. Passing it
+        # would max out lambda (50 m >> gap_error_max=5 m), suppressing the human
+        # player's velocity-tracking term and preventing convergence to 120 km/h.
+        authority_gap_error = current_gap_error if leader else 0.0
         lambda_k = self.authority_allocator.compute_authority_ratio(
-            field_force, 
-            gap_error=current_gap_error,
+            field_force,
+            gap_error=authority_gap_error,
             velocity_error=velocity_error
         )
         
@@ -191,6 +198,9 @@ class PlatoonNashSimulation(PlatoonSimulation):
         
         if self.nash_solver_available:
             try:
+                # Step 2-3: Re-linearize at current vehicle operating point
+                if hasattr(self.nash_solver, 'update_linearization'):
+                    self.nash_solver.update_linearization(self.dt_nash)
                 u1_opt, u2_opt = self.nash_solver.solve_nash_equilibrium(
                     x0=current_state, R1_ref=R1_ref, R2_ref=R2_ref,
                     lambda_k=lambda_k, field_force=field_force
@@ -203,7 +213,9 @@ class PlatoonNashSimulation(PlatoonSimulation):
             u2_opt = accel_seq_human[0] if len(accel_seq_human) > 0 else 0.0
         
         # --- 6. Shared Control ---
-        alpha = lambda_k / (1.0 + lambda_k)
+        # Pustilnik scaling alpha is embedded inside the Nash optimization;
+        # the applied command is the direct sum of both optimal actions.
+        alpha = 1.0 / (1.0 + lambda_k)
         u_shared = u1_opt + u2_opt
         
         # Apply hard constraints
@@ -227,7 +239,7 @@ class PlatoonNashSimulation(PlatoonSimulation):
         self.human_desired_acc_history.append(u2_opt)
         self.authority_history.append(lambda_k)
         self.authority_safety_history.append(self.authority_allocator.last_lambda_safety)
-        self.authority_performance_history.append(self.authority_allocator.last_lambda_performance)
+        self.authority_performance_history.append(self.authority_allocator.last_lambda_gap)
         self.safety_force_history.append(field_force)
         self.gap_error_history.append(current_gap_error)
 
@@ -283,7 +295,7 @@ class PlatoonNashSimulation(PlatoonSimulation):
                       f"Risk_F={nash_result['breakdown'].get('follower', {}).get('total_force', 0.0):.1f}N, "
                       f"Total={nash_result['field_force']:.1f}N"
                       f", λ={nash_result['authority_ratio']:.2f}"
-                      f", alpha={nash_result['authority_ratio']/(1+nash_result['authority_ratio']):.2f}")
+                      f", alpha={1.0/(1+nash_result['authority_ratio']):.2f}")
                 # Hierarchical controller metrics for human vehicle
                 if self.human_vehicle.use_hierarchical_model:
                     gear_num = self.human_vehicle.transmission.current_gear + 1

@@ -4,19 +4,18 @@
 File: longitudinal_safety_field.py
 Description: Pure Repulsive Safety Field with Dynamic Phase Detection.
 
-VERSION 3.0 - MERGING/FOLLOWING PHASE SYSTEM
-=============================================
-Key improvements:
-1. Dynamic phase detection based on simulation state (not timers)
-2. MERGING phase: Aggressive safety field for convergence
-3. FOLLOWING phase: Soft transition for steady-state comfort
-4. Hysteresis to prevent oscillation between phases
+Research basis and implementation focus:
+1. Longitudinal repulsive safety-field formulation for leader/follower risk.
+2. Dynamic MERGING/FOLLOWING phase detection from state-based thresholds.
+3. Hysteresis and transition timing for stable phase switching.
 
 The phase transition is based on:
 - Gap error relative to desired_gap
 - Relative velocity relative to target_velocity
 - Acceleration magnitude
-- All conditions must hold for 5 seconds to transition to FOLLOWING
+- Condition must hold for PHASE_TRANSITION_TIME seconds to transition to FOLLOWING
+- Thresholds are parameterized by FOLLOWING_GAP_ERROR_FACTOR,
+  FOLLOWING_VELOCITY_ERROR_FACTOR, and FOLLOWING_ACCELERATION_THRESHOLD
 """
 
 import numpy as np
@@ -193,7 +192,7 @@ class EllipseLongitudinalSafetyField:
         self._last_rel_velocity = 0.0
         self._last_acceleration = 0.0
         
-        print("🛡️ Safety Field V3.0 (Phase Detection) Initialized")
+        print("🛡️ Safety Field (Phase Detection) Initialized")
         print(f"   📊 Phases: MERGING → FOLLOWING")
         print(f"   ⏱️ Transition time: {self.params.phase_transition_time}s")
         print(f"   📏 FOLLOWING entry: gap_error < {self.params.following_gap_error_factor*100}% of desired_gap")
@@ -681,7 +680,7 @@ __all__ = ['EllipseLongitudinalSafetyField', 'EllipseLongitudinalParams',
 # ============================================================================
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("Safety Field V3.0 - Phase Detection Unit Test")
+    print("Safety Field - Phase Detection Unit Test")
     print("="*60)
     
     params = EllipseLongitudinalParams()
