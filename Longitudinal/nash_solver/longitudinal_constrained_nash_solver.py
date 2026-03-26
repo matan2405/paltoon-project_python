@@ -1,33 +1,75 @@
 #!/usr/bin/env python3
 """
-DMPC Nash Solver — Iterative Best Response (Li et al. 2019).
+Longitudinal Nash MPC Solver for Autonomous Platooning Emergency Intervention.
 
-Research basis:
-- Li et al. (2019): "Shared Control with Dynamic Authority Allocation based
-  on Game Theory and Driving Safety Field" — DMPC/IBR formulation.
-- Pustilnik & Borrelli (2025): Non-Normalized GNE, α = 1/(1+λ) scaling.
+=============================================================================
+ARCHITECTURE: DMPC with Iterative Best Response (Li et al. 2019)
+=============================================================================
+The solver architecture strictly follows Li et al. (2019), "Shared Control
+with a Novel Dynamic Authority Allocation Strategy Based on Game Theory and
+Driving Safety Field." The two-player Nash Equilibrium is computed via
+Distributed MPC (DMPC) using Iterative Best Response (IBR / convex iteration):
 
-This solver implements the true Nash Equilibrium via Iterative Best Response:
-  - Player 1 (System): solves own QP with u2 fixed
-  - Player 2 (Human):  solves own QP with u1 fixed
-  - Alternate until convergence (typically 3-5 iterations)
+  1. Fix u2, solve Player 1's QP  →  u1_new
+  2. Fix u1_new, solve Player 2's QP  →  u2_new
+  3. Repeat until ||Δu|| < tol  (converges in ~3–5 iterations)
 
-True Nash KKT (asymmetric — cannot be expressed as a single joint QP):
-  Player 1: (H'Q1H + R1·I)·u1 + H'Q1H·u2  = H'Q1(r1 - U·x0)
-  Player 2: (α·H'Q1H + R2·I)·u2 + α·H'Q1H·u1 = α·H'Q1(r2 - U·x0)
+This produces a true Nash Equilibrium, where each player's control is a
+best response to the other's. The asymmetric coupling (M12 = H'Q1H ≠ α·H'Q1H
+= M21) makes a single joint QP impossible; two separate QPs are required.
 
-where α = 1/(1+λ) (Pustilnik scaling), Q2 = α·Q1.
+  True Nash KKT conditions (Li et al. Eq. 4–9):
+    Player 1: (H'Q1H + R1·I)·u1 + H'Q1H·u2       = H'Q1(r1 − U·x0)
+    Player 2: (α·H'Q1H + R2·I)·u2 + α·H'Q1H·u1   = α·H'Q1(r2 − U·x0)
 
-Note: M12 = H'Q1H ≠ α·H'Q1H = M21 → asymmetric system → two separate QPs required.
+  Player 1 Hessian: P1 = H'Q1H + R1·I        (λ-independent, built once)
+  Player 2 Hessian: P2 = α·H'Q1H + R2·I      (one per λ level)
 
-Authority semantics (platooning context):
-  - Low  λ (safe):   α large → strong human tracking → human dominates
-  - High λ (unsafe): α small → weak human tracking  → system dominates
+  Combined output: u_shared = u1 + u2  (no external blending)
 
-Player 1 Hessian: P1 = H'Q1H + R1·I  (λ-independent, built once)
-Player 2 Hessian: P2 = α·H'Q1H + R2·I  (one per λ level)
+=============================================================================
+AUTHORITY ALLOCATION: Intentional Inversion for Autonomous Platooning
+=============================================================================
+Li et al. designed their authority allocation for a human-driven vehicle
+where a human driver is the primary agent. In their context, high risk (large
+driving safety field force) grants MORE authority to the human, because the
+human must react to an emergency obstacle.
 
-The output should be combined as: u_shared = u1 + u2
+This solver intentionally reverses that policy for Autonomous Platooning:
+
+  - In platooning, the AUTONOMOUS SYSTEM is the primary safety agent.
+  - A high-risk scenario (e.g., sudden lead-vehicle braking, dangerously
+    small gap) requires the SYSTEM to override the human and apply emergency
+    braking, not the other way around.
+  - String stability of the platoon demands that the automated longitudinal
+    controller dominate precisely when the situation is most critical.
+
+=============================================================================
+MATHEMATICAL MECHANISM: Pustilnik & Borrelli (2025) α Scaling
+=============================================================================
+The authority inversion is achieved by adopting the scaling factor α from
+Pustilnik & Borrelli (2025), "Non-Normalized Solutions of Generalized Nash
+Equilibria in Dynamic Games With Shared Constraints":
+
+    α(λ) = 1 / (1 + λ)
+
+where λ is the authority ratio derived from the Driving Safety Field.
+
+  - As risk increases, λ increases  →  α → 0
+  - α appears as the weight on the Human player's tracking cost: Q2 = α·Q1
+  - When α → 0, the Human's tracking objective vanishes; the Human minimizes
+    effort only, producing a small u2 → the System's u1 dominates the output.
+  - When α → 1 (λ → 0, safe regime), the Human tracks aggressively and
+    contributes meaningful authority to the shared control.
+
+  Concretely (platooning semantics):
+    λ = 0.1  →  α = 0.91  →  Human dominant  (safe following distance)
+    λ = 1.0  →  α = 0.50  →  Equal authority  (moderate risk)
+    λ = 10   →  α = 0.09  →  System dominant  (emergency intervention)
+
+Pustilnik & Borrelli's Corollary 2.2 guarantees that this scaling yields a
+valid Generalized Nash Equilibrium for all α ∈ (0, 1), providing theoretical
+soundness for the authority inversion across the full operating range.
 """
 
 import os
