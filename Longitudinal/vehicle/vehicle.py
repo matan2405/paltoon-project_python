@@ -27,8 +27,11 @@ Two-timestep simulation loop:
     5. Nash solves for u_accel; held constant for the next 10 sim steps
 
 Nonlinear EOM — Belousov Eq. 3.11a (no small-angle assumption):
-  m*(v̇x - vy·Ωz) = Fxf·cos(δf) + Fxr - Fyf·sin(δf) - Ra - Rr
-  v̇x = vy·Ωz + u_accel - (Fyf·sin(δf) + Ra + Rr) / m_eff
+  m_eff*(v̇x - vy·Ωz) = Fxf·cos(δf) + Fxr - Fyf·sin(δf) - Ra - Rg - Rr
+
+Feedforward cancellation (Nash stays in m/s², B_c = [[0],[1]] preserved):
+  Fxf·cos(δf) + Fxr = m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)
+  ⟹ v̇x = vy·Ωz + u_accel  (double integrator seen by Nash)
 
 All hardware-level logic (engine, transmission, pedal dynamics, force
 calculations) lives in control/lower_level_controller.py.
@@ -73,7 +76,8 @@ class Vehicle:
         # ── Control inputs (live on Vehicle — used by upper controller) ─────
         self.direct_force = 0.0      # Direct longitudinal force [N] (autonomous)
         self.steering_input = 0.0    # -1 to 1
-        self.a_desired = 0.0         # Desired acceleration [m/s²]
+        self.a_desired = 0.0         # Desired acceleration [m/s²] — set by Nash/platoon/IDM
+        # Fxf [N] is stored in self.state.Fxf (computed by _compute_Fxf each step)
 
         # ── Mode flags ──────────────────────────────────────────────────────
         self.autonomous_mode = False
@@ -270,7 +274,9 @@ class Vehicle:
         a_desired = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
 
         llc = self.lower_level_controller
-        llc.compute_control(a_desired)
+        # Feedforward: convert Nash u_accel [m/s²] → Fxf [N] (stored in self.state.Fxf)
+        Fxf = self._compute_Fxf(a_desired)
+        llc.compute_control(Fxf)
 
         was_autonomous = self.autonomous_mode
         self.autonomous_mode = True
@@ -350,15 +356,74 @@ class Vehicle:
         e = expm(aug)
         return e[:n, :n], e[:n, n:]
 
-    def _longitudinal_derivatives(self, x_long: np.ndarray, u_accel: float) -> np.ndarray:
+    def _tire_force(self, alpha: float, C: float, mu: float, Fz: float) -> float:
+        """Nonlinear lateral tire force — Rajamani Eq. 13.45 (parabolic pressure distribution).
+
+        Recovers the linear model Fy = C·α for small slip angles.
+        Saturates at μ·Fz for full sliding.
+        """
+        theta = C / (3.0 * mu * Fz)
+        S = np.tan(alpha)
+        if abs(S) <= 1.0 / theta:
+            return mu * Fz * (3 * theta * S - 3 * theta**2 * S**2 + theta**3 * S**3)
+        return float(np.sign(S)) * mu * Fz
+
+    def _compute_Fxf(self, u_accel: float) -> float:
+        """Feedforward cancellation: Nash u_accel [m/s²] → Fxf [N] (front axle drive force).
+
+        FWD car: Fxr = 0, so the full drive comes from the front axle.
+        Isolating Fxf from Belousov Eq. 3.11a (with v̇x - vy·Ωz = u_accel):
+            m_eff·u_accel = Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr
+            Fxf = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)) / cos(δf)
+
+        Fyf computed with Rajamani Eq. 13.45 nonlinear parabolic tire model.
+        Result stored in self.state.Fxf for lateral coupling (Fxf·sin(δf) terms).
+        """
+        vx = self.state.vx
+        p = self.params
+        vy = self.state.vy
+        Omega_z = self.state.psi_dot
+        delta_f = self.state.delta_f
+
+        # Low-speed blending (Fernández Eq. 4.4)
+        f_vx = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
+
+        # Aerodynamic drag — Fernández Eq. 3.6 / Belousov Eq. 3.5
+        Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
+        # Grade resistance — Belousov Eq. 3.11a
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
+        # Rolling resistance — Fernández Eq. 3.7 + 4.4
+        vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
+        Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
+
+        # Front slip angle — Rajamani Eq. 2.27
+        vx_safe = max(abs(vx), 0.1)
+        alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
+        # Static normal load on front axle (50/50 CG assumed)
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        # Nonlinear front lateral tire force — Rajamani Eq. 13.45
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
+
+        # Isolate Fxf: FWD → Fxr=0 → Fxf·cos(δf) = m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)
+        cos_df = np.cos(delta_f)
+        Fxf = (self.m_eff * u_accel + Ra + Rg + Rr + Fyf * np.sin(delta_f)) / max(abs(cos_df), 1e-6)
+
+        # Store for lateral coupling (Fxf·sin(δf) in Belousov Eq. 3.11b/c)
+        self.state.Fxf = Fxf
+        return Fxf
+
+    def _longitudinal_derivatives(self, x_long: np.ndarray, Fxf: float) -> np.ndarray:
         """Full nonlinear longitudinal EOM — Belousov Eq. 3.11a (no small-angle assumption).
 
-        State: [x, vx],  Input: u_accel [m/s²]
+        State: [x, vx],  Input: Fxf [N] = front axle drive force (FWD: Fxr = 0)
 
-        m*(v̇x - vy·Ωz) = Fxf·cos(δf) + Fxr - Fyf·sin(δf) - Ra - Rr  [Belousov Eq. 3.11a]
+        m_eff*(v̇x - vy·Ωz) = Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr  [Belousov Eq. 3.11a]
 
         Rearranged:
-          v̇x = vy·Ωz + u_accel - (Fyf·sin(δf) + Ra + Rr) / m_eff
+          v̇x = vy·Ωz + (Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr) / m_eff
+
+        Due to feedforward cancellation (Fxf = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf))/cos(δf)):
+          v̇x = vy·Ωz + u_accel  (double integrator seen by Nash)
 
         External params read from self.state (zero for straight-line platooning):
           vy    = self.state.vy        [lateral velocity — Coriolis coupling]
@@ -366,9 +431,10 @@ class Vehicle:
           δf    = self.state.delta_f  [front steering angle — exact sin(δf)]
 
         Ra    = 0.5*ρ*Cd*Af*vx*|vx|              [Fernández Eq. 3.6, Belousov Eq. 3.5]
+        Rg    = m·g·sin(θ_road)                   [Belousov Eq. 3.11a grade resistance]
         Rr    = f_vx * fr * m * g * sign(vx)     [Fernández Eq. 3.7]
         f_vx  = (tanh(10*|vx| - 8) + 1) / 2     [Fernández Eq. 4.4]
-        Fyf   = Caf * α_f  (linear tire model, cross-coupling only)
+        Fyf   = Rajamani Eq. 13.45 nonlinear parabolic tire model
         α_f   = f_vx * (δf - arctan2(vy + lf·Ωz, max(|vx|,0.1)))  [Rajamani Eq. 2.27]
         m_eff = m + wheel_inertia / r²            [Belousov Eq. 3.8]
         """
@@ -384,22 +450,25 @@ class Vehicle:
 
         # Aerodynamic drag — Fernández Eq. 3.6 / Belousov Eq. 3.5 (direction-correct)
         Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
-
+        # Grade resistance — Belousov Eq. 3.11a
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
         # Rolling resistance — Fernández Eq. 3.7 + 4.4
         vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
         Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
 
-        # Front lateral tire force — slip angle per Rajamani Eq. 2.27, linear Caf
+        # Front lateral tire force — slip angle per Rajamani Eq. 2.27, nonlinear Rajamani 13.45
         # (cross-coupling: Fyf·sin(δf) term in Belousov Eq. 3.11a)
         vx_safe = max(abs(vx), 0.1)
         alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
-        Fyf = p.Caf * alpha_f
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
 
         # Exact steering geometry — no small-angle approximation
+        cos_df = np.cos(delta_f)
         sin_df = np.sin(delta_f)
 
-        # Belousov Eq. 3.11a — full form
-        vx_dot = vy * Omega_z + u_accel - (Fyf * sin_df + Ra + Rr) / self.m_eff
+        # Belousov Eq. 3.11a — full form (FWD: Fxr=0, so only Fxf·cos(δf) in drive term)
+        vx_dot = vy * Omega_z + (Fxf * cos_df - Fyf * sin_df - Ra - Rg - Rr) / self.m_eff
         return np.array([vx, vx_dot])
 
     def _update_continuous_jacobians(self, u_accel: float):
@@ -411,14 +480,20 @@ class Vehicle:
         so ZOH is always computed at the correct Nash timestep.
         """
         eps = 1e-5
-        f0 = self._longitudinal_derivatives(self.x_long, u_accel)
+        # Feedforward: convert Nash u_accel [m/s²] → Fxf [N] at current state
+        Fxf = self._compute_Fxf(u_accel)
+        f0 = self._longitudinal_derivatives(self.x_long, Fxf)
         n = 2
+        # A_c: ∂f/∂x — state Jacobian (Fxf held constant at nominal)
         A_c = np.zeros((n, n))
         for j in range(n):
             xp = self.x_long.copy()
             xp[j] += eps
-            A_c[:, j] = (self._longitudinal_derivatives(xp, u_accel) - f0) / eps
-        B_c = (self._longitudinal_derivatives(self.x_long, u_accel + eps) - f0).reshape(n, 1) / eps
+            A_c[:, j] = (self._longitudinal_derivatives(xp, Fxf) - f0) / eps
+        # B_c: ∂f/∂u_accel — perturb u_accel, recompute Fxf, take numerical derivative
+        # Chain rule: ∂f/∂u = (∂f/∂Fxf)·(∂Fxf/∂u) = (cos(δf)/m_eff)·(m_eff/cos(δf)) = 1 → B_c=[[0],[1]]
+        Fxf_p = self._compute_Fxf(u_accel + eps)
+        B_c = (self._longitudinal_derivatives(self.x_long, Fxf_p) - f0).reshape(n, 1) / eps
         self.A_c_current = A_c
         self.B_c_current = B_c
 
@@ -456,12 +531,15 @@ class Vehicle:
             self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration,
             self.params.max_deceleration, self.params.max_acceleration)
 
-        # RK4 propagation — step 6 in simulation loop
+        # Feedforward: convert u_accel [m/s²] → Fxf [N] (stored in self.state.Fxf)
+        Fxf = self._compute_Fxf(u_accel)
+
+        # RK4 propagation — step 6 in simulation loop (plant takes Fxf [N], not u_accel)
         f = self._longitudinal_derivatives
-        k1 = f(self.x_long, u_accel)
-        k2 = f(self.x_long + 0.5 * dt * k1, u_accel)
-        k3 = f(self.x_long + 0.5 * dt * k2, u_accel)
-        k4 = f(self.x_long + dt * k3,        u_accel)
+        k1 = f(self.x_long, Fxf)
+        k2 = f(self.x_long + 0.5 * dt * k1, Fxf)
+        k3 = f(self.x_long + 0.5 * dt * k2, Fxf)
+        k4 = f(self.x_long + dt * k3,        Fxf)
         self.x_long = self.x_long + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
         self.x_long[1] = np.clip(self.x_long[1], 0.0, self.params.max_velocity)
 

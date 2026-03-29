@@ -196,9 +196,12 @@ class Vehicle:
         Fyr = self._tire_force(alpha_r, p.Cr, p.mu, Fz_r)
 
         # Equations of motion (Belousov Eq. 3.11b/c — full steering geometry)
+        # Fxf·sin(δf) terms: longitudinal front axle force projected onto lateral/yaw axes
+        Fxf = self.state.Fxf   # set by longitudinal module; zero if not coupled
         cos_d = np.cos(delta)
-        vy_dot = (Fyf * cos_d + Fyr) / p.mass - vx * psi_dot
-        psi_ddot = (p.lf * Fyf * cos_d - p.lr * Fyr) / p.Iz
+        sin_d = np.sin(delta)
+        vy_dot = (Fyf * cos_d + Fyr + Fxf * sin_d) / p.mass - vx * psi_dot
+        psi_ddot = (p.lf * Fyf * cos_d - p.lr * Fyr + p.lf * Fxf * sin_d) / p.Iz
 
         # Exact body→road kinematic transformation (no small-angle assumption):
         # ẏ = vx·sin(ψ) + vy·cos(ψ)

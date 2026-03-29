@@ -39,6 +39,10 @@ class VehicleParameters:
     Caf: float = 15000.0  # Front tire cornering stiffness N/rad
     Car: float = 18000.0  # Rear tire cornering stiffness N/rad
 
+    # Longitudinal tire stiffness (FWD — front axle, two tires combined)
+    # Used in Rajamani Eq. 13.45 parabolic model: Fxf = Cx·κ for small slip κ
+    Cx: float = 80000.0   # [N] front axle longitudinal stiffness
+
     # Moment of inertia
     Iz: float = 2500.0  # kg⋅m^2
 
@@ -62,6 +66,7 @@ class VehicleParameters:
     # Environment / road constants (used by both vehicle dynamics and lower-level controller)
     air_density: float = 1.225          # [kg/m³] ISA sea-level standard atmosphere
     rolling_resistance_coeff: float = 0.012  # [-] typical tarmac road/tire constant
+    road_grade: float = 0.0             # [rad] road grade angle θ (positive = uphill); Rg = m·g·sin(θ)
 
 
 class VehicleState:
@@ -87,6 +92,7 @@ class VehicleState:
         self.wheel_torques = [0.0, 0.0, 0.0, 0.0]  # wheel torques (Nm) [FL, FR, RL, RR]
         self.delta_f = 0.0  # steering input (rad)
         self.delta_r = 0.0  # rear steering input (rad) for 4WS
+        self.Fxf = 0.0      # front axle longitudinal force [N] (FWD: Fxr=0 → Fxf = F_drive/cos(δf))
 __all__ = [
     'VehicleParameters',
     'VehicleState'

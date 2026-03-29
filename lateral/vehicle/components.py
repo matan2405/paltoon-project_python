@@ -67,6 +67,7 @@ class VehicleState:
         self.x = 0.0          # body-frame longitudinal distance
         self.vx = 0.0         # longitudinal velocity component (vx ≠ v_total = √(vx²+vy²))
         self.delta = 0.0
+        self.Fxf = 0.0      # longitudinal front axle force [N] (from longitudinal module, for Fxf·sin(δf) coupling)
         self.ay = 0.0
         self.beta = 0.0
         # World (inertial) frame coordinates

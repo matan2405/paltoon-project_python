@@ -4,24 +4,27 @@ Lower-Level Controller for Hierarchical Vehicle Control Architecture.
 Architecture (Rajamani Ch.6, Belousov et al.):
 ===============================================
     Upper Controller (Nash / Rajamani / IDM)
-        │   a_desired  (double integrator planning model)
+        │   u_accel [m/s²]  (double integrator planning model)
+        ▼
+    vehicle._compute_Fxf(u_accel)  [feedforward cancellation]
+        │   Fxf [N]  FWD: Fxr=0 → Fxf = (m_eff·u_accel + Ra+Rg+Rr + Fyf·sin(δf)) / cos(δf)
         ▼
     ┌─────────────────────────────┐
     │   Lower-Level Controller    │
     │  ┌───────────────────────┐  │
-    │  │ Feedforward:          │  │
-    │  │  F = m·a_des          │  │
-    │  │    + F_drag(v)        │  │
-    │  │    + F_roll           │  │
+    │  │ compute_control(Fxf): │  │
+    │  │  direct_force = Fxf   │  │
+    │  │  display throttle/    │  │
+    │  │  brake normalized     │  │
     │  └───────────────────────┘  │
     │  ┌───────────────────────┐  │
     │  │ Engine / Transmission │  │
     │  │ (for RPM/gear display)│  │
     │  └───────────────────────┘  │
     └─────────────────────────────┘
-        │   throttle, brake (display), direct_force
+        │   throttle, brake (display), direct_force = Fxf
         ▼
-    Complex Vehicle Dynamics (aero, tires, Newton's 2nd law)
+    Complex Vehicle Dynamics (Belousov 3.11a: Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr)
         │   a_actual, v, x
         ▼
     Updated Vehicle State
@@ -373,9 +376,11 @@ class LowerLevelController:
         rolling_resistance = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
 
         if self.vehicle.autonomous_mode:
-            # Direct force control: vehicle.direct_force already accounts for
-            # aero + rolling. Subtract them to get net Newton force.
-            total_force = self.vehicle.direct_force - F_aero - rolling_resistance
+            # direct_force = Fxf (front axle force, FWD: Fxr=0), from _compute_Fxf.
+            # Net longitudinal force: F_net = Fxf·cos(δf) - Ra - Rg - Rr (Belousov 3.11a).
+            # For platooning (δf ≈ 0): cos(δf) ≈ 1, so F_net ≈ Fxf - Ra - Rg - Rr ≈ m_eff·u_accel.
+            Rg = self.params.mass * self.params.gravity * np.sin(self.params.road_grade)
+            total_force = self.vehicle.direct_force - F_aero - rolling_resistance - Rg
             return total_force, 0.0
 
         # Human-driven: engine torque map + brake
@@ -422,40 +427,36 @@ class LowerLevelController:
     # HIERARCHICAL CONTROL LAW
     # =========================================================================
 
-    def compute_control(self, a_desired: float) -> None:
-        """Convert desired acceleration to direct_force and display throttle/brake.
+    def compute_control(self, Fxf: float) -> None:
+        """Accept front axle drive force (FWD: Fxr=0) and set display actuators.
 
-        Pure feedforward law (no PI feedback):
-            F_required = m·a_desired + F_aero + F_roll
+        Fxf [N] = front axle longitudinal force — computed upstream by _compute_Fxf.
+        Feedforward cancellation (Ra + Rg + Rr + Fyf·sin(δf)) is already embedded
+        in Fxf, so direct_force = Fxf is passed directly to calculate_forces().
 
         The direct_force is set on the vehicle and consumed by
         calculate_forces() when autonomous_mode=True.
 
         Display throttle/brake are normalized so that:
-        - a_desired = 0 (cruise)    → throttle ≈ 15%  (overcoming drag)
-        - a_desired at drag coast   → throttle = 0, brake = 0
-        - a_desired strongly negative → brake > 0
+        - u_accel = 0 (cruise)      → Fxf = (Ra+Rg+Rr)/cos(δf) > 0 → throttle ≈ 15% (overcoming drag)
+        - u_accel at free coast     → Fxf ≈ 0 → throttle = 0, brake = 0
+        - u_accel strongly negative → Fxf < 0                       → brake > 0
 
         Engine RPM and transmission still update (via update_dynamics_complex)
         for realistic display — but they do NOT affect the actual force.
         """
-        v = self.vehicle.state.vx
-        F_aero = (0.5 * self.air_density * self.params.drag_coefficient *
-                  self.params.frontal_area * v * abs(v))
-        f_v = (np.tanh(10 * abs(v) - 8) + 1) / 2  # Fernández Eq. 4.4, pp. 36-37
-        F_roll = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
-        self.vehicle.direct_force = self.params.mass * a_desired + F_aero + F_roll
+        # Fxf carries feedforward-cancelled front axle force through to calculate_forces()
+        self.vehicle.direct_force = Fxf
 
-        F_req_max = self.params.mass * self.params.max_acceleration + F_aero + F_roll
-        F_req_min = -(self.params.mass * abs(self.params.max_deceleration) + F_aero + F_roll)
-        if self.vehicle.direct_force >= 0:
-            self.actual_throttle = np.clip(
-                self.vehicle.direct_force / max(F_req_max, 1.0), 0.0, 1.0)
+        # Normalize for display (no physics role — feedforward already done upstream)
+        F_req_max = self.params.mass * self.params.max_acceleration
+        F_req_min = -(self.params.mass * abs(self.params.max_deceleration))
+        if Fxf >= 0:
+            self.actual_throttle = np.clip(Fxf / max(F_req_max, 1.0), 0.0, 1.0)
             self.actual_brake = 0.0
         else:
             self.actual_throttle = 0.0
-            self.actual_brake = np.clip(
-                abs(self.vehicle.direct_force) / max(abs(F_req_min), 1.0), 0.0, 1.0)
+            self.actual_brake = np.clip(abs(Fxf) / max(abs(F_req_min), 1.0), 0.0, 1.0)
         self.throttle_input = self.actual_throttle
         self.brake_input = self.actual_brake
         self.vehicle.steering_input = 0.0

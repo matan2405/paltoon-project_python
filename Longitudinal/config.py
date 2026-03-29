@@ -79,6 +79,9 @@ DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time [s]
 from vehicle.components import VehicleParameters
 _vp = VehicleParameters()
 
+# Road grade — Belousov Eq. 3.11a grade resistance: Rg = m·g·sin(θ)
+ROAD_GRADE = _vp.road_grade   # [rad] positive = uphill
+
 # Vehicle colors for plotting
 VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
 GAP_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
@@ -397,7 +400,7 @@ __all__ = [
     # System
     'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT',
     'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME',
-    'VEHICLE_COLORS', 'GAP_COLORS','LANE_WIDTH',
+    'VEHICLE_COLORS', 'GAP_COLORS', 'LANE_WIDTH', 'ROAD_GRADE',
 
     # Platoon
     'PLATOON_TARGET_VELOCITY', 'PLATOON_MAX_VELOCITY', 'PLATOON_MAX_ACCELERATION',
