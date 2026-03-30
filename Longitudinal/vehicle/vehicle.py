@@ -369,15 +369,19 @@ class Vehicle:
         return float(np.sign(S)) * mu * Fz
 
     def _compute_Fxf(self, u_accel: float) -> float:
-        """Feedforward cancellation: Nash u_accel [m/s²] → Fxf [N] (front axle drive force).
+        """Feedforward cancellation + parabolic saturation: Nash u_accel [m/s²] → Fxf [N].
 
-        FWD car: Fxr = 0, so the full drive comes from the front axle.
-        Isolating Fxf from Belousov Eq. 3.11a (with v̇x - vy·Ωz = u_accel):
-            m_eff·u_accel = Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr
-            Fxf = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)) / cos(δf)
+        Three-step process:
+          1. Feedforward: isolate Fxf_desired from Belousov Eq. 3.11a (FWD, Fxr=0):
+               Fxf_desired = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)) / cos(δf)
+          2. Longitudinal slip ratio (linear approximation — Rajamani Eq. 13.45):
+               κ = Fxf_desired / Cx
+          3. Parabolic saturation (same Rajamani Eq. 13.45 model as lateral, S←κ):
+               Fxf = _tire_force(arctan(κ), Cx, μ, Fz_f)
+             Recovers Fxf ≈ Cx·κ = Fxf_desired for small slip; saturates at μ·Fz_f.
 
-        Fyf computed with Rajamani Eq. 13.45 nonlinear parabolic tire model.
-        Result stored in self.state.Fxf for lateral coupling (Fxf·sin(δf) terms).
+        Fyf (lateral cross-coupling) also uses Rajamani Eq. 13.45.
+        Result stored in self.state.Fxf for lateral coupling (Fxf·sin(δf) terms in Eq. 3.11b/c).
         """
         vx = self.state.vx
         p = self.params
@@ -404,9 +408,17 @@ class Vehicle:
         # Nonlinear front lateral tire force — Rajamani Eq. 13.45
         Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
 
-        # Isolate Fxf: FWD → Fxr=0 → Fxf·cos(δf) = m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)
+        # Step 1 — Feedforward: isolate desired Fxf from Belousov Eq. 3.11a
         cos_df = np.cos(delta_f)
-        Fxf = (self.m_eff * u_accel + Ra + Rg + Rr + Fyf * np.sin(delta_f)) / max(abs(cos_df), 1e-6)
+        Fxf_desired = (self.m_eff * u_accel + Ra + Rg + Rr + Fyf * np.sin(delta_f)) / max(abs(cos_df), 1e-6)
+
+        # Step 2 — Longitudinal slip ratio κ (Rajamani Ch. 13: κ ≈ Fxf / Cx for small slip)
+        kappa = Fxf_desired / p.Cx
+
+        # Step 3 — Parabolic saturation (Rajamani Eq. 13.45, Rajamani Table 13.4 params):
+        #   _tire_force uses S = tan(alpha), so passing arctan(κ) maps S ← κ correctly.
+        #   Saturates at μ·Fz_f; recovers Fxf ≈ Cx·κ = Fxf_desired for small κ.
+        Fxf = self._tire_force(np.arctan(kappa), p.Cx, p.tire_friction_coeff, Fz_f)
 
         # Store for lateral coupling (Fxf·sin(δf) in Belousov Eq. 3.11b/c)
         self.state.Fxf = Fxf
@@ -602,6 +614,67 @@ class Vehicle:
                 (not self.use_kinematic_model and not self.use_state_space_model)):
             return self.params.max_acceleration
         return self.lower_level_controller.get_dynamic_max_acceleration()
+
+    def get_u_bounds(self) -> Tuple[float, float]:
+        """Compute dynamic u_accel bounds from physics at the current operating point.
+
+        Inverts the feedforward law to find the u_accel range that the plant
+        can actually deliver, accounting for:
+          - Engine torque at current RPM and gear (including gear-shift torque drop)
+          - Longitudinal tire saturation at μ·Fz_f (from _compute_Fxf parabolic model)
+          - Braking capacity: μ·m·g (full tire friction)
+          - Resistive forces (Ra, Rg, Rr, Fyf·sin(δf)) at current state
+
+        Inverse feedforward (Belousov Eq. 3.11a, FWD: Fxr=0):
+            Fxf·cos(δf) = m_eff·u + Ra + Rg + Rr + Fyf·sin(δf)
+            u = (Fxf·cos(δf) - Ra - Rg - Rr - Fyf·sin(δf)) / m_eff
+
+        Returns
+        -------
+        (u_min, u_max) : float
+            Clipped to config hard limits [NASH_U1_MIN, NASH_U1_MAX].
+        """
+        p = self.params
+        vx = self.state.vx
+        vy = self.state.vy
+        Omega_z = self.state.psi_dot
+        delta_f = self.state.delta_f
+
+        # Resistive forces at current state (same as _compute_Fxf)
+        f_vx = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
+        Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
+        vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
+        Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
+        F_resist = Ra + Rg + Rr
+
+        # Front lateral force coupling term
+        vx_safe = max(abs(vx), 0.1)
+        alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
+        cos_df = np.cos(delta_f)
+        lateral_coupling = Fyf * np.sin(delta_f)
+
+        # Fxf_max: minimum of engine force (with gear-shift torque drop) and tire limit
+        llc = self.lower_level_controller
+        engine_force = llc.compute_max_engine_force() * llc.transmission.get_torque_multiplier()
+        tire_max = p.tire_friction_coeff * Fz_f   # parabolic saturation ceiling
+        Fxf_max = min(engine_force, tire_max)
+
+        # Fxf_min: full braking (both axles — compute_max_brake_force uses total μ·m·g)
+        Fxf_min = -llc.compute_max_brake_force()
+
+        # Invert feedforward: u = (Fxf·cos(δf) - F_resist - Fyf·sin(δf)) / m_eff
+        cos_df_safe = max(abs(cos_df), 1e-6) * np.sign(cos_df) if abs(cos_df) > 1e-6 else 1.0
+        u_max = (Fxf_max * cos_df_safe - F_resist - lateral_coupling) / self.m_eff
+        u_min = (Fxf_min * cos_df_safe - F_resist - lateral_coupling) / self.m_eff
+
+        # Clip to config hard limits (safety backstop)
+        from config import NASH_U1_MIN, NASH_U1_MAX
+        u_max = float(np.clip(u_max, NASH_U1_MIN, NASH_U1_MAX))
+        u_min = float(np.clip(u_min, NASH_U1_MIN, NASH_U1_MAX))
+        return u_min, u_max
 
     def get_state_vector(self):
         """Return current state as [x, vx]ᵀ."""
