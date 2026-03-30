@@ -187,13 +187,15 @@ class Vehicle:
         alpha_f = f_vx * (delta - np.arctan2(vy + p.lf * psi_dot, vx))
         alpha_r = f_vx * np.arctan2(p.lr * psi_dot - vy, vx)
 
-        # Static normal loads (50/50 CG assumed)
-        Fz_f = p.mass * p.g * p.lr / (p.lf + p.lr)
-        Fz_r = p.mass * p.g * p.lf / (p.lf + p.lr)
+        # Per-wheel normal loads (50/50 CG assumed, divided by 2 for single tire)
+        # Cf, Cr are per-wheel stiffness (N/rad); _tire_force returns one-tire force;
+        # multiply by 2 to get total axle force — consistent with linear model (2*Cf, 2*Cr).
+        Fz_f = p.mass * p.g * p.lr / (p.lf + p.lr) / 2
+        Fz_r = p.mass * p.g * p.lf / (p.lf + p.lr) / 2
 
-        # Nonlinear tire forces (Rajamani Eq. 13.45)
-        Fyf = self._tire_force(alpha_f, p.Cf, p.mu, Fz_f)
-        Fyr = self._tire_force(alpha_r, p.Cr, p.mu, Fz_r)
+        # Nonlinear tire forces (Rajamani Eq. 13.45) — total axle (both tires)
+        Fyf = 2 * self._tire_force(alpha_f, p.Cf, p.mu, Fz_f)
+        Fyr = 2 * self._tire_force(alpha_r, p.Cr, p.mu, Fz_r)
 
         # Equations of motion (Belousov Eq. 3.11b/c — full steering geometry)
         # Fxf·sin(δf) terms: longitudinal front axle force projected onto lateral/yaw axes

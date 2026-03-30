@@ -32,8 +32,8 @@ class VehicleParameters:
     lr: float = 1.2525  # distance from CG to rear axle
     
     # Tire cornering stiffness
-    Cf: float = 15000.0  # Front axle cornering stiffness N/rad
-    Cr: float = 18000.0  # Rear axle cornering stiffness N/rad
+    Cf: float = 15000.0  # Front wheel cornering stiffness N/rad (per wheel; axle = 2*Cf)
+    Cr: float = 18000.0  # Rear wheel cornering stiffness N/rad (per wheel; axle = 2*Cr)
     
     # Moment of inertia
     Iz: float = 2500.0  # kg·m² (estimated)
