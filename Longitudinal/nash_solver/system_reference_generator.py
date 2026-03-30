@@ -42,6 +42,7 @@ from config import (
     REFGEN_DETECTION_RANGE, REFGEN_TIME_HEADWAY, REFGEN_STANDSTILL_DISTANCE,
     REFGEN_A_COMFORT, REFGEN_K_V, REFGEN_K1, REFGEN_K2,
     REFGEN_MAX_ACCEL, REFGEN_MAX_DECEL, REFGEN_CATCHUP_FACTOR,
+    REFGEN_FREE_ROAD_DELTA,
 )
 from control.platoon_control import free_road_acc, rajamani
 from vehicle.components import VehicleParameters
@@ -274,7 +275,8 @@ class SystemReferenceGenerator:
                     v=sim_vehicle.state.vx,
                     t=0,
                     v_target=target_v,
-                    a_max=self.MAX_ACCEL
+                    a_max=self.MAX_ACCEL,
+                    delta=REFGEN_FREE_ROAD_DELTA,
                 )
                 
             else:

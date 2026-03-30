@@ -115,12 +115,12 @@ FREE_ROAD_DELTA = 4
 # =============================================================================
 # Cost weights - Output tracking
 NASH_Q_POS = 2500.0               # Weight on position tracking error
-NASH_Q_VEL = 2000.0               # Weight on velocity tracking error
+NASH_Q_VEL = 1500.0               # Weight on velocity tracking error
 
 # Control effort weights (R) - BASE VALUES
 # S = R for cooperation (Nash equilibrium insight)
-NASH_R1 = 50000.0                  # System's cost on its own control effort
-NASH_R2 = 50000.0                  # Human's cost on its own control effort
+NASH_R1 = 30000.0*0.25                  # System's cost on its own control effort
+NASH_R2 = 50000.0*0.25                  # Human's cost on its own control effort
 
 # Cross-coupling weights (S) - THE KEY FOR COUPLED NASH GAME
 NASH_S1 = 10000.0                   # System penalty on human control effort
@@ -139,7 +139,7 @@ NASH_DU2_MAX = 2.0                # Human max jerk
 # State constraints
 NASH_V_MIN = 0.0                  # Min velocity [m/s]
 NASH_V_MAX = 50.0                 # Max velocity [m/s]
-NASH_GAP_MIN = 5.0                # Min safe gap [m]
+NASH_GAP_MIN = 7.0                # Min safe gap [m]
 
 # Lambda levels for pre-computation (authority ratio discrete values)
 # Covers range from Li et al. lookup table: λ = 0.014 (safe) to λ = 106.6 (emergency)
@@ -206,7 +206,7 @@ NASH_DRIVER_PARAMS = {
 # Source: longitudinal_safety_field.py - EllipseLongitudinalParams
 # =============================================================================
 # --- Hard Constraints ---
-SAFETY_MIN_SAFE_DISTANCE = 5.0          # [m]
+SAFETY_MIN_SAFE_DISTANCE = 7.0          # [m]
 SAFETY_EMERGENCY_BRAKE_DISTANCE = 8.0   # [m]
 SAFETY_MAX_DECEL = abs(_vp.max_deceleration)   # [m/s²] (from vehicle specs)
 
@@ -242,7 +242,7 @@ SAFETY_MIN_ATTRACTIVE_FORCE = -500.0
 # --- Follower Weights ---
 SAFETY_LEADER_WEIGHT = 1.0
 SAFETY_FOLLOWER_WEIGHT = 0.5
-SAFETY_JOINING_FOLLOWER_WEIGHT = 0.2
+SAFETY_JOINING_FOLLOWER_WEIGHT = 0.5  # increased from 0.2 to push human away from approaching P3
 SAFETY_DECELERATING_FOLLOWER_WEIGHT = 0.4
 
 # --- Platoon Factors ---
@@ -345,7 +345,7 @@ REFGEN_DETECTION_RANGE = 150.0      # [m]
 
 # CTG policy (Rajamani Eq. 6.5)
 REFGEN_TIME_HEADWAY = 1.5          # [s]
-REFGEN_STANDSTILL_DISTANCE = 5.0   # [m]
+REFGEN_STANDSTILL_DISTANCE = 2.0   # [m] balanced: 0 overshoots below, 5 overshoots above desired gap
 
 # Comfortable deceleration (Rajamani Section 6.7.2, typical 0.1g-0.2g)
 REFGEN_A_COMFORT = 1.5             # [m/s²] (gentler than vehicle comfortable_deceleration for smooth refs)
@@ -363,6 +363,11 @@ REFGEN_MAX_DECEL = _vp.max_deceleration     # [m/s²] (from vehicle specs)
 
 # Cruise catch-up factor
 REFGEN_CATCHUP_FACTOR = 1.15
+
+# Free-road IDM exponent for RefGen CRUISE mode
+# Higher delta → stronger push near target speed (join_before steady-state velocity)
+# delta=4: a(99.5%→100%) = 0.05 m/s²  | delta=6: 0.074 m/s²  | delta=8: 0.098 m/s²
+REFGEN_FREE_ROAD_DELTA = 6
 
 # CTG blending zone (gap error threshold for CTG/parabola blend)
 REFGEN_CTG_BLEND_ZONE = 5.0        # [m] - blend in CTG for |gap_error| < 5m
@@ -400,7 +405,7 @@ __all__ = [
     # System
     'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT',
     'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME',
-    'VEHICLE_COLORS', 'GAP_COLORS', 'LANE_WIDTH', 'ROAD_GRADE',
+    'VEHICLE_COLORS', 'GAP_COLORS','LANE_WIDTH',
 
     # Platoon
     'PLATOON_TARGET_VELOCITY', 'PLATOON_MAX_VELOCITY', 'PLATOON_MAX_ACCELERATION',
@@ -451,6 +456,7 @@ __all__ = [
     'REFGEN_DETECTION_RANGE', 'REFGEN_TIME_HEADWAY', 'REFGEN_STANDSTILL_DISTANCE',
     'REFGEN_A_COMFORT', 'REFGEN_K_V', 'REFGEN_K1', 'REFGEN_K2',
     'REFGEN_MAX_ACCEL', 'REFGEN_MAX_DECEL', 'REFGEN_CATCHUP_FACTOR',
+    'REFGEN_FREE_ROAD_DELTA',
     'REFGEN_CTG_BLEND_ZONE', 'REFGEN_CTG_BLEND_POWER', 'REFGEN_LEADER_FF_GAIN',
 
     # Human driver

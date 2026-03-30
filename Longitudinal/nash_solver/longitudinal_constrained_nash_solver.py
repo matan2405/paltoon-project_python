@@ -278,15 +278,25 @@ class ConstrainedLongitudinalNashSolver:
         self.nz = 2  # outputs
 
     def update_linearization(self, dt=None):
-        """Re-linearize at vehicle's current operating point.
+        """Re-linearize at vehicle's current operating point and refresh QP bounds.
 
         Called at each Nash control step (step 3 in simulation loop).
-        Only rebuilds OSQP problems when A or B has changed significantly —
-        at steady cruising the matrices are nearly constant so rebuilding is skipped.
+        Two independent updates:
+          1. A/B matrices: only rebuilds OSQP problems when significantly changed
+             (at steady cruising matrices are nearly constant — skip rebuild).
+          2. u_bounds: always refreshed via CVXPY Parameters (no rebuild needed)
+             to reflect engine torque, gear-shift drop, and tire saturation.
         """
         if self.vehicle is None:
             return False
         dt = dt or self.params.dt
+
+        # Update dynamic u_accel bounds — always, even if A/B unchanged
+        if hasattr(self.vehicle, 'get_u_bounds'):
+            u_min, u_max = self.vehicle.get_u_bounds()
+            self.prob1['u1_min_param'].value = u_min
+            self.prob1['u1_max_param'].value = u_max
+
         A_new, B_new, C_new = self.vehicle.get_state_space_matrices(dt)
         if (self.A is not None
                 and np.allclose(A_new, self.A, rtol=1e-4, atol=1e-6)
@@ -383,8 +393,13 @@ class ConstrainedLongitudinalNashSolver:
         q1_param = cp.Parameter(Nu, name='q1')
         u1_prev_param = cp.Parameter(name='u1_prev')
 
+        # Dynamic bounds — updated each Nash step via update_linearization()
+        # Using CVXPY Parameters keeps the problem DPP-compliant (no rebuild needed)
+        u1_min_param = cp.Parameter(name='u1_min', value=p.u1_min)
+        u1_max_param = cp.Parameter(name='u1_max', value=p.u1_max)
+
         cost1 = cp.quad_form(u1_var, P1) + q1_param @ u1_var
-        c1 = [u1_var >= p.u1_min, u1_var <= p.u1_max,
+        c1 = [u1_var >= u1_min_param, u1_var <= u1_max_param,
               u1_var[0] - u1_prev_param <= du1_lim,
               u1_var[0] - u1_prev_param >= -du1_lim]
         if Nu > 1:
@@ -399,6 +414,8 @@ class ConstrainedLongitudinalNashSolver:
             'u1_var': u1_var,
             'q1_param': q1_param,
             'u1_prev_param': u1_prev_param,
+            'u1_min_param': u1_min_param,
+            'u1_max_param': u1_max_param,
             'P1': P1,
             'warm_start': np.zeros(Nu),
         }
@@ -609,9 +626,13 @@ class ConstrainedLongitudinalNashSolver:
 
         self.constraint_stats['total_solves'] += 1
 
-        if abs(u1_opt - p.u1_min) < tol:
+        # Use current dynamic bounds (CVXPY Parameter values) for activity check
+        u1_min_eff = float(self.prob1['u1_min_param'].value)
+        u1_max_eff = float(self.prob1['u1_max_param'].value)
+
+        if abs(u1_opt - u1_min_eff) < tol:
             self.constraint_stats['u1_min_active'] += 1
-        if abs(u1_opt - p.u1_max) < tol:
+        if abs(u1_opt - u1_max_eff) < tol:
             self.constraint_stats['u1_max_active'] += 1
         if abs(u2_opt - p.u2_min) < tol:
             self.constraint_stats['u2_min_active'] += 1
