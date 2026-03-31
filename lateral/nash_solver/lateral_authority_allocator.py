@@ -26,6 +26,7 @@ from config import (
     AUTHORITY_LAMBDA_MIN, AUTHORITY_LAMBDA_MAX,
     AUTHORITY_FORCE_MIDPOINT, AUTHORITY_K_STEEPNESS,
     AUTHORITY_ALPHA_BASE, AUTHORITY_ALPHA_FAST,
+    AUTHORITY_ALPHA_FAST_THRESHOLD, AUTHORITY_ALPHA_BASE_THRESHOLD,
     AUTHORITY_SIGMOID_M1, AUTHORITY_SIGMOID_M2,
     LANE_WIDTH,
 )
@@ -108,10 +109,12 @@ class LateralAuthorityAllocator:
         target_lambda = max(lambda_safety, lambda_lateral)
 
         # --- 4. Adaptive Smoothing ---
-        if abs_y_error > 1.5:
+        if abs_y_error > AUTHORITY_ALPHA_FAST_THRESHOLD:
             alpha = self.alpha_fast
-        elif abs_y_error > 0.5:
-            alpha = self.alpha_base + (self.alpha_fast - self.alpha_base) * (abs_y_error - 0.5) / 1.0
+        elif abs_y_error > AUTHORITY_ALPHA_BASE_THRESHOLD:
+            blend = (abs_y_error - AUTHORITY_ALPHA_BASE_THRESHOLD) / (
+                AUTHORITY_ALPHA_FAST_THRESHOLD - AUTHORITY_ALPHA_BASE_THRESHOLD)
+            alpha = self.alpha_base + (self.alpha_fast - self.alpha_base) * blend
         else:
             alpha = self.alpha_base
 

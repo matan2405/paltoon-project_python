@@ -341,12 +341,19 @@ class LowerLevelController:
     # =========================================================================
 
     def compute_resistive_forces(self, velocity: float) -> float:
-        """Compute total aerodynamic drag + rolling resistance [N]."""
+        """Compute total aerodynamic drag + rolling resistance + grade resistance [N].
+
+        Includes all three terms from Belousov Eq. 3.11a / Fernández Eq. 3.6-3.7:
+          Ra = 0.5·ρ·Cd·Af·v·|v|                    [aero drag]
+          Rr = f_v · fr · m · g                      [rolling resistance, Fernández Eq. 4.4]
+          Rg = m · g · sin(θ_road)                   [grade resistance]
+        """
         F_aero = (0.5 * self.air_density * self.params.drag_coefficient
                   * self.params.frontal_area * velocity * abs(velocity))
         f_v = (np.tanh(10 * abs(velocity) - 8) + 1) / 2  # Fernández Eq. 4.4, pp. 36-37
         F_rolling = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
-        return F_aero + F_rolling
+        F_grade = self.params.mass * self.params.gravity * np.sin(self.params.road_grade)
+        return F_aero + F_rolling + F_grade
 
     def compute_max_engine_force(self) -> float:
         """Maximum available engine drive force at current RPM [N]."""
@@ -485,7 +492,10 @@ class LowerLevelController:
         steering_angle = self.vehicle.steering_input * self.params.max_steering_angle
         state = self.vehicle.state
 
-        state.ax = Fx / self.params.mass
+        # Divide by m_eff (= m + Iw/r²) to match the feedforward law in _compute_Fxf,
+        # which computes Fxf = (m_eff·u_accel + resistances)/cos(δf).
+        # Using m here would give ax = (m_eff/m)·u_accel ≈ 1.011·u_accel (1.1% error).
+        state.ax = Fx / self.vehicle.m_eff
 
         if abs(state.vx) > 0.1:
             beta = np.arctan(self.params.lr * np.tan(steering_angle) / self.params.wheelbase)

@@ -83,7 +83,7 @@ class PlatoonManager:
         
         # Check if leader has Nash acceleration override
         # if hasattr(Car_1, 'nash_acceleration') and Car_1.nash_acceleration is not None:
-        if not is_prediction_mode  and not Car_1.nash_acceleration is None:
+        if not is_prediction_mode and Car_1.nash_acceleration is not None:
             lead_acc = Car_1.nash_acceleration
             Car_1.nash_acceleration = None  # Reset for next iteration
             new_velocity_leader = Car_1.v + lead_acc * dt
@@ -128,7 +128,7 @@ class PlatoonManager:
             
             # Check if follower has Nash acceleration override
             # if hasattr(follower, 'nash_acceleration') and follower.nash_acceleration is not None:
-            if not is_prediction_mode  and not follower.nash_acceleration is None:
+            if not is_prediction_mode and follower.nash_acceleration is not None:
                 a_des = follower.nash_acceleration
                 follower.nash_acceleration = None  # Reset for next iteration
                 # Calculate desired gap for history (even when using Nash)

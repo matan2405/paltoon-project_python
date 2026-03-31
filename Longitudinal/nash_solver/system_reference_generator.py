@@ -111,7 +111,7 @@ class SystemReferenceGenerator:
         
         print(f"🚀 System Reference Generator (RAJAMANI Ch.6.7)")
         print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
-        print(f"   🎯 CTG: h={self.h}s, d0={self.d0}m")
+        print(f"   🎯 CTG: h={self.h}s, d0=leader.L (dynamic)")
         print(f"   📐 Comfort decel: a_comfort={self.a_comfort} m/s²")
         print(f"   📈 Gains: K_v={self.K_v}, K1={self.K1}, K2={self.K2}")
 
@@ -213,11 +213,9 @@ class SystemReferenceGenerator:
         initial_R_dot = 0.0
         
         for i in range(self.Np):
-            # === Step 1: Update Leader/Follower Prediction ===
-            if sim_leader:
-                sim_leader.state.x += sim_leader.state.vx * self.dt
-            
-            # === Step 2: Calculate Distance and Gap Error ===
+            # === Step 1: Calculate Distance and Gap Error ===
+            # Leader is advanced at Step 6 (end of loop) so that at i=0 the gap
+            # is computed from CURRENT positions, not one step ahead.
             dist_to_leader = float('inf')
             gap_error = 0.0
             desired_gap = self.desired_gap  # Default desired gap
@@ -236,7 +234,7 @@ class SystemReferenceGenerator:
                 R_dot = sim_leader.state.vx - sim_vehicle.state.vx
                 
                 # R_desired = Desired gap (CTG policy, Rajamani Eq. 6.5)
-                R_desired = self.d0 + self.h * sim_vehicle.state.vx
+                R_desired = self.h * sim_vehicle.state.vx
                 
                 # Gap error: positive = too far behind, negative = too close
                 gap_error = R - R_desired
@@ -244,7 +242,11 @@ class SystemReferenceGenerator:
                 # Store for distance calculations
                 dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
                 self.desired_gap = R_desired + L  # Add leader length for front bumper distance
-                ttc= R / max(1e-5, R_dot) # Time-to-collision (Rajamani Eq. 6.4)
+                # Time-to-collision (Rajamani Eq. 6.4).
+                # R_dot < 0 → gap closing → TTC = R / |R_dot|.
+                # R_dot ≥ 0 → gap stable/increasing → no collision risk.
+                # Bug fix: max(1e-5, R_dot) returned ~∞ when R_dot < 0, defeating the check.
+                ttc = R / abs(R_dot) if R_dot < 0 else float('inf')
                 
                 if i == 0:
                     initial_gap_error = gap_error
@@ -318,7 +320,7 @@ class SystemReferenceGenerator:
                 gap_magnitude = abs(gap_error)
                 if gap_magnitude < 5.0:
                     # Near equilibrium - blend in CTG for fine control
-                    if gap_error < 0.02 * self.desired_gap:  
+                    if gap_error < 0.03 * self.desired_gap:  
                         mode = "CTG - Following"
                     blend = 1.0 - (gap_magnitude / 5.0)
                     blend = blend * blend  # Quadratic for smoother transition
@@ -333,13 +335,19 @@ class SystemReferenceGenerator:
             
             # === Step 4: Apply Comfort Constraints ===
             a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
-            
-            # === Step 5: Propagate state using vehicle's double integrator ===
+
+            # === Step 5: Advance leader first (front-to-back platoon convention) ===
+            # Gap was already computed from current states above (correct MPC initial condition).
+            # Leader is advanced before ego to follow front-to-back update order.
+            if sim_leader:
+                sim_leader.state.x += sim_leader.state.vx * self.dt
+
+            # === Step 6: Propagate ego state using vehicle's double integrator ===
             # update_dynamics() routes to update_dynamics_state_space() which
             # uses ZOH discretization: x[k+1] = A_d @ x[k] + B_d @ u[k]
             sim_vehicle.a_desired = a_ref
             sim_vehicle.update_dynamics(self.dt)
-            
+
             # Store prediction
             accel_sequence[i] = a_ref
             state_sequence[i, 0] = sim_vehicle.state.x

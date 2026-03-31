@@ -32,7 +32,12 @@ class VehicleParameters:
 
     # Tire parameters
     wheel_radius: float = 0.3175  # m (225/50 R17)
-    wheel_inertia: float = 1.5    # [kg·m²] total all wheels — Belousov Eq. 3.8: m_eff = m + Iw/r²
+    wheel_inertia: float = 1.5    # [kg·m²] equivalent drivetrain inertia referred to wheel output
+                                  # (Belousov Eq. 3.8: m_eff = m + Iw/r²). Represents lumped
+                                  # wheel+tire inertia; real per-wheel value ≈ 1.5–2.5 kg·m²,
+                                  # so 4-wheel total ≈ 6–10 kg·m². The lower value here may
+                                  # reflect only the rotating wheel mass, excluding drivetrain
+                                  # referred inertia. Adjust if more accurate data is available.
     tire_friction_coeff: float = 0.8
 
     # Cornering stiffness

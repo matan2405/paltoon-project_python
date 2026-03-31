@@ -506,6 +506,9 @@ class Vehicle:
         # Chain rule: ∂f/∂u = (∂f/∂Fxf)·(∂Fxf/∂u) = (cos(δf)/m_eff)·(m_eff/cos(δf)) = 1 → B_c=[[0],[1]]
         Fxf_p = self._compute_Fxf(u_accel + eps)
         B_c = (self._longitudinal_derivatives(self.x_long, Fxf_p) - f0).reshape(n, 1) / eps
+        # Restore nominal Fxf — _compute_Fxf(u+eps) above overwrites self.state.Fxf with the
+        # perturbed value; restore it so lateral coupling (Fxf·sin(δf)) sees the correct force.
+        self.state.Fxf = Fxf
         self.A_c_current = A_c
         self.B_c_current = B_c
 

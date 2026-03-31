@@ -253,6 +253,8 @@ AUTHORITY_K_STEEPNESS     = 0.025  # Sigmoid slope (sharper: human ~75% at rest 
 # Smoothing parameters
 AUTHORITY_ALPHA_BASE = 0.02        # Slow smoothing (stability)
 AUTHORITY_ALPHA_FAST = 0.08        # Fast response (large errors)
+AUTHORITY_ALPHA_FAST_THRESHOLD = 1.5  # |y_error| > this → use alpha_fast [m]
+AUTHORITY_ALPHA_BASE_THRESHOLD = 0.5  # |y_error| < this → use alpha_base [m]
 
 # Sigmoid parameters for LATERAL-OFFSET authority (Swain & Rath 2023, Eq. 15)
 # γ1(human) = 1/(1+exp(m1·(-l_n+m2))), γ2=1-γ1, λ_sigmoid=γ2/γ1
@@ -307,7 +309,7 @@ LANE_CHANGE_Y_DOT_THRESHOLD = 0.25   # |y_dot| < 0.25 m/s — nearly stopped lat
 PLATOON_TIME_GAP             = 1.5    # Desired time headway [s]
 PLATOON_STANDSTILL_DISTANCE  = 5.0   # Minimum standstill gap [m]
 PLATOON_TARGET_VELOCITY      = NOMINAL_VELOCITY  # [m/s]
-PLATOON_VEHICLE_LENGTH       = 4.5   # Vehicle length for gap calculation [m]
+PLATOON_VEHICLE_LENGTH       = 4.177  # Vehicle length for gap calculation [m] (Audi TT actual; matches VehicleParameters.length)
 PLATOON_MIN_MERGE_GAP        = 15.0  # Minimum lateral gap before merge allowed [m]
 
 # Longitudinal control gains (simple PD follower)
@@ -413,6 +415,7 @@ __all__ = [
     'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX',
     'AUTHORITY_FORCE_MIDPOINT', 'AUTHORITY_K_STEEPNESS',
     'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
+    'AUTHORITY_ALPHA_FAST_THRESHOLD', 'AUTHORITY_ALPHA_BASE_THRESHOLD',
     'AUTHORITY_SIGMOID_M1', 'AUTHORITY_SIGMOID_M2',
 
     # Reference generators

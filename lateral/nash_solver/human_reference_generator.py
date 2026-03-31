@@ -308,12 +308,10 @@ class HumanReferenceGenerator:
         Two additional fixes for the body-frame bicycle model (Eq. 2.31):
 
         1. CORRECT psi_ref SIGN:
-           In the body-frame model with centripetal term a24 ≈ -vx, the
-           steady-state relationship is ẏ_body ≈ -vx · ψ.  Therefore the
-           heading needed to achieve a desired lateral rate is:
-               ψ_ref = -ẏ_ref / vx    (note the MINUS sign)
-           The previous formula  ψ_ref = +ẏ_ref / vx  had the opposite sign,
-           causing the Nash solver to steer the vehicle AWAY from the target.
+           From A_body_c row-0: ẏ = vy + vx·ψ.  At vy ≈ 0 (pure heading motion):
+               ψ_ref = +ẏ_ref / vx    (POSITIVE sign)
+           This is consistent with the kinematic relationship ẏ_world ≈ vx·ψ for
+           small angles. The code uses the positive sign below.
 
         2. CLIP INITIAL VELOCITY to prevent polynomial overshoot:
            For a cubic polynomial with non-zero endpoint velocity, large y_dot_0
@@ -382,7 +380,7 @@ class HumanReferenceGenerator:
         self._lane_change_start_time = None
         self._lane_change_start_y = None
         self._current_time = 0.0
-        self.lane_change_duration = self._base_lane_change_durations.get(self.driver_type, 12.0)
+        self.lane_change_duration = self._base_lane_change_durations.get(self.driver_type, 4.5)
         
         # Reset settling state
         self._lane_keeping_entry_time = None
