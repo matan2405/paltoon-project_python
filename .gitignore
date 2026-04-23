@@ -18,6 +18,14 @@ fix_emojis.py
 **/presentation_crops/
 lateral/sim_output.txt
 
+# --- Claude AI Files ---
+.claude/
+.agents/
+CLAUDE.md
+**/CLAUDE.md
+*.skill
+skills-lock.json
+
 
 
 # --- Unity Specific (Relative to simulator_unity/) ---

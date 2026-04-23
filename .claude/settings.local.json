@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "mcp__claude_ai_PDF_Viewer__read_pdf_bytes",
-      "Bash(pip show numpy)",
-      "Bash(python -c \"import sys; print\\(sys.path\\)\")"
-    ]
-  }
-}
