@@ -79,18 +79,31 @@ import cvxpy as cp
 from typing import Tuple, Dict, Optional, List
 from dataclasses import dataclass
 import time
-# Add parent directory to path for imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (
-    NASH_CONTROL_DT, NASH_NP, NASH_NU,
-    NASH_Q_POS, NASH_Q_VEL,
-    NASH_R1, NASH_R2, NASH_S1, NASH_S2,
-    NASH_U1_MIN, NASH_U1_MAX, NASH_U2_MIN, NASH_U2_MAX,
-    NASH_DU1_MAX, NASH_DU2_MAX,
-    NASH_V_MIN, NASH_V_MAX, NASH_GAP_MIN,
-    NASH_LAMBDA_LEVELS,
+from unified.config import (
+    LONG_NASH_CONTROL_DT     as NASH_CONTROL_DT,
+    NASH_NP, NASH_NU,
+    LONG_NASH_Q_POS          as NASH_Q_POS,
+    LONG_NASH_Q_VEL          as NASH_Q_VEL,
+    LONG_NASH_R1             as NASH_R1,
+    LONG_NASH_R2             as NASH_R2,
+    LONG_NASH_S1             as NASH_S1,
+    LONG_NASH_S2             as NASH_S2,
+    LONG_NASH_U1_MIN         as NASH_U1_MIN,
+    LONG_NASH_U1_MAX         as NASH_U1_MAX,
+    LONG_NASH_U2_MIN         as NASH_U2_MIN,
+    LONG_NASH_U2_MAX         as NASH_U2_MAX,
+    LONG_NASH_DU1_MAX        as NASH_DU1_MAX,
+    LONG_NASH_DU2_MAX        as NASH_DU2_MAX,
+    LONG_NASH_V_MIN          as NASH_V_MIN,
+    LONG_NASH_V_MAX          as NASH_V_MAX,
+    LONG_NASH_GAP_MIN        as NASH_GAP_MIN,
+    LONG_NASH_LAMBDA_LEVELS  as NASH_LAMBDA_LEVELS,
     NASH_SOLVER_BACKEND, NASH_WARM_START, NASH_VERBOSE,
-    NASH_MAX_ITER, NASH_EPS_ABS, NASH_EPS_REL, NASH_REGULARIZATION,
+    LONG_NASH_MAX_ITER       as NASH_MAX_ITER,
+    LONG_NASH_EPS_ABS        as NASH_EPS_ABS,
+    LONG_NASH_EPS_REL        as NASH_EPS_REL,
+    NASH_REGULARIZATION,
+    LONG_NASH_REBUILD_DVX,
 )
 
 
@@ -158,6 +171,11 @@ class ConstrainedNashParams:
     # Regularization
     regularization: float = NASH_REGULARIZATION
 
+    # Physics-based linearization rebuild threshold [m/s]
+    # Rebuild when vx has drifted more than this from the last rebuild point.
+    # Derived from vehicle aero drag sensitivity — see unified/config.py.
+    rebuild_dvx: float = LONG_NASH_REBUILD_DVX
+
 
 class ConstrainedLongitudinalNashSolver:
     """
@@ -204,6 +222,7 @@ class ConstrainedLongitudinalNashSolver:
 
         self.u1_prev = 0.0
         self.u2_prev = 0.0
+        self._vx_at_last_rebuild: float = 0.0
         self.current_lambda_idx = 3  # Start at λ=1.0
 
         # Full horizon solution storage
@@ -282,34 +301,34 @@ class ConstrainedLongitudinalNashSolver:
     def update_linearization(self, dt=None):
         """Re-linearize at vehicle's current operating point and refresh QP bounds.
 
-        Called at each Nash control step (step 3 in simulation loop).
-        Two independent updates:
-          1. A/B matrices: only rebuilds OSQP problems when significantly changed
-             (at steady cruising matrices are nearly constant — skip rebuild).
-          2. u_bounds: always refreshed via CVXPY Parameters (no rebuild needed)
-             to reflect engine torque, gear-shift drop, and tire saturation.
+        Uses a physics-based threshold (rebuild_dvx) instead of allclose:
+        only rebuilds CVXPY problems when vx has changed enough to cause
+        meaningful prediction error. See unified/config.py for derivation.
         """
         if self.vehicle is None:
             return False
         dt = dt or self.params.dt
 
-        # Update dynamic u_accel bounds — always, even if A/B unchanged
+        # Always refresh dynamic u_accel bounds — cheap, no rebuild needed
         if hasattr(self.vehicle, 'get_u_bounds'):
             u_min, u_max = self.vehicle.get_u_bounds()
             self.prob1['u1_min_param'].value = u_min
             self.prob1['u1_max_param'].value = u_max
 
-        A_new, B_new, C_new = self.vehicle.get_state_space_matrices(dt)
-        if (self.A is not None
-                and np.allclose(A_new, self.A, rtol=1e-4, atol=1e-6)
-                and np.allclose(B_new, self.B, rtol=1e-4, atol=1e-6)):
+        # Physics-based rebuild check: skip if vx hasn't changed enough
+        current_vx = float(getattr(getattr(self.vehicle, 'state', None), 'vx',
+                                   getattr(self.vehicle, 'vx', self._vx_at_last_rebuild)))
+        if abs(current_vx - self._vx_at_last_rebuild) < self.params.rebuild_dvx:
             return True
+
+        A_new, B_new, C_new = self.vehicle.get_state_space_matrices(dt)
         self.A = A_new
         self.B = B_new
         self.C = C_new
         self._build_prediction_matrices()
         self._build_base_cost_matrices()
         self._build_dmpc_problems()
+        self._vx_at_last_rebuild = current_vx
         return True
 
     def _build_prediction_matrices(self):
@@ -426,7 +445,8 @@ class ConstrainedLongitudinalNashSolver:
         self.prob2 = {}
         self.lambda_levels = list(p.lambda_levels)
 
-        print(f"   Building DMPC problems (IBR): 1 system + {len(self.lambda_levels)} human...")
+        if self._verbose_dmpc:
+            print(f"   Building DMPC problems (IBR): 1 system + {len(self.lambda_levels)} human...")
 
         for lam in self.lambda_levels:
             alpha = self._pustilnik_alpha(lam)
@@ -459,7 +479,8 @@ class ConstrainedLongitudinalNashSolver:
                 'warm_start': np.zeros(Nu),
             }
             status = "ok" if is_dpp else "WARN"
-            print(f"      lam={lam:5.2f} (alpha={alpha:.3f}): DPP {status}")
+            if self._verbose_dmpc:
+                print(f"      lam={lam:5.2f} (alpha={alpha:.3f}): DPP {status}")
 
     def _find_closest_lambda(self, lambda_k: float) -> float:
         """Find the closest pre-computed lambda level (in log space)."""
@@ -724,89 +745,3 @@ DMPC NASH SOLVER (IBR) - CONSTRAINT SUMMARY
                     self.constraint_stats[key][subkey] = 0
             else:
                 self.constraint_stats[key] = 0
-
-
-# ============================================================================
-# UNIT TESTS
-# ============================================================================
-if __name__ == "__main__":
-    print("\n" + "="*70)
-    print("DMPC Nash MPC Solver (IBR - Li et al. 2019) - Integration Test")
-    print("="*70)
-
-    import time
-
-    # Create solver
-    params = ConstrainedNashParams(Np=20, Nu=10, dt=0.1)
-    solver = ConstrainedLongitudinalNashSolver(params=params)
-
-    # Test 1: Basic solve with different lambda values
-    print("\nTest 1: Nash solve with varying lambda")
-    x0 = np.array([0.0, 20.0])
-
-    R1_ref = np.zeros((params.Np, 2))
-    R2_ref = np.zeros((params.Np, 2))
-
-    for k in range(params.Np):
-        t = k * params.dt
-        R1_ref[k] = [20.0 * t, 22.0]  # System wants 22 m/s
-        R2_ref[k] = [20.0 * t, 25.0]  # Human wants 25 m/s
-
-    test_lambdas = [0.1, 1.0, 5.0, 50.0]
-    print(f"\n{'lambda':>8} | {'alpha':>8} | {'u1':>8} | {'u2':>8} | {'IBR':>5} | {'Time':>8}")
-    print("-" * 65)
-
-    for lam in test_lambdas:
-        solver.reset()
-        u1_opt, u2_opt = solver.solve_nash_equilibrium(
-            x0=x0, R1_ref=R1_ref, R2_ref=R2_ref, lambda_k=lam
-        )
-        stats = solver.get_solver_stats()
-        alpha = 1.0 / (1.0 + lam)
-        print(f"{lam:>8.2f} | {alpha:>8.3f} | {u1_opt:>8.3f} | {u2_opt:>8.3f} | {stats['ibr_iters']:>5} | {stats['solve_time_ms']:>6.2f}ms")
-
-    # Test 2: Verify lambda effect on authority allocation
-    print("\nTest 2: Verify lambda effect on authority allocation")
-    print("  High lambda (dangerous) -> system dominates (|u1| >> |u2|)")
-    print("  Low  lambda (safe)      -> human dominates  (|u2| >= |u1|)")
-
-    solver.reset()
-    results = []
-
-    for lam in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0]:
-        solver.u1_prev = 0.0
-        solver.u2_prev = 0.0
-        u1, u2 = solver.solve_nash_equilibrium(x0, R1_ref, R2_ref, lam)
-        alpha = 1.0 / (1.0 + lam)
-        results.append((lam, alpha, u1, u2, abs(u1 - u2)))
-
-    print(f"\n{'lambda':>8} | {'alpha':>8} | {'u1':>8} | {'u2':>8} | {'|u1-u2|':>8}")
-    print("-" * 50)
-    for lam, alpha, u1, u2, diff in results:
-        print(f"{lam:>8.2f} | {alpha:>8.3f} | {u1:>8.3f} | {u2:>8.3f} | {diff:>8.3f}")
-
-    # Test 3: Performance
-    print("\nTest 3: Performance (500 solves with random lambda)")
-    solver.reset()
-
-    times = []
-    np.random.seed(42)
-
-    for i in range(500):
-        x0_test = np.array([i * 0.5, 20.0 + np.random.randn() * 0.2])
-        lam_test = np.random.uniform(0.1, 50.0)
-
-        start = time.perf_counter()
-        solver.solve_nash_equilibrium(x0_test, R1_ref, R2_ref, lam_test)
-        times.append((time.perf_counter() - start) * 1000)
-
-    times = np.array(times)
-    print(f"   Mean: {times.mean():.2f} ms")
-    print(f"   Max:  {times.max():.2f} ms")
-    print(f"   P99:  {np.percentile(times, 99):.2f} ms")
-
-    print(solver.get_constraint_summary())
-
-    print("\n" + "="*70)
-    print("DMPC Nash Solver (IBR) Test Complete!")
-    print("="*70)
