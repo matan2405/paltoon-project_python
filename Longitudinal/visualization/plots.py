@@ -13,6 +13,15 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+from unified.visualization.ieee_style import (
+    apply_ieee_style, label_subplots, save_fig,
+    IEEE_TALL_DOUBLE, IEEE_DOUBLE_COL,
+)
+apply_ieee_style()
+
 from config import HEADLESS_MODE, RESULTS_DIR
 
 
@@ -26,8 +35,8 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
         print(f"   🚗 Vehicles: {len(simulation.all_vehicles)}")
         
         # Create figure with proper cleanup
-        fig = plt.figure(figsize=(16, 12))
-        print(f"   ✅ Figure created: {fig.number}")
+        fig = plt.figure(figsize=IEEE_TALL_DOUBLE)
+        print(f"   Figure created: {fig.number}")
         
         # Plot 1: Vehicle positions
         plt.subplot(3, 3, 1)
@@ -39,10 +48,10 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                     x_positions.append(pos[i][0])
                     valid_times.append(simulation.time_history[j])
             if x_positions:
-                plt.plot(valid_times, x_positions, label=vehicle.vehicle_id, linewidth=2)
-        plt.xlabel('Time [s]')
-        plt.ylabel('Position [m]')
-        plt.title('Vehicle Positions')
+                plt.plot(valid_times, x_positions, label=vehicle.vehicle_id, linewidth=1.0)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$x$ [m]')
+        plt.title('(a) Positions')
         plt.legend()
         plt.grid(True)
         
@@ -56,13 +65,13 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                     velocities.append(vel[i] / 3.6)  # Convert back to m/s for plotting
                     valid_times.append(simulation.time_history[j])
             if velocities:
-                plt.plot(valid_times, velocities, label=vehicle.vehicle_id, linewidth=2)
+                plt.plot(valid_times, velocities, label=vehicle.vehicle_id, linewidth=1.0)
         # Add target velocity line
         target_line = [simulation.platoon_manager.target_velocity] * len(simulation.time_history)
-        plt.plot(simulation.time_history, target_line, 'k--', label='Target (Platoon)', linewidth=2)
-        plt.xlabel('Time [s]')
-        plt.ylabel('Velocity [m/s]')
-        plt.title('Vehicle Velocities')
+        plt.plot(simulation.time_history, target_line, 'k--', label='Target', linewidth=1.0)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$v_x$ [m/s]')
+        plt.title('(b) Velocities')
         plt.legend()
         plt.grid(True)
         
@@ -80,11 +89,11 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                         desired_gaps.append(desired_set[i])
                         valid_times.append(simulation.time_history[j])
                 if gaps:
-                    plt.plot(valid_times, gaps, label=f'Gap {i+1}', linewidth=2)
-                    plt.plot(valid_times, desired_gaps, '--', label=f'Desired {i+1}', linewidth=2)
-        plt.xlabel('Time [s]')
-        plt.ylabel('Gap [m]')
-        plt.title('Inter-vehicle Gaps')
+                    plt.plot(valid_times, gaps, label=f'Gap {i+1}', linewidth=1.0)
+                    plt.plot(valid_times, desired_gaps, '--', label=f'Des. {i+1}', linewidth=0.9)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$\Delta x$ [m]')
+        plt.title(r'(c) Inter-vehicle gaps')
         plt.legend()
         plt.grid(True)
         
@@ -100,10 +109,10 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                         gap_errors.append(gap_set[i] - desired_set[i])
                         valid_times.append(simulation.time_history[j])
                 if gap_errors:
-                    plt.plot(valid_times, gap_errors, label=f'Error {i+1}', linewidth=2)
-        plt.xlabel('Time [s]')
-        plt.ylabel('Gap Error [m]')
-        plt.title('Gap Tracking Errors')
+                    plt.plot(valid_times, gap_errors, label=f'Err {i+1}', linewidth=1.0)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$e_{\Delta x}$ [m]')
+        plt.title('(d) Gap tracking errors')
         plt.legend()
         plt.grid(True)
         
@@ -117,20 +126,20 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                     x_positions.append(pos[i][0])
                     y_positions.append(pos[i][1])
             if x_positions:
-                plt.plot(x_positions, y_positions, 'o-', label=vehicle.vehicle_id, markersize=1, linewidth=2)
-        
+                plt.plot(x_positions, y_positions, 'o-', label=vehicle.vehicle_id, markersize=1, linewidth=0.8)
+
         # Draw road lanes
         if simulation.position_history:
             all_x = [pos[i][0] for pos in simulation.position_history for i in range(len(pos)) if not np.isnan(pos[i][0])]
             if all_x:
                 x_range = [min(all_x), max(all_x)]
-                plt.plot(x_range, [0, 0], 'k-', alpha=0.3, linewidth=3, label='Right Lane')
-                plt.plot(x_range, [-2, -2], 'k-', alpha=0.3, linewidth=3, label='Left Lane')
-                plt.plot(x_range, [-1, -1], 'y--', alpha=0.5, linewidth=2, label='Lane Divider')
-        
-        plt.xlabel('X Position [m]')
-        plt.ylabel('Y Position [m]')
-        plt.title('Vehicle Trajectories (Top View)')
+                plt.plot(x_range, [0, 0], 'k-', alpha=0.3, linewidth=0.8)
+                plt.plot(x_range, [-2, -2], 'k-', alpha=0.3, linewidth=0.8)
+                plt.plot(x_range, [-1, -1], 'k--', alpha=0.4, linewidth=0.6)
+
+        plt.xlabel(r'$x$ [m]')
+        plt.ylabel(r'$y$ [m]')
+        plt.title('(e) Trajectories (top view)')
         plt.legend()
         plt.grid(True)
         plt.axis('equal')
@@ -153,11 +162,11 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                 
                 if vel_leader and vel_follower:
                     vel_diff = [vl - vf for vl, vf in zip(vel_leader, vel_follower)]
-                    plt.plot(valid_times, vel_diff, label=f'ΔV {i+1}-{i+2}', linewidth=2)
-        
-        plt.xlabel('Time [s]')
-        plt.ylabel('Velocity Difference [m/s]')
-        plt.title('String Stability Analysis')
+                    plt.plot(valid_times, vel_diff, label=fr'$\Delta v_{{{i+1},{i+2}}}$', linewidth=1.0)
+
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$\Delta v$ [m/s]')
+        plt.title('(f) String stability')
         plt.legend()
         plt.grid(True)
         
@@ -171,10 +180,10 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                     accelerations.append(acc[i])
                     valid_times.append(simulation.time_history[j])
             if accelerations:
-                plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=2)
-        plt.xlabel('Time [s]')
-        plt.ylabel('Acceleration [m/s^2]')
-        plt.title('Vehicle Accelerations')
+                plt.plot(valid_times, accelerations, label=vehicle.vehicle_id, linewidth=1.0)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$a_x$ [m/s$^2$]')
+        plt.title(r'(g) Accelerations')
         plt.legend()
         plt.grid(True)
         
@@ -189,13 +198,13 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                     y_positions.append(pos[human_idx][1])
                     valid_times.append(simulation.time_history[j])
             if y_positions:
-                plt.plot(valid_times, y_positions, 'r-', linewidth=3, label='Human Y-position')
-        plt.axhline(y=0, color='k', linestyle='-', alpha=0.3, label='Right Lane Center')
-        plt.axhline(y=-2, color='k', linestyle='-', alpha=0.3, label='Left Lane Center')
-        plt.axvline(x=20.0, color='g', linestyle='--', alpha=0.7, label='Merge Start')
-        plt.xlabel('Time [s]')
-        plt.ylabel('Lateral Position [m]')
-        plt.title('Human Vehicle Lane Change')
+                plt.plot(valid_times, y_positions, '-', linewidth=1.2, label='Human $y$')
+        plt.axhline(y=0,  color='k', linestyle='-', alpha=0.3, linewidth=0.6)
+        plt.axhline(y=-2, color='k', linestyle='-', alpha=0.3, linewidth=0.6)
+        plt.axvline(x=20.0, color='g', linestyle='--', alpha=0.7, linewidth=0.8, label='Merge')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$y$ [m]')
+        plt.title('(h) Lane change')
         plt.legend()
         plt.grid(True)
         
@@ -207,16 +216,16 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
                 platoon_count.append(4)  # Original platoon size
             else:
                 platoon_count.append(5)  # After human joins
-        plt.plot(simulation.time_history, platoon_count, 'b-', linewidth=3, label='Platoon Size')
-        plt.axvline(x=20.0, color='g', linestyle='--', alpha=0.7, label='Human Joins')
-        plt.xlabel('Time [s]')
-        plt.ylabel('Number of Vehicles')
-        plt.title('Platoon Size Over Time')
+        plt.plot(simulation.time_history, platoon_count, '-', linewidth=1.2, label='Platoon size')
+        plt.axvline(x=20.0, color='g', linestyle='--', alpha=0.7, linewidth=0.8, label='Merge')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel('# vehicles')
+        plt.title('(i) Platoon size')
         plt.legend()
         plt.grid(True)
         
         plt.tight_layout()
-        plt.suptitle(f'{scenario_name} - Comprehensive Analysis', fontsize=16, y=0.98)
+        plt.suptitle(scenario_name, fontsize=9, y=1.01)
         
         # Always save plot to results directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -232,13 +241,7 @@ def create_comprehensive_plots(simulation, scenario_name="Simulation", show_plot
         
         try:
             # Save with explicit figure reference
-            fig.savefig(filepath, dpi=150, bbox_inches='tight')
-            abs_path = os.path.abspath(filepath)
-            file_size = os.path.getsize(filepath) / 1024  # KB
-            print(f"✅ Comprehensive plot saved successfully!")
-            print(f"   📄 File: {filename}")
-            print(f"   📁 Path: {abs_path}")
-            print(f"   💾 Size: {file_size:.1f} KB")
+            save_fig(fig, filepath)
         except Exception as save_error:
             print(f"❌ Could not save plot: {save_error}")
             import traceback
@@ -411,21 +414,21 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
                         velocity_history.append(0)
         
         # Create figure
-        fig = plt.figure(figsize=(20, 14))
-        fig.suptitle(f'{scenario_name} - Nash Equilibrium Analysis', fontsize=16, fontweight='bold')
+        fig = plt.figure(figsize=IEEE_TALL_DOUBLE)
+        fig.suptitle(f'Nash Analysis — {scenario_name}', fontsize=9)
         
         # ========== Row 1 ==========
         # Plot 1: Longitudinal Acceleration Components
         plt.subplot(3, 3, 1)
-        plt.plot(time, u_shared, 'r-', linewidth=2.5, label='Shared (Applied)', alpha=0.8)
-        plt.plot(time, u_system, 'g--', linewidth=1.5, label='System Desired', alpha=0.7)
-        plt.plot(time, u_human, 'b--', linewidth=1.5, label='Human Desired', alpha=0.7)
-        plt.axhline(y=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
-        plt.axhline(y=2.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
-        plt.axhline(y=-3.0, color='gray', linestyle='--', linewidth=1, alpha=0.4)
-        plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Acceleration [m/s^2]', fontsize=10)
-        plt.title('Longitudinal Acceleration Components', fontsize=11, fontweight='bold')
+        plt.plot(time, u_shared, '-',  linewidth=1.4, label=r'$u_\mathrm{shared}$')
+        plt.plot(time, u_system, '--', linewidth=1.0, label=r'$u_1$ system')
+        plt.plot(time, u_human,  '--', linewidth=1.0, label=r'$u_2$ human')
+        plt.axhline(y=0,    color='k',    linestyle='-', linewidth=0.4, alpha=0.3)
+        plt.axhline(y=2.0,  color='gray', linestyle='--', linewidth=0.6, alpha=0.4)
+        plt.axhline(y=-3.0, color='gray', linestyle='--', linewidth=0.6, alpha=0.4)
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$a_x$ [m/s$^2$]')
+        plt.title(r'(a) Nash control inputs')
         plt.grid(True, alpha=0.3)
         plt.legend(loc='best', fontsize=9)
         
@@ -446,9 +449,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
                        color='blue', alpha=0.2, label='System Dominant')
         plt.fill_between(time, authority, 1.0, where=(authority < 1.0), 
                        color='green', alpha=0.2, label='Human Dominant')
-        plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
-        plt.title('Authority Ratio (Log Scale)', fontsize=11, fontweight='bold')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$\lambda(t)$')
+        plt.title(r'(b) Authority ratio $\lambda$ (log)')
         plt.grid(True, alpha=0.3, which='both')
         plt.legend(loc='best', fontsize=8)
         
@@ -460,9 +463,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             plt.axhline(y=600, color='r', linestyle='--', linewidth=1.5, alpha=0.7, label='Danger Level')
             plt.fill_between(time[:len(safety_forces)], 0, 300, color='orange', alpha=0.15)
             plt.fill_between(time[:len(safety_forces)], 300, 600, color='red', alpha=0.15)
-            plt.xlabel('Time [s]', fontsize=10)
-            plt.ylabel('Field Force Magnitude [N]', fontsize=10)
-            plt.title('Longitudinal Safety Field Force', fontsize=11, fontweight='bold')
+            plt.xlabel(r'$t$ [s]')
+            plt.ylabel(r'$F$ [N]')
+            plt.title('(c) Safety field force')
             plt.grid(True, alpha=0.3)
             plt.legend(loc='best', fontsize=9)
         else:
@@ -476,9 +479,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         plt.plot(time, system_authority, color='navy', linewidth=1.5, alpha=0.9, label='System Fraction')
         plt.plot(time, human_authority, color='darkgreen', linewidth=1.5, alpha=0.9, linestyle='--', label='Human Fraction')
         plt.axhline(y=0.5, color='k', linestyle='--', linewidth=1, alpha=0.5, label='Equal (50%)')
-        plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Authority Fraction', fontsize=10)
-        plt.title('Control Authority Distribution', fontsize=11, fontweight='bold')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'Authority fraction')
+        plt.title('(d) Authority distribution')
         plt.ylim([0, 1])
         plt.grid(True, alpha=0.3)
         plt.legend(loc='best', fontsize=9)
@@ -489,9 +492,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             target_velocity = simulation.platoon_manager.target_speed * 3.6 if hasattr(simulation.platoon_manager, 'target_speed') else 120.0
             plt.plot(time[:len(velocity_history)], velocity_history, 'b-', linewidth=2.5, label='Human Vehicle Velocity')
             plt.axhline(y=target_velocity, color='k', linestyle='--', linewidth=1.5, alpha=0.7, label='Target Velocity')
-            plt.xlabel('Time [s]', fontsize=10)
-            plt.ylabel('Velocity [km/h]', fontsize=10)
-            plt.title('Velocity Profile Under Nash Control', fontsize=11, fontweight='bold')
+            plt.xlabel(r'$t$ [s]')
+            plt.ylabel(r'$v_x$ [km/h]')
+            plt.title('(e) Velocity (Nash)')
             plt.grid(True, alpha=0.3)
             plt.legend(loc='best', fontsize=9)
         else:
@@ -504,9 +507,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             scatter = plt.scatter(gap_errors, auth_for_gap, c=time[:len(gap_errors)], 
                                 cmap='viridis', s=20, alpha=0.6)
             plt.colorbar(scatter, label='Time [s]')
-            plt.xlabel('Gap Error [m]', fontsize=10)
-            plt.ylabel('Authority Ratio lambda(t)', fontsize=10)
-            plt.title('Gap Error vs Authority Correlation', fontsize=11, fontweight='bold')
+            plt.xlabel(r'$e_{\Delta x}$ [m]')
+            plt.ylabel(r'$\lambda(t)$')
+            plt.title(r'(f) Gap error vs $\lambda$')
             plt.yscale('log')
             plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1, alpha=0.5)
             plt.axvline(x=0, color='k', linestyle='-', linewidth=0.5, alpha=0.3)
@@ -522,9 +525,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         plt.plot(time, control_disagreement, color='purple', linewidth=2.0, label='|u_sys - u_human|')
         plt.plot(time, cumulative_disagreement, color='black', linewidth=1.5, linestyle='--',
              label='Cumulative disagreement')
-        plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Acceleration [m/s^2]', fontsize=10)
-        plt.title('Control Disagreement Analysis', fontsize=11, fontweight='bold')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'[m/s$^2$]')
+        plt.title(r'(g) $|u_1 - u_2|$')
         plt.legend(loc='best', fontsize=9)
         plt.grid(True, alpha=0.3)
         
@@ -533,9 +536,9 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         dt = time[1] - time[0] if len(time) > 1 else 0.1
         cumulative_effort = np.cumsum(np.abs(u_shared) * dt)
         plt.plot(time, cumulative_effort, 'orange', linewidth=2.5, label='Cumulative Control Effort')
-        plt.xlabel('Time [s]', fontsize=10)
-        plt.ylabel('Cumulative ∫|a| dt [m/s]', fontsize=10)
-        plt.title('Control Effort Analysis', fontsize=11, fontweight='bold')
+        plt.xlabel(r'$t$ [s]')
+        plt.ylabel(r'$\int|a|\,\mathrm{d}t$ [m/s]')
+        plt.title('(h) Cumulative effort')
         plt.grid(True, alpha=0.3)
         plt.legend(loc='best', fontsize=9)
         
@@ -568,8 +571,8 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
             height = bar.get_height()
             plt.text(bar.get_x() + bar.get_width()/2., height,
                     f'{val:.2f}', ha='center', va='bottom', fontsize=9)
-        plt.ylabel('Metric Value', fontsize=10)
-        plt.title('Nash Performance Metrics', fontsize=11, fontweight='bold')
+        plt.ylabel('Value')
+        plt.title('(i) Performance metrics')
         plt.xticks(rotation=15, ha='right', fontsize=9)
         plt.grid(True, alpha=0.3, axis='y')
         
@@ -586,14 +589,7 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         filepath = os.path.join(RESULTS_DIR, filename)
         
         try:
-            fig.savefig(filepath, dpi=150, bbox_inches='tight')
-            
-            abs_path = os.path.abspath(filepath)
-            file_size = os.path.getsize(filepath) / 1024
-            print(f"✅ Enhanced Nash 9-grid plot saved!")
-            print(f"   📄 File: {filename}")
-            print(f"   📁 Path: {abs_path}")
-            print(f"   💾 Size: {file_size:.1f} KB")
+            save_fig(fig, filepath)
             
             if not HEADLESS_MODE and show_plots:
                 plt.show(block=False)
