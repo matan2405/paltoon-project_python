@@ -3,9 +3,10 @@
 File: system_reference_generator.py  
 Description: Generates target trajectories for the System player (R1).
 
-VERSION 5.0 - RAJAMANI CHAPTER 6.7 TRANSITIONAL CONTROLLER
-===========================================================
-Exact implementation of Rajamani "Vehicle Dynamics and Control" Chapter 6.7.
+Research basis:
+- Rajamani Chapter 6.7 transitional controller logic in range/range-rate space.
+- Continuous parabola-based transition between gap-closing and following modes.
+- Used to build system reference trajectory R1 for longitudinal Nash control.
 
 The Transitional Controller operates in the R-Ṙ (Range vs Range-Rate) phase plane:
     R = actual gap to preceding vehicle [m]
@@ -36,7 +37,13 @@ import os
 
 # Add parent directory to path to allow importing from control
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (NASH_CONTROL_DT, NASH_NP)
+from config import (
+    NASH_CONTROL_DT, NASH_NP,
+    REFGEN_DETECTION_RANGE, REFGEN_TIME_HEADWAY, REFGEN_STANDSTILL_DISTANCE,
+    REFGEN_A_COMFORT, REFGEN_K_V, REFGEN_K1, REFGEN_K2,
+    REFGEN_MAX_ACCEL, REFGEN_MAX_DECEL, REFGEN_CATCHUP_FACTOR,
+    REFGEN_FREE_ROAD_DELTA,
+)
 from control.platoon_control import free_road_acc, rajamani
 from vehicle.components import VehicleParameters
 from vehicle import Vehicle
@@ -45,7 +52,7 @@ class SystemReferenceGenerator:
     """
     Generates target trajectories for the System player (R1) in Nash equilibrium.
     
-    VERSION 5.0: Exact Rajamani Chapter 6.7 Transitional Controller.
+    Implements the Rajamani Chapter 6.7 transitional controller formulation.
     
     Uses CONTINUOUS parabola-based velocity control:
     - Compute target velocity from parabola: v_target = v_leader - sqrt(2*a_comfort*gap_error)
@@ -65,46 +72,46 @@ class SystemReferenceGenerator:
         self.dt = NASH_CONTROL_DT
         
         # === DETECTION ===
-        self.DETECTION_RANGE = 150.0  # [m]
+        self.DETECTION_RANGE = REFGEN_DETECTION_RANGE
         self.desired_gap = 50.0  # [m] Desired gap at equilibrium (will be updated based on speed)
         # === RAJAMANI CHAPTER 6.7 PARAMETERS ===
         # Time headway for CTG policy (Section 6.3)
-        self.h = 1.5  # [s]
-        
+        self.h = REFGEN_TIME_HEADWAY
+
         # Standstill distance
-        self.d0 = 5.0  # [m]
-        
+        self.d0 = REFGEN_STANDSTILL_DISTANCE
+
         # Comfortable deceleration (Section 6.7.2)
         # Typical: 0.1g - 0.2g = 1.0 - 2.0 m/s²
-        self.a_comfort = 1.5  # [m/s²]
-        
+        self.a_comfort = REFGEN_A_COMFORT
+
         # Velocity tracking gain (Section 6.7.2)
         # Typical: 0.3 - 0.5 s⁻¹
-        self.K_v = 0.4  # [1/s]
-        
+        self.K_v = REFGEN_K_V
+
         # CTG Controller gains (Section 6.4, Eq. 6.15-6.16)
         # K1: position gain, K2: velocity gain
-        self.K1 = 0.23  # [1/s²] - typical 0.2-0.4
-        self.K2 = 0.6  # [1/s] - typical 0.6-1.0 (reduced for smoother response)
-        
+        self.K1 = REFGEN_K1
+        self.K2 = REFGEN_K2
+
         # === SAFETY & CRASH AVOIDANCE (Zone 3) ===
         self.MIN_CRITICAL_GAP = 2.0 + VehicleParameters.length*0.5  # [m] Minimum gap before emergency braking
         self.TTC_THRESHOLD = 1.2    # [seconds] Time-to-collision threshold for emergency braking
         self.MAX_EMERGENCY_DECEL = -5.0 # [m/s²] Maximum emergency deceleration
-        
+
         # === COMFORT LIMITS ===
-        self.MAX_ACCEL = 2.5   # [m/s²]
-        self.MAX_DECEL = -3.5  # [m/s²]
-        
+        self.MAX_ACCEL = REFGEN_MAX_ACCEL
+        self.MAX_DECEL = REFGEN_MAX_DECEL
+
         # === CRUISE PARAMETERS ===
-        self.CATCHUP_FACTOR = 1.15
+        self.CATCHUP_FACTOR = REFGEN_CATCHUP_FACTOR
         
         # === DEBUG ===
         self._debug_counter = 0
         
-        print(f"🚀 System Reference Generator V5.0 (RAJAMANI Ch.6.7)")
+        print(f"🚀 System Reference Generator (RAJAMANI Ch.6.7)")
         print(f"   📊 Prediction: dt={self.dt}s, Np={self.Np}")
-        print(f"   🎯 CTG: h={self.h}s, d0={self.d0}m")
+        print(f"   🎯 CTG: h={self.h}s, d0=leader.L (dynamic)")
         print(f"   📐 Comfort decel: a_comfort={self.a_comfort} m/s²")
         print(f"   📈 Gains: K_v={self.K_v}, K1={self.K1}, K2={self.K2}")
 
@@ -135,13 +142,20 @@ class SystemReferenceGenerator:
         sim_vehicle = Vehicle() 
         sim_vehicle = copy.deepcopy(simulation.human_vehicle)
         
-        # Switch cloned vehicle to state-space (double integrator) mode.
-        # The original vehicle may be in hierarchical mode, but for prediction
-        # we want the simple ZOH double integrator — not the full engine/
-        # transmission dynamics.
-        sim_vehicle.use_hierarchical_model = False
-        sim_vehicle.use_state_space_model = True
-        sim_vehicle.use_kinematic_model = False
+        # Mirror the actual vehicle's planning model so the reference trajectory
+        # is consistent with what Nash plans against.
+        # - Hierarchical mode: LLC cancels all drag → pure double-integrator effective plant.
+        #   Using state-space here would subtract drag from a_ref, making the reference
+        #   trajectory decelerate near target speed and producing a false ~115 km/h equilibrium.
+        # - State-space mode: drag is explicit in both reference and Nash matrices → consistent.
+        if simulation.human_vehicle.use_hierarchical_model:
+            sim_vehicle.use_hierarchical_model = True
+            sim_vehicle.use_state_space_model = True  # Nash still uses double integrator for planning
+            sim_vehicle.use_kinematic_model = False
+        else:
+            sim_vehicle.use_hierarchical_model = False
+            sim_vehicle.use_state_space_model = True
+            sim_vehicle.use_kinematic_model = False
         
         # ========================================================================
         # Identify Leader - USE LOCKED if available
@@ -199,11 +213,9 @@ class SystemReferenceGenerator:
         initial_R_dot = 0.0
         
         for i in range(self.Np):
-            # === Step 1: Update Leader/Follower Prediction ===
-            if sim_leader:
-                sim_leader.state.x += sim_leader.state.vx * self.dt
-            
-            # === Step 2: Calculate Distance and Gap Error ===
+            # === Step 1: Calculate Distance and Gap Error ===
+            # Leader is advanced at Step 6 (end of loop) so that at i=0 the gap
+            # is computed from CURRENT positions, not one step ahead.
             dist_to_leader = float('inf')
             gap_error = 0.0
             desired_gap = self.desired_gap  # Default desired gap
@@ -222,7 +234,7 @@ class SystemReferenceGenerator:
                 R_dot = sim_leader.state.vx - sim_vehicle.state.vx
                 
                 # R_desired = Desired gap (CTG policy, Rajamani Eq. 6.5)
-                R_desired = self.d0 + self.h * sim_vehicle.state.vx
+                R_desired = self.h * sim_vehicle.state.vx
                 
                 # Gap error: positive = too far behind, negative = too close
                 gap_error = R - R_desired
@@ -230,7 +242,11 @@ class SystemReferenceGenerator:
                 # Store for distance calculations
                 dist_to_leader = sim_leader.state.x - sim_vehicle.state.x
                 self.desired_gap = R_desired + L  # Add leader length for front bumper distance
-                ttc= R / max(1e-5, R_dot) # Time-to-collision (Rajamani Eq. 6.4)
+                # Time-to-collision (Rajamani Eq. 6.4).
+                # R_dot < 0 → gap closing → TTC = R / |R_dot|.
+                # R_dot ≥ 0 → gap stable/increasing → no collision risk.
+                # Bug fix: max(1e-5, R_dot) returned ~∞ when R_dot < 0, defeating the check.
+                ttc = R / abs(R_dot) if R_dot < 0 else float('inf')
                 
                 if i == 0:
                     initial_gap_error = gap_error
@@ -261,7 +277,8 @@ class SystemReferenceGenerator:
                     v=sim_vehicle.state.vx,
                     t=0,
                     v_target=target_v,
-                    a_max=self.MAX_ACCEL
+                    a_max=self.MAX_ACCEL,
+                    delta=REFGEN_FREE_ROAD_DELTA,
                 )
                 
             else:
@@ -303,7 +320,7 @@ class SystemReferenceGenerator:
                 gap_magnitude = abs(gap_error)
                 if gap_magnitude < 5.0:
                     # Near equilibrium - blend in CTG for fine control
-                    if gap_error < 0.02 * self.desired_gap:  
+                    if gap_error < 0.03 * self.desired_gap:  
                         mode = "CTG - Following"
                     blend = 1.0 - (gap_magnitude / 5.0)
                     blend = blend * blend  # Quadratic for smoother transition
@@ -318,13 +335,19 @@ class SystemReferenceGenerator:
             
             # === Step 4: Apply Comfort Constraints ===
             a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
-            
-            # === Step 5: Propagate state using vehicle's double integrator ===
+
+            # === Step 5: Advance leader first (front-to-back platoon convention) ===
+            # Gap was already computed from current states above (correct MPC initial condition).
+            # Leader is advanced before ego to follow front-to-back update order.
+            if sim_leader:
+                sim_leader.state.x += sim_leader.state.vx * self.dt
+
+            # === Step 6: Propagate ego state using vehicle's double integrator ===
             # update_dynamics() routes to update_dynamics_state_space() which
             # uses ZOH discretization: x[k+1] = A_d @ x[k] + B_d @ u[k]
             sim_vehicle.a_desired = a_ref
             sim_vehicle.update_dynamics(self.dt)
-            
+
             # Store prediction
             accel_sequence[i] = a_ref
             state_sequence[i, 0] = sim_vehicle.state.x
@@ -347,7 +370,7 @@ __all__ = ['SystemReferenceGenerator']
 # === UNIT TEST ===
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("System Reference Generator V5.0 - Unit Test")
+    print("System Reference Generator - Unit Test")
     print("Rajamani Chapter 6.7 Transitional Controller")
     print("="*60)
     

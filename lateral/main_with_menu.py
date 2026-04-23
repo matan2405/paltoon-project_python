@@ -1,6 +1,10 @@
 """
 Main script for Lateral Control Simulation with Nash Equilibrium.
-VERSION 2.5 - Interactive with menu system (like Longitudinal controller)
+
+Research linkage:
+- Li-style shared-control flow with distinct system/human references.
+- Pustilnik-style embedded authority (implemented in solver modules).
+- Scenario runner and reporting entry-point for reproducible experiments.
 
 Based on Li et al. 2019:
 - R1 = System reference (5th order polynomial, safe trajectory)
@@ -19,11 +23,12 @@ from typing import Dict, Optional
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config import (RESULTS_DIR, SIMULATION_DT, LANE_WIDTH, PLATOON_LANE_Y, 
-                    HUMAN_INITIAL_LANE_Y, DEFAULT_SIMULATION_TIME)
+from config import (RESULTS_DIR, SIMULATION_DT, LANE_WIDTH, PLATOON_LANE_Y,
+                    HUMAN_INITIAL_LANE_Y, DEFAULT_SIMULATION_TIME, NOMINAL_VELOCITY, DRIVER_PARAMS)
 from simulation import LateralSimulation
 from visualization import (create_comprehensive_plots, create_trajectory_plot,
                           create_nash_analysis_plots, print_simulation_summary)
+from metrics.comfort import evaluate_lane_change_comfort, print_comfort_report
 
 
 def print_banner():
@@ -45,25 +50,43 @@ def print_menu():
 
 
 def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict:
-    """Get scenario parameters."""
+    """Get scenario parameters.
+
+    human_initial_x is computed so that at merge_trigger_time the human vehicle
+    arrives at the desired relative position in the platoon regardless of driver speed.
+
+    Platoon: leader=60m, gap=25m → P2=35m, P3=10m, all at v_platoon=NOMINAL_VELOCITY.
+    Desired relative positions at merge start:
+      join_before : 20 m ahead of leader
+      join_middle : midway between P1 and P2
+      join_after  : 20 m behind P3
+    """
     platoon_config = {'num_vehicles': 3, 'leader_x': 60.0, 'gap': 25.0}
-    
+
+    v_platoon = NOMINAL_VELOCITY
+    v_human   = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+
+    leader_x0, p2_x0, p3_x0 = 60.0, 35.0, 10.0
+
     if scenario_name == 'join_before':
-        human_initial_x = 100.0
         merge_trigger_time = 3.0
+        target_x = (leader_x0 + v_platoon * merge_trigger_time) + platoon_config['gap']*3
     elif scenario_name == 'join_middle':
-        human_initial_x = 35.0
         merge_trigger_time = 3.0
+        p1_at_merge = leader_x0 + v_platoon * merge_trigger_time
+        p2_at_merge = p2_x0    + v_platoon * merge_trigger_time + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['x_error_offset']
+        target_x = (p1_at_merge + p2_at_merge) / 2.0
     elif scenario_name == 'join_after':
-        human_initial_x = -20.0
         merge_trigger_time = 5.0
+        target_x = (p3_x0 + v_platoon * merge_trigger_time) - platoon_config['gap']*3
     else:
         raise ValueError(f"Unknown scenario: {scenario_name}")
-    
+
+    human_initial_x = target_x - v_human * merge_trigger_time
+
     return {
-        'human_initial_x': human_initial_x,
+        'human_initial_x': round(human_initial_x, 1),
         'human_initial_y': HUMAN_INITIAL_LANE_Y,
-        'human_velocity': 20.0,
         'target_lane_y': PLATOON_LANE_Y,
         'driver_type': driver_type,
         'platoon': platoon_config,
@@ -94,7 +117,7 @@ def select_driver_type() -> str:
 
 
 def run_scenario(scenario_name: str, driver_type: str = 'normal', 
-                T_sim: float = 120.0) -> Optional[Dict]:
+                T_sim: float = DEFAULT_SIMULATION_TIME) -> Optional[Dict]:
     """
     Run a single scenario with detailed output matching longitudinal format.
     """
@@ -116,7 +139,8 @@ def run_scenario(scenario_name: str, driver_type: str = 'normal',
     print(f"🚗 Scenario settings:")
     print(f"   📍 Initial position: ({params['human_initial_x']:.1f}, {params['human_initial_y']:.1f})")
     print(f"   🎯 Target lane: y = {params['target_lane_y']:.1f}m")
-    print(f"   🚀 Target speed: {params['human_velocity'] * 3.6:.0f} km/h")
+    human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+    print(f"   🚀 Target speed: {human_vx * 3.6:.0f} km/h")
     print(f"   🧑‍✈️ Driver type: {driver_type}")
     print(f"   🧠 Nash control: ACTIVE")
     print(f"⏱️ Simulation time: {T_sim} seconds")
@@ -334,14 +358,10 @@ def print_final_summary(data: Dict, display_name: str, T_sim: float, exec_time: 
     print(f"   📏 Final y error: {y_error:.3f}m")
     print(f"   📐 Final ψ error: {psi_error:.3f}°")
     
-    # Comfort metrics
-    max_ay = np.max(np.abs(data['human_ay']))
-    avg_ay = np.mean(np.abs(data['human_ay']))
-    
-    print(f"\n🛋️ Comfort Metrics:")
-    print(f"   📊 Max lateral acceleration: {max_ay:.3f} m/s²")
-    print(f"   📊 Avg lateral acceleration: {avg_ay:.3f} m/s²")
-    print(f"   {'✅ Comfortable ride' if max_ay < 1.0 else '⚠️ May feel uncomfortable'}")
+    # Comfort metrics — ISO 2631-1 + Nash Authority Disruption Index
+    print(f"\nComfort Metrics (ISO 2631-1 + Nash ADI):")
+    comfort_report = evaluate_lane_change_comfort(data)
+    print_comfort_report(comfort_report)
     
     print(f"\n{'='*70}")
 
@@ -363,7 +383,7 @@ def create_and_display_plots(data: Dict, full_name: str, display_name: str,
     print(f"\n👍 Creating Nash analysis plots (9-grid)...")
     create_nash_analysis_plots(data, full_name, mobil_approval_time=mobil_approval_time)
     print(f"✅ Nash analysis plots (9-grid) created and saved successfully")
-    
+
     # Try to display interactively
     try:
         print(f"📊 Displaying interactive plots...")
@@ -394,7 +414,7 @@ def create_animation_if_requested(data: Dict, full_name: str):
         print(f"⚠️ Could not create animation: {e}")
 
 
-def run_all_scenarios(T_sim: float = 120.0) -> Dict[str, Dict]:
+def run_all_scenarios(T_sim: float = DEFAULT_SIMULATION_TIME) -> Dict[str, Dict]:
     """Run all 9 scenarios."""
     scenarios = ['join_before', 'join_middle', 'join_after']
     driver_types = ['cautious', 'normal', 'aggressive']
@@ -447,29 +467,65 @@ def run_all_scenarios(T_sim: float = 120.0) -> Dict[str, Dict]:
 
 
 def print_summary_table(results: Dict[str, Dict]):
-    """Print summary table of all results."""
-    print("\n" + "="*90)
-    print("📊 SUMMARY TABLE - All Scenarios")
-    print("="*90)
-    
-    header = f"{'Scenario':<25} {'Final y_err [m]':>15} {'Final psi [deg]':>15} {'Max ay [m/s²]':>15} {'Status':>10}"
-    print(header)
-    print("-"*90)
-    
+    """Print detailed summary table of all results."""
+    # Symbol helpers (same fallback logic as comfort.py)
+    _SYM = {'Good': '\u2705', 'Acceptable': '\U0001f7e1', 'Poor': '\u274c'}
+
+    def _s(verdict):
+        return _SYM.get(verdict, '?')
+
+    def _safe(text):
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            import sys
+            print(text.encode(sys.stdout.encoding or 'utf-8', errors='replace')
+                      .decode(sys.stdout.encoding or 'utf-8'))
+
+    W = 145
+    _safe("\n" + "="*W)
+    _safe("SUMMARY TABLE - All Scenarios")
+    _safe("="*W)
+
+    # Header: convergence | 6 comfort metrics (emoji+value) | overall
+    _safe(
+        f"{'Scenario':<26} {'y_err':>7} {'psi':>6}  "
+        f"{'Dur[s]':^9} {'ay_pk':^9} {'rms_ay':^9} {'Jerk':^9} {'Vy':^9} {'ADI':^9}  "
+        f"{'%':>5}  {'Label':<14} {'OK?':>4}"
+    )
+    _safe("-"*W)
+
     for name, data in results.items():
         if data is None:
-            print(f"{name:<25} {'FAILED':>15}")
+            _safe(f"{name:<26}  FAILED")
             continue
-        
-        final_y_err = abs(data['human_y'][-1])
+
+        final_y_err   = abs(data['human_y'][-1])
         final_psi_err = abs(np.degrees(data['human_psi'][-1]))
-        max_ay = np.max(np.abs(data['human_ay']))
-        converged = "✓" if final_y_err < 0.1 and final_psi_err < 1.0 else "✗"
-        
-        row = f"{name:<25} {final_y_err:>15.4f} {final_psi_err:>15.4f} {max_ay:>15.4f} {converged:>10}"
-        print(row)
-    
-    print("="*90)
+        converged     = "\u2714" if final_y_err < 0.1 and final_psi_err < 1.0 else "\u2718"
+
+        cr = evaluate_lane_change_comfort(data)
+        m  = cr['metrics']
+        sc = cr['scores']
+
+        # Each cell: emoji + numeric value
+        col_dur  = f"{_s(sc['lc_duration'][1])}{m['lc_duration_s']:>5.1f}s"
+        col_pay  = f"{_s(sc['peak_ay'][1])}{m['peak_ay_ms2']:>5.3f}"
+        col_rms  = f"{_s(sc['rms_ay'][1])}{m['rms_ay_ms2']:>5.3f}"
+        col_jerk = f"{_s(sc['peak_jerk'][1])}{m['peak_jerk_ms3']:>5.2f}"
+        col_vy   = f"{_s(sc['peak_vy'][1])}{m['peak_vy_ms']:>5.3f}"
+        col_adi  = f"{_s(sc['adi'][1])}{m['adi']:>6.4f}"
+
+        _safe(
+            f"{name:<26} {final_y_err:>7.4f} {final_psi_err:>6.3f}  "
+            f"{col_dur:^9} {col_pay:^9} {col_rms:^9} {col_jerk:^9} {col_vy:^9} {col_adi:^9}  "
+            f"{cr['overall_score']:>5.1f}  {cr['overall_label']:<14} {converged:>4}"
+        )
+
+    _safe("="*W)
+    _safe(f"  Metrics: Dur=LC duration[s]  ay_pk=peak |ay| [m/s\u00b2]  "
+          f"rms_ay=RMS |ay| [m/s\u00b2]  Jerk=peak jerk [m/s\u00b3]  "
+          f"Vy=peak lat.vel [m/s]  ADI=authority disruption index")
 
 
 def main():
@@ -489,18 +545,18 @@ def main():
         
         if choice == '1':
             driver_type = select_driver_type()
-            run_scenario('join_before', driver_type, T_sim=120.0)
+            run_scenario('join_before', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '2':
             driver_type = select_driver_type()
-            run_scenario('join_middle', driver_type, T_sim=120.0)
+            run_scenario('join_middle', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '3':
             driver_type = select_driver_type()
-            run_scenario('join_after', driver_type, T_sim=120.0)
+            run_scenario('join_after', driver_type, T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '4':
-            run_all_scenarios(T_sim=120.0)
+            run_all_scenarios(T_sim=DEFAULT_SIMULATION_TIME)
             
         elif choice == '5':
             print("\nSelect scenario:")
@@ -515,9 +571,9 @@ def main():
                     driver_type = select_driver_type()
                     
                     try:
-                        T_sim = float(input("Enter simulation time (seconds, default=120): ").strip() or "120")
+                        T_sim = float(input(f"Enter simulation time (seconds, default={DEFAULT_SIMULATION_TIME}): ").strip() or str(DEFAULT_SIMULATION_TIME))
                     except ValueError:
-                        T_sim = 120.0
+                        T_sim = DEFAULT_SIMULATION_TIME
                     
                     run_scenario(scenarios[scenario_choice], driver_type, T_sim=T_sim)
                 else:

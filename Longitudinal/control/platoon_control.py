@@ -8,16 +8,20 @@ import time
 from typing import List
 from scipy.integrate import odeint
 from vehicle.vehicle import Vehicle, VehicleParameters
-from config import JERK_LIMIT,RAJAMANI_H,RAJAMANI_TAU
+from config import (
+    JERK_LIMIT, RAJAMANI_H, RAJAMANI_TAU,
+    RAJAMANI_K1, RAJAMANI_K2, RAJAMANI_K3, RAJAMANI_K4, RAJAMANI_K5,
+    PLATOON_TARGET_VELOCITY, FREE_ROAD_DELTA,
+)
 
 _vp = VehicleParameters()
 def rajamani(Car_1, Car_2):
-    """Rajamani controller (kept for desired-gap calculations in safety field)."""
+    """Compute Rajamani acceleration command and desired inter-vehicle gap."""
     h = RAJAMANI_H   # [s] desired time headway
     tau = RAJAMANI_TAU # [s] time lag
 
-    k1, k5 = -0.12, 0.1 # k1 < -tau/h, k5 > 0
-    k2, k3, k4 = -k1-h*k1*k5, 1/h-k1*k5, k5/h
+    k1, k5 = RAJAMANI_K1, RAJAMANI_K5
+    k2, k3, k4 = RAJAMANI_K2, RAJAMANI_K3, RAJAMANI_K4
 
     e = Car_2.state.x - Car_1.state.x + Car_1.L  # [m] actual gap
     e_dot = Car_2.v - Car_1.v         # [m/s] relative velocity
@@ -28,8 +32,8 @@ def rajamani(Car_1, Car_2):
     return a_des, s_des
 
 
-def free_road_acc(v, t, v_target, a_max,delta=4):
-    """Free road acceleration - identical to platoon_control.py"""
+def free_road_acc(v, t, v_target, a_max, delta=FREE_ROAD_DELTA):
+    """Compute IDM-like free-road acceleration with exponent delta."""
 
     if (v_target >= v):
         dv_dt = a_max * (1 - (v/v_target)**delta)
@@ -43,7 +47,7 @@ class PlatoonManager:
     
     def __init__(self, vehicles: List[Vehicle], use_state_space: bool = False):
         self.vehicles = vehicles
-        self.target_velocity = 120.0 / 3.6  # 120 km/h in m/s (matching platoon_control)
+        self.target_velocity = PLATOON_TARGET_VELOCITY
         self.max_velocity = _vp.max_velocity  # m/s (matching platoon_control.py)
         self.max_acceleration = _vp.max_acceleration  # m/s^2 (matching platoon_control.py)
         
@@ -79,7 +83,7 @@ class PlatoonManager:
         
         # Check if leader has Nash acceleration override
         # if hasattr(Car_1, 'nash_acceleration') and Car_1.nash_acceleration is not None:
-        if not is_prediction_mode  and not Car_1.nash_acceleration is None:
+        if not is_prediction_mode and Car_1.nash_acceleration is not None:
             lead_acc = Car_1.nash_acceleration
             Car_1.nash_acceleration = None  # Reset for next iteration
             new_velocity_leader = Car_1.v + lead_acc * dt
@@ -89,6 +93,10 @@ class PlatoonManager:
             new_velocity_leader = odeint(free_road_acc, Car_1.v, [0, dt], args=(self.target_velocity, self.max_acceleration))[-1][0]
             new_velocity_leader = np.clip(new_velocity_leader, 0,  Car_1.max_velocity)  # velocity limits
             lead_acc = (new_velocity_leader - Car_1.v) / dt if dt > 0 else 0
+
+        # Clamp to vehicle's physical capability
+        lead_a_max = Car_1.get_dynamic_max_acceleration() if hasattr(Car_1, 'get_dynamic_max_acceleration') else self.max_acceleration
+        lead_acc = np.clip(lead_acc, -self.max_acceleration, lead_a_max)
 
         # Jerk-limit leader acceleration
         lead_acc = self._jerk_limit(Car_1.vehicle_id, lead_acc, dt)
@@ -120,19 +128,20 @@ class PlatoonManager:
             
             # Check if follower has Nash acceleration override
             # if hasattr(follower, 'nash_acceleration') and follower.nash_acceleration is not None:
-            if not is_prediction_mode  and not follower.nash_acceleration is None:
+            if not is_prediction_mode and follower.nash_acceleration is not None:
                 a_des = follower.nash_acceleration
                 follower.nash_acceleration = None  # Reset for next iteration
                 # Calculate desired gap for history (even when using Nash)
-                s_des = leader.L + 1.5 * follower.v  # h=1.5s
+                s_des = leader.L + RAJAMANI_H * follower.v
                 self.desired_gaps_history[car_num-1].append(s_des)
             else:
                 # Apply Rajamani control law - exactly like platoon_control.py
                 a_des, s_des = rajamani(leader, follower)
                 self.desired_gaps_history[car_num-1].append(s_des)
 
-            # Clamp to physical limits (engine can't exceed max_acceleration)
-            a_des = np.clip(a_des, -self.max_acceleration, self.max_acceleration)
+            # Clamp to vehicle's physical capability (engine-dependent upper limit)
+            follower_a_max = follower.get_dynamic_max_acceleration() if hasattr(follower, 'get_dynamic_max_acceleration') else self.max_acceleration
+            a_des = np.clip(a_des, -self.max_acceleration, follower_a_max)
 
             # Jerk-limit follower acceleration
             a_des = self._jerk_limit(follower.vehicle_id, a_des, dt)

@@ -22,35 +22,38 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vehicle.components import VehicleParameters
-
-_vp = VehicleParameters()
+from config import (
+    DRIVER_PARAMS,
+    MOBIL_IDM_V0, MOBIL_IDM_T, MOBIL_IDM_A_MAX, MOBIL_IDM_B,
+    MOBIL_IDM_S0, MOBIL_IDM_DELTA, MOBIL_IDM_L,
+    MOBIL_P, MOBIL_B_SAFE, MOBIL_A_TH, MOBIL_A_BIAS, MOBIL_MIN_GAP,
+)
 
 
 @dataclass
 class IDMParams:
     """Intelligent Driver Model parameters (from Kesting et al.)"""
-    v0: float = 33.3          # Desired velocity [m/s] (120 km/h)
-    T: float = 1.2            # Safe time headway [s]
-    a: float = _vp.max_acceleration  # Maximum acceleration [m/s²]
-    b: float = _vp.comfortable_deceleration  # Comfortable deceleration [m/s²]
-    s0: float = 2.0           # Minimum spacing [m]
-    delta: float = 4.0        # Acceleration exponent
-    L: float = _vp.length     # Vehicle length [m]
+    v0: float = MOBIL_IDM_V0       # Desired velocity [m/s] (120 km/h)
+    T: float = MOBIL_IDM_T         # Safe time headway [s]
+    a: float = MOBIL_IDM_A_MAX     # Maximum acceleration [m/s²]
+    b: float = MOBIL_IDM_B         # Comfortable deceleration [m/s²]
+    s0: float = MOBIL_IDM_S0       # Minimum spacing [m]
+    delta: float = MOBIL_IDM_DELTA  # Acceleration exponent
+    L: float = MOBIL_IDM_L         # Vehicle length [m]
 
 
-@dataclass  
+@dataclass
 class MOBILParams:
     """MOBIL model parameters (from Kesting et al. Table 1)"""
-    p: float = 0.5            # Politeness factor [0=egoistic, 1=altruistic]
-    b_safe: float = 4.0       # Maximum safe deceleration [m/s²]
-    a_th: float = 0.1         # Changing threshold [m/s²]
-    a_bias: float = 0.3       # Bias for right lane (asymmetric rules) [m/s²]
-    
+    p: float = MOBIL_P             # Politeness factor [0=egoistic, 1=altruistic]
+    b_safe: float = MOBIL_B_SAFE   # Maximum safe deceleration [m/s²]
+    a_th: float = MOBIL_A_TH       # Changing threshold [m/s²]
+    a_bias: float = MOBIL_A_BIAS   # Bias for right lane (asymmetric rules) [m/s²]
+
     # Mandatory lane change parameters
-    mandatory_mode: bool = True  # If True, skip incentive criterion
-    min_gap_front: float = 8.0   # Minimum gap to vehicle in front [m]
-    min_gap_rear: float = 8.0    # Minimum gap to vehicle behind [m]
+    mandatory_mode: bool = True         # If True, skip incentive criterion
+    min_gap_front: float = MOBIL_MIN_GAP  # Minimum gap to vehicle in front [m]
+    min_gap_rear: float = MOBIL_MIN_GAP   # Minimum gap to vehicle behind [m]
 
 
 class IDM:
@@ -156,22 +159,10 @@ class MOBILLaneChange:
         print(f"   p={self.params.p}, b_safe={self.params.b_safe} m/s², a_th={self.params.a_th} m/s²")
     
     def set_politeness(self, driver_type: str):
-        """
-        Set politeness factor based on driver type.
-        
-        Args:
-            driver_type: 'cautious', 'normal', or 'aggressive'
-        """
-        if driver_type == 'cautious':
-            self.params.p = 0.8    # Very polite - considers others more
-            self.params.a_th = 0.2  # Higher threshold - more conservative
-        elif driver_type == 'aggressive':
-            self.params.p = 0.2    # Less polite - more egoistic
-            self.params.a_th = 0.05 # Lower threshold - changes more easily
-        else:  # normal
-            self.params.p = 0.5
-            self.params.a_th = 0.1
-        
+        """Set politeness factor based on driver type (reads from DRIVER_PARAMS)."""
+        p = DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])
+        self.params.p     = p['mobil_p']
+        self.params.a_th  = p['mobil_a_th']
         print(f"   MOBIL politeness set for {driver_type}: p={self.params.p}")
     
     def check_lane_change(self, 

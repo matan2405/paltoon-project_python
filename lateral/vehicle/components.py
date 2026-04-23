@@ -1,6 +1,10 @@
 """
 Vehicle components module for lateral control simulation.
-VERSION 2.0
+
+Research linkage:
+- Parameter container for the lateral bicycle model and tire-force
+    approximations used throughout simulation and Nash prediction.
+- Keeps physical constants centralized for reproducible thesis experiments.
 """
 
 import numpy as np
@@ -8,7 +12,7 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import NOMINAL_VELOCITY
+from config import NOMINAL_VELOCITY, ROAD_FRICTION_MU
 
 
 @dataclass
@@ -27,41 +31,29 @@ class VehicleParameters:
     lf: float = 1.2525  # distance from CG to front axle
     lr: float = 1.2525  # distance from CG to rear axle
     
-    # Aerodynamics (from official specs)
-    drag_coefficient: float = 0.30  # Cd
-    frontal_area: float = 2.09  # m²
-    
-    # Tire parameters (225/50 R17)
-    wheel_radius: float = 0.3175  # m
-    tire_friction_coeff: float = 0.8
-    
-    # Tire cornering stiffness (matching Unity/Longitudinal system)
-    Cf: float = 15000.0  # Front tire cornering stiffness N/rad
-    Cr: float = 18000.0  # Rear tire cornering stiffness N/rad
+    # Tire cornering stiffness
+    Cf: float = 15000.0  # Front wheel cornering stiffness N/rad (per wheel; axle = 2*Cf)
+    Cr: float = 18000.0  # Rear wheel cornering stiffness N/rad (per wheel; axle = 2*Cr)
     
     # Moment of inertia
     Iz: float = 2500.0  # kg·m² (estimated)
     
-    # Steering constraints (from official specs)
-    max_steering_angle: float = np.radians(30.0)  # rad (30°)
+    # Steering constraints (Audi TT specs)
+    max_steering_angle: float = np.radians(25.0)  # rad (25°)
     max_steering_rate: float = np.radians(15.0)   # rad/s (15°/s)
     steering_ratio: float = 14.6  # from technical data
-    
-    # Performance limits
-    max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
-    max_acceleration: float = 2.5  # m/s² (longitudinal comfort limit)
-    max_deceleration: float = -3.5  # m/s² (emergency braking capability)
-    comfortable_deceleration: float = 2.0  # m/s² (magnitude, for IDM/MOBIL)
     
     # Lateral dynamics constraints
     max_lateral_acceleration: float = 3.0  # m/s²
     max_lateral_jerk: float = 2.5  # m/s³
     
-    # Operating point
+    # Performance
     nominal_velocity: float = NOMINAL_VELOCITY  # m/s
-    
-    # Constants
-    gravity: float = 9.81
+    max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
+
+    # Nonlinear dynamics parameters
+    mu: float = ROAD_FRICTION_MU  # tire-road friction coefficient (config: ROAD_FRICTION_MU)
+    g: float = 9.81    # gravitational acceleration (m/s²)
 
 
 class VehicleState:
@@ -72,11 +64,15 @@ class VehicleState:
         self.y_dot = 0.0
         self.psi = 0.0
         self.psi_dot = 0.0
-        self.x = 0.0
-        self.vx = NOMINAL_VELOCITY
+        self.x = 0.0          # body-frame longitudinal distance
+        self.vx = 0.0         # longitudinal velocity component (vx ≠ v_total = √(vx²+vy²))
         self.delta = 0.0
+        self.Fxf = 0.0      # longitudinal front axle force [N] (from longitudinal module, for Fxf·sin(δf) coupling)
         self.ay = 0.0
         self.beta = 0.0
+        # World (inertial) frame coordinates
+        self.X_world = 0.0    # global longitudinal position (Rajamani Eq. 2.10)
+        self.Y_world = 0.0    # global lateral position (Rajamani Eq. 2.11)
     
     def get_state_vector(self) -> np.ndarray:
         return np.array([self.y, self.y_dot, self.psi, self.psi_dot])

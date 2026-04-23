@@ -1,6 +1,11 @@
 """
 Global configuration for the Longitudinal Control simulation system.
-VERSION 2.0 - Comprehensive parameter centralization
+
+Research basis and scope:
+- Centralizes parameters used by longitudinal safety field, authority
+    allocation, reference generation, platoon control, and Nash solver.
+- Aligns with the same architecture used in the lateral stack for easier
+    thesis traceability and cross-domain comparisons.
 
 Based on the lateral system's config architecture (lateral/config.py).
 All hardcoded parameters from nash_solver, safety_field, authority_allocator,
@@ -74,6 +79,9 @@ DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time [s]
 from vehicle.components import VehicleParameters
 _vp = VehicleParameters()
 
+# Road grade — Belousov Eq. 3.11a grade resistance: Rg = m·g·sin(θ)
+ROAD_GRADE = _vp.road_grade   # [rad] positive = uphill
+
 # Vehicle colors for plotting
 VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
 GAP_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
@@ -95,11 +103,6 @@ RAJAMANI_K2 = -RAJAMANI_K1 - RAJAMANI_H * RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K3 = 1.0 / RAJAMANI_H - RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K4 = RAJAMANI_K5 / RAJAMANI_H
 
-# CTH follower controller gains (Ioannou & Chien, 1993)
-# Position/velocity only — no acceleration feedback — robust to noisy dynamics
-CTH_KP = 0.4              # Gap-error gain [-]
-CTH_KD = 0.8              # Relative-velocity gain [-] (must be > CTH_KP * h / 2)
-
 # Jerk limiting (ISO 15622 ACC comfort standard)
 JERK_LIMIT = 2.0           # Maximum da/dt [m/s³]
 
@@ -112,16 +115,16 @@ FREE_ROAD_DELTA = 4
 # =============================================================================
 # Cost weights - Output tracking
 NASH_Q_POS = 2500.0               # Weight on position tracking error
-NASH_Q_VEL = 50.0                 # Weight on velocity tracking error
+NASH_Q_VEL = 1500.0               # Weight on velocity tracking error
 
 # Control effort weights (R) - BASE VALUES
 # S = R for cooperation (Nash equilibrium insight)
-NASH_R1 = 800.0                   # System's cost on its own control effort
-NASH_R2 = 800.0                   # Human's cost on its own control effort
+NASH_R1 = 30000.0*0.25                  # System's cost on its own control effort
+NASH_R2 = 50000.0*0.25                  # Human's cost on its own control effort
 
 # Cross-coupling weights (S) - THE KEY FOR COUPLED NASH GAME
-NASH_S1 = 800.0                   # System penalty on human control effort
-NASH_S2 = 800.0                   # Human penalty on system control effort
+NASH_S1 = 10000.0                   # System penalty on human control effort
+NASH_S2 = 10000.0                   # Human penalty on system control effort
 
 # Input constraints [m/s²] — derived from VehicleParameters
 NASH_U1_MIN = _vp.max_deceleration        # System min acceleration (from vehicle specs)
@@ -136,7 +139,7 @@ NASH_DU2_MAX = 2.0                # Human max jerk
 # State constraints
 NASH_V_MIN = 0.0                  # Min velocity [m/s]
 NASH_V_MAX = 50.0                 # Max velocity [m/s]
-NASH_GAP_MIN = 5.0                # Min safe gap [m]
+NASH_GAP_MIN = 7.0                # Min safe gap [m]
 
 # Lambda levels for pre-computation (authority ratio discrete values)
 # Covers range from Li et al. lookup table: λ = 0.014 (safe) to λ = 106.6 (emergency)
@@ -167,7 +170,7 @@ NASH_DRIVER_PARAMS = {
         'plan_decel': 3.0,                   # [m/s²]
         'target_speed_offset': -10.0,        # [km/h]
         'max_deceleration': -3.0,            # [m/s²]
-        'initial_x_offset': 20.0,             # [m] Start with larger gap to leader
+        'initial_x_offset': 40.0,             # [m] Start with larger gap to leader
         'initial_speed': 0.0,                # [km/h] Target speed for the driver
     },
     'normal': {
@@ -203,7 +206,7 @@ NASH_DRIVER_PARAMS = {
 # Source: longitudinal_safety_field.py - EllipseLongitudinalParams
 # =============================================================================
 # --- Hard Constraints ---
-SAFETY_MIN_SAFE_DISTANCE = 5.0          # [m]
+SAFETY_MIN_SAFE_DISTANCE = 7.0          # [m]
 SAFETY_EMERGENCY_BRAKE_DISTANCE = 8.0   # [m]
 SAFETY_MAX_DECEL = abs(_vp.max_deceleration)   # [m/s²] (from vehicle specs)
 
@@ -239,7 +242,7 @@ SAFETY_MIN_ATTRACTIVE_FORCE = -500.0
 # --- Follower Weights ---
 SAFETY_LEADER_WEIGHT = 1.0
 SAFETY_FOLLOWER_WEIGHT = 0.5
-SAFETY_JOINING_FOLLOWER_WEIGHT = 0.2
+SAFETY_JOINING_FOLLOWER_WEIGHT = 0.5  # increased from 0.2 to push human away from approaching P3
 SAFETY_DECELERATING_FOLLOWER_WEIGHT = 0.4
 
 # --- Platoon Factors ---
@@ -292,9 +295,8 @@ ENGINE_BRAKING_MAX_TORQUE = 120.0      # Maximum retarding torque cap [Nm]
 # to avoid chasing transient force discontinuities
 LOWER_CTRL_GEAR_SHIFT_HOLD = True      # Freeze actuator output during gear shifts
 
-# Physical constants used by feedforward
-LOWER_CTRL_AIR_DENSITY = 1.225         # Air density [kg/m³]
-LOWER_CTRL_ROLLING_COEFF = 0.012       # Rolling resistance coefficient [-]
+# Physical constants (air density, rolling coeff) come from VehicleParameters.
+# Use _vp.air_density and _vp.rolling_resistance_coeff instead of separate config entries.
 
 # =============================================================================
 # PHASE DETECTION PARAMETERS (MERGING ↔ FOLLOWING)
@@ -318,20 +320,21 @@ PHASE_TRANSITION_TIME = 5.0                   # [s] stability required
 # =============================================================================
 # Sigmoid parameters for SAFETY (risk-based)
 AUTHORITY_LAMBDA_MIN = 0.1          # Human dominant when safe
-AUTHORITY_LAMBDA_MAX = 100.0        # System dominant when dangerous
+AUTHORITY_LAMBDA_MAX = 100.0        # High λ -> low α: emergency regime where system overrides
 AUTHORITY_FORCE_MIDPOINT = 400.0    # Sigmoid center point [N]
 AUTHORITY_K_STEEPNESS = 0.015       # Sigmoid slope
 
-# Smoothing parameters (Maximum Comfort V5.2)
+# Smoothing parameters
 AUTHORITY_ALPHA_BASE = 0.05         # Base smoothing (extremely smooth)
 AUTHORITY_ALPHA_FAST = 0.12         # Fast response (still smooth)
 
-# Hysteresis thresholds
-AUTHORITY_ENTER_THRESHOLD = 3.0     # Enter performance mode when |gap_error| > 3m
-AUTHORITY_EXIT_THRESHOLD = 1.0      # Exit performance mode when |gap_error| < 1m
-
-# Performance authority upper bound
-AUTHORITY_LAMBDA_PERFORMANCE_MAX = 50.0
+# Gap-error sigmoid parameters (Swain & Rath 2023, Eq. 15 — adapted for longitudinal)
+AUTHORITY_SIGMOID_M1 = 2.0          # Slope steepness (Swain & Rath: m1=2)
+AUTHORITY_SIGMOID_M2 = 0.5          # Centre shift    (Swain & Rath: m2=0.5)
+AUTHORITY_GAP_ERROR_MAX = 5.0       # Max gap error for full authority [m]
+                                    # (analogous to LANE_WIDTH/2 in lateral)
+AUTHORITY_VEL_ERROR_MAX = 1.5       # Max velocity error for full authority [m/s]
+                                    # (~10.8 km/h): sigmoid saturates at this speed deviation
 
 # =============================================================================
 # SYSTEM REFERENCE GENERATOR PARAMETERS (Rajamani Ch. 6.7)
@@ -342,7 +345,7 @@ REFGEN_DETECTION_RANGE = 150.0      # [m]
 
 # CTG policy (Rajamani Eq. 6.5)
 REFGEN_TIME_HEADWAY = 1.5          # [s]
-REFGEN_STANDSTILL_DISTANCE = 5.0   # [m]
+REFGEN_STANDSTILL_DISTANCE = 2.0   # [m] balanced: 0 overshoots below, 5 overshoots above desired gap
 
 # Comfortable deceleration (Rajamani Section 6.7.2, typical 0.1g-0.2g)
 REFGEN_A_COMFORT = 1.5             # [m/s²] (gentler than vehicle comfortable_deceleration for smooth refs)
@@ -360,6 +363,11 @@ REFGEN_MAX_DECEL = _vp.max_deceleration     # [m/s²] (from vehicle specs)
 
 # Cruise catch-up factor
 REFGEN_CATCHUP_FACTOR = 1.15
+
+# Free-road IDM exponent for RefGen CRUISE mode
+# Higher delta → stronger push near target speed (join_before steady-state velocity)
+# delta=4: a(99.5%→100%) = 0.05 m/s²  | delta=6: 0.074 m/s²  | delta=8: 0.098 m/s²
+REFGEN_FREE_ROAD_DELTA = 6
 
 # CTG blending zone (gap error threshold for CTG/parabola blend)
 REFGEN_CTG_BLEND_ZONE = 5.0        # [m] - blend in CTG for |gap_error| < 5m
@@ -441,13 +449,14 @@ __all__ = [
     'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX',
     'AUTHORITY_FORCE_MIDPOINT', 'AUTHORITY_K_STEEPNESS',
     'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
-    'AUTHORITY_ENTER_THRESHOLD', 'AUTHORITY_EXIT_THRESHOLD',
-    'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
+    'AUTHORITY_SIGMOID_M1', 'AUTHORITY_SIGMOID_M2',
+    'AUTHORITY_GAP_ERROR_MAX', 'AUTHORITY_VEL_ERROR_MAX',
 
     # System reference generator
     'REFGEN_DETECTION_RANGE', 'REFGEN_TIME_HEADWAY', 'REFGEN_STANDSTILL_DISTANCE',
     'REFGEN_A_COMFORT', 'REFGEN_K_V', 'REFGEN_K1', 'REFGEN_K2',
     'REFGEN_MAX_ACCEL', 'REFGEN_MAX_DECEL', 'REFGEN_CATCHUP_FACTOR',
+    'REFGEN_FREE_ROAD_DELTA',
     'REFGEN_CTG_BLEND_ZONE', 'REFGEN_CTG_BLEND_POWER', 'REFGEN_LEADER_FF_GAIN',
 
     # Human driver
@@ -460,10 +469,10 @@ __all__ = [
     # Lower-level controller
     'LOWER_CTRL_KP', 'LOWER_CTRL_KI', 'LOWER_CTRL_INTEGRATOR_LIMIT',
     'LOWER_CTRL_THROTTLE_SMOOTHING', 'LOWER_CTRL_BRAKE_SMOOTHING',
-    'LOWER_CTRL_DEADBAND', 'LOWER_CTRL_AIR_DENSITY', 'LOWER_CTRL_ROLLING_COEFF',
+    'LOWER_CTRL_DEADBAND',
     'LOWER_CTRL_ACCEL_FILTER_ALPHA', 'LOWER_CTRL_GEAR_SHIFT_HOLD',
     'ENGINE_BRAKING_BASE_TORQUE', 'ENGINE_BRAKING_MAX_TORQUE',
 
-    # CTH controller & jerk limit
-    'CTH_KP', 'CTH_KD', 'JERK_LIMIT',
+    # Jerk limit
+    'JERK_LIMIT',
 ]

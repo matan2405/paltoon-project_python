@@ -1,128 +1,185 @@
-# Lateral Platoon Merging Simulation
+# Lateral Convoy Merging — Algorithm Documentation
 
-Simulates a human-driven vehicle performing a **lane change to merge into a vehicle platoon** using Nash equilibrium-based shared control between an autonomous system and a human driver.
+## Overview
 
-## What It Does
+This module simulates **lateral (lane-change) merging** — a human-driven vehicle changing lanes to join an autonomous convoy traveling in an adjacent lane. The core innovation is the same **Nash equilibrium shared control** framework as the longitudinal module, now applied to the 2D lateral merging problem.
 
-A platoon of vehicles travels at 72 km/h (20 m/s) in the right lane. A human-driven vehicle in the left lane decides to merge. The system and human driver share control of the steering wheel:
-- **System (Player 1):** Slow, smooth, safe lane change (5th-order polynomial trajectory)
-- **Human (Player 2):** Faster, more direct maneuver (3rd-order polynomial trajectory)
+**Primary references**:
+- Pustilnik & Borrelli (2025) — Non-normalized GNE for lateral merging
+- Kesting, Treiber & Helbing (2007) — MOBIL lane change model
+- Wang et al. (2015/2016) — 2D elliptic driving safety field
+- Swain & Rath (2023) — Sigmoid authority allocation (Eq. 15)
 
-Dynamic authority allocation (λ) shifts control toward the system when risk increases. The MOBIL model first confirms the merge is safe and beneficial before Nash control activates.
+---
 
-## Quick Start
+## System Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                      main_with_menu.py                        │
+│  (scenario menu, timestep loop, Nash integration)             │
+└─────┬────────────────────────────────────────────────────────┘
+      │
+      ├── simulation/simulator.py       ← PlatoonSimulation (orchestrator)
+      │        │
+      │        ├── control/platoon_control.py   ← PlatoonManager (Stanley)
+      │        ├── control/human_driver.py      ← Human lateral behavior
+      │        ├── control/mobil_lane_change.py ← MOBIL decision model
+      │        ├── vehicle/vehicle.py           ← Vehicle (bicycle model)
+      │        └── vehicle/components.py        ← VehicleParameters
+      │
+      ├── nash_solver/lateral_constrained_nash_solver.py  ← Nash MPC (OSQP)
+      ├── nash_solver/lateral_safety_field.py             ← 2D elliptic field
+      ├── nash_solver/lateral_authority_allocator.py      ← λ with lateral sigmoid
+      ├── nash_solver/system_reference_generator.py       ← R1 (convoy target)
+      ├── nash_solver/human_reference_generator.py        ← R2 (human natural path)
+      │
+      ├── visualization/plots.py     ← Lateral analysis plots
+      ├── visualization/animation.py ← Bird's-eye GIF
+      └── metrics/                   ← Performance evaluation
+```
+
+---
+
+## Algorithm Pipeline (Per Timestep)
+
+```
+Every SIMULATION_DT = 0.01 s (100 Hz):
+
+  1. FORMATION CONTROL
+     PlatoonManager → Stanley controller for convoy vehicles in left lane (y=0)
+
+  2. HUMAN DRIVING
+     HumanDriver → lateral behavior in right lane (y=1.75m)
+
+  3. MOBIL DECISION (every step)
+     MOBILLaneChange → should lane change be triggered?
+     - Safety criterion: new follower won't brake dangerously
+     - Incentive criterion (or mandatory mode): lane change is beneficial
+
+  Every NASH_CONTROL_DT = 0.05 s (20 Hz):
+
+  4. REFERENCE GENERATION
+     SystemReferenceGenerator → R1 (convoy target position, Np=20 steps × 4 states)
+     HumanReferenceGenerator  → R2 (human natural path, Np=20 steps × 4 states)
+
+  5. RISK ASSESSMENT (2D)
+     EllipseLateralSafetyField → (F_x, F_y) forces on human vehicle
+
+  6. AUTHORITY ALLOCATION
+     LateralAuthorityAllocator → λ(t)
+     - Swain & Rath sigmoid on |e_y| (lateral error)
+     - Safety component from |F_y|
+     - Emergency override check
+
+  7. NASH EQUILIBRIUM
+     ConstrainedLateralNashSolver → (u1*, u2*, u_shared)
+     vehicle.nash_acceleration = u_shared  (lateral acceleration [m/s²])
+
+  8. VEHICLE DYNAMICS
+     Vehicle.update() → bicycle model integration
+
+  9. DATA LOGGING
+```
+
+---
+
+## Key Differences from Longitudinal Module
+
+| Aspect | Longitudinal | Lateral |
+|---|---|---|
+| Vehicle state | [x, vx] (2D) | [x, vx, y, vy] (4D) |
+| Dynamics model | Belousov EOM (RK4) | Linearized bicycle model |
+| Nash control rate | 10 Hz (0.1 s) | 20 Hz (0.05 s) |
+| Lane change decision | N/A | MOBIL model |
+| Human reference gen | HumanDriver.get_sequence() | HumanReferenceGenerator (separate module) |
+| Authority sigmoid | Standard sigmoid on force | Swain & Rath (2023) sigmoid on |e_y| |
+| Emergency override | Only λ scaling | Hard lateral correction + λ scaling |
+| Safety field | 1D (longitudinal gap) | 2D elliptic (x-y space) |
+| Results directory | `platoon_sim_kinematic_results/` | `lateral_sim_results_v2/` |
+
+---
+
+## MOBIL Lane Change Model
+
+The MOBIL model (Kesting et al. 2007) decides **when** the human should change lanes. The Nash solver decides **how** to execute it.
+
+### Safety Criterion
+```
+ã_new_follower ≥ −b_safe
+```
+The vehicle that will be behind the lane-changer in the target lane must not be forced to brake harder than `b_safe`.
+
+### Incentive Criterion
+```
+ã_ego − a_ego + p·(ã_new_follower − a_new_follower) > Δa_threshold
+```
+The lane change must improve the ego's acceleration by at least `Δa_threshold`, accounting for the impact on surrounding vehicles scaled by politeness `p`.
+
+### Mandatory Mode
+For platoon joining, `mandatory_mode = True` skips the incentive criterion — the human **must** join the convoy when it is safe to do so.
+
+---
+
+## Authority Allocation: Swain & Rath (2023)
+
+The lateral authority allocation uses a specific sigmoid formulation based on lateral position error from the target (Eq. 15 of Swain & Rath 2023):
+
+```
+α_lat = 1 / (1 + exp(−M1 · (|e_y| / e_y_max − M2)))
+
+M1 = 2.0  (steepness)
+M2 = 0.5  (center shift)
+e_y_max = LANE_WIDTH / 2 = 1.75 m
+```
+
+**Interpretation**: At half the lane width of lateral error (1.75 m), the system and human have equal authority (α ≈ 0.5). Larger errors give the system more control.
+
+---
+
+## Configuration
+
+All parameters in `lateral/config.py` — this is **completely separate** from `Longitudinal/config.py`.
+
+Key parameter groups:
+
+| Group | Prefix | Description |
+|---|---|---|
+| Simulation | `SIMULATION_DT`, `NASH_CONTROL_DT` | Timing |
+| Driver types | `DRIVER_PARAMS` | Per-type lateral behavior |
+| MOBIL model | `MOBIL_*` | Lane change decision params |
+| Nash solver | `NASH_*` | Cost weights, horizons |
+| Safety field | Embedded in class defaults | 2D ellipse parameters |
+| Authority | `AUTHORITY_SIGMOID_M1`, `M2` | Swain & Rath params |
+| Lane geometry | `LANE_WIDTH`, `NOMINAL_VELOCITY` | Road geometry |
+
+---
+
+## How to Run
 
 ```bash
-pip install numpy scipy matplotlib cvxpy
 cd lateral
 python main_with_menu.py
 ```
 
-Choose a scenario and driver type from the interactive menu:
+Choose from the interactive menu:
+- Driver type (cautious / normal / aggressive)
+- Nash enabled / disabled
+- Scenario configuration
 
-| Scenario | Human x-position | Merge trigger |
-|----------|-----------------|---------------|
-| Join before | +100 m | t = 3 s |
-| Join middle | +35 m | t = 3 s |
-| Join after | −20 m | t = 5 s |
+---
 
-Driver types: **cautious** (smooth), **normal** (baseline), **aggressive** (responsive).
+## Dependencies
 
-Results saved to `convoy_simulation_results/` as PNG plots and GIF animations.
-
-## Architecture
-
-```
-Nash Control Step (every 0.05 s):
-  Safety Field → Authority Allocation (λ) → Reference Generation (R1_y/ψ, R2_y/ψ)
-  → GNE Solve (CVXPY/OSQP) → δ_shared = δ1 + δ2
-  → vehicle.update_dynamics(δ_shared)
+```bash
+pip install numpy scipy matplotlib osqp cvxpy
 ```
 
-Vehicle dynamics run at 100 Hz. Nash control runs at 20 Hz.
-
-### Modules
-
-| Module | Purpose |
-|--------|---------|
-| `main_with_menu.py` | Entry point, scenario/driver selection, output |
-| `config.py` | All parameters (rates, weights, lane geometry, driver profiles) |
-| `vehicle/` | 2-DOF bicycle model with dual body-frame / error-model propagation |
-| `control/` | Stanley path-tracking controller, MOBIL lane-change decision, platoon manager |
-| `nash_solver/` | GNE solver (CVXPY), safety field, authority allocator, reference generators |
-| `simulation/` | Main simulation loop (`LateralSimulation`) and data logging |
-| `visualization/` | 9-panel static plots and 4-panel animated GIF |
-
-## Key Concepts
-
-### Generalized Nash Equilibrium (Pustilnik & Borrelli 2025)
-
-Unlike the longitudinal module, the lateral solver uses **Non-Normalized GNE** solved as a convex QP via CVXPY. Control outputs are **added** (not blended):
-
-```
-δ_shared = δ1 + δ2
-```
-
-Authority allocation is embedded inside the QP costs via α = λ/(1+λ):
-- J₁ = ‖z−r₁‖²_Q + R₁‖u₁‖² + S₁‖u₂‖²
-- J₂ = α·‖z−r₂‖²_Q + R₂‖u₂‖² + α·S₂‖u₁‖²
-
-### Vehicle Model: Dual Propagation 2-DOF Bicycle
-
-State `[y, ẏ, ψ, ψ̇]` is propagated twice per step with the same δ:
-- **Body-frame** — tracks real position for animation and logging
-- **Error-model** `[e₁, ė₁, e₂, ė₂]` — fed directly to the Nash solver for planning
-
-### Phase State Machine
-
-```
-CRUISE → GAP_SEARCH → LANE_CHANGE → LANE_KEEPING → FOLLOWING
-```
-
-Reference generators produce different trajectories per phase. LANE_KEEPING entry uses a 5-second stability requirement. Phase transitions trigger smooth settling trajectories (V4.0) to avoid reference discontinuities.
-
-### Driver Personality
-
-Three profiles (cautious / normal / aggressive) affect all subsystems:
-
-| Component | Cautious | Normal | Aggressive |
-|-----------|---------|--------|-----------|
-| Stanley k_e | 0.003 | 0.005 | 0.008 |
-| Stanley k_psi | 0.3 | 0.5 | 0.7 |
-| System T_lc | 9.0 s | 6.75 s | 4.5 s |
-| Human T_lc | 6.0 s | 4.5 s | 3.0 s |
-| MOBIL politeness | high | medium | low |
-| Nash R2 factor | 1.5× | 1.0× | 0.6× |
-
-## Parameters
-
-All tunable parameters are in `config.py`:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `SIMULATION_DT` | 0.01 s | Vehicle dynamics rate |
-| `NASH_CONTROL_DT` | 0.05 s | Nash control rate |
-| `NASH_NP` | 20 steps | Prediction horizon (1 s) |
-| `NASH_NU` | 10 steps | Control horizon (0.5 s) |
-| `LANE_WIDTH` | 3.5 m | Lane width |
-| `NOMINAL_VELOCITY` | 20.0 m/s | Platoon speed |
-| `NASH_Q_Y` | 10.0 | Lateral position weight |
-| `NASH_Q_PSI` | 10 000 | Heading weight (high for stability) |
-| `NASH_R1 = NASH_R2` | 1 000 000 | Control effort cost |
-| `NASH_S1 = NASH_S2` | 200 000 | Cooperation coupling |
+---
 
 ## Output
 
-Per-scenario visualization:
-- **9-panel comprehensive plot**: lateral position, heading, y_dot, steering inputs (system/human/shared), authority ratio, safety field force, y_error, lateral acceleration, phase timeline
-- **2D trajectory plot**: bird's-eye view with lane boundaries and phase color-coding
-- **9-panel Nash analysis**: state evolution, control inputs, cost and cooperation metrics
-- **4-panel animation**: bird's-eye view, lateral position, steering, status bar
-
-## References
-
-- Li et al. (2019): *Shared control with a novel dynamic authority allocation strategy based on game theory and driving safety field*
-- Pustilnik & Borrelli (2025): Non-Normalized Generalized Nash Equilibrium for shared control
-- Treiber et al. (2000): Intelligent Driver Model (IDM)
-- Kesting et al. (2007): MOBIL lane-change decision model
-- Rajamani (2012): *Vehicle Dynamics and Control*
+Results saved to `lateral_sim_results_v2/`:
+- `lateral_analysis_*.png` — lateral position, velocity, forces, authority
+- `animation_*.gif` — bird's-eye lane change animation
+- `metrics_report_*.txt` — quantitative lane change quality metrics

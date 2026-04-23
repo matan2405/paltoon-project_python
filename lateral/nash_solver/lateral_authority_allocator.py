@@ -1,12 +1,21 @@
 """
 Lateral Authority Allocator.
-VERSION 3.0 - Aligned with Longitudinal V5.2
 
-Changes from V2.2:
-- Replaced rate-limiting + fixed smoothing with HYSTERESIS + adaptive smoothing
-- Added PERFORMANCE authority based on y_error (mirrors longitudinal gap_error logic)
-- All parameters moved to config.py (no hardcoded values)
-- Logic mirrors longitudinal_authority_allocator.py V5.2
+Research basis and adopted elements:
+1) Li et al. (2019), authority-as-risk concept:
+    - Safety authority increases with risk-force magnitude.
+    - Used here as a sigmoid mapping from |risk_force| to lambda_safety.
+2) Swain and Rath (2023), Eq. 15:
+    - Replaces threshold/hysteresis lateral authority with continuous sigmoid weighting.
+    - Implemented here via normalized lateral offset l_n and gamma1/gamma2 ratio.
+3) Practical control policy in this codebase:
+    - Fuses safety and lateral-offset authority by max(lambda_safety, lambda_lateral).
+    - Applies adaptive smoothing (alpha_base/alpha_fast) to reduce authority chattering.
+
+What this file contributes in code:
+- Computes lambda(k) from safety and lateral offset channels.
+- Stores per-channel lambdas for logging and post-analysis.
+- Outputs stable authority trajectory for Nash shared steering.
 """
 
 import numpy as np
@@ -17,30 +26,25 @@ from config import (
     AUTHORITY_LAMBDA_MIN, AUTHORITY_LAMBDA_MAX,
     AUTHORITY_FORCE_MIDPOINT, AUTHORITY_K_STEEPNESS,
     AUTHORITY_ALPHA_BASE, AUTHORITY_ALPHA_FAST,
-    AUTHORITY_ENTER_THRESHOLD, AUTHORITY_EXIT_THRESHOLD,
-    AUTHORITY_LAMBDA_PERFORMANCE_MAX,
+    AUTHORITY_ALPHA_FAST_THRESHOLD, AUTHORITY_ALPHA_BASE_THRESHOLD,
+    AUTHORITY_SIGMOID_M1, AUTHORITY_SIGMOID_M2,
+    LANE_WIDTH,
 )
 
 
 class LateralAuthorityAllocator:
     """
-    Dynamic authority allocation with HYSTERESIS to prevent oscillations.
+    Dynamic authority allocation with smooth sigmoid lateral-offset term.
 
-    VERSION 3.0 - Aligned with Longitudinal V5.2:
-
-    Two authority sources (same structure as longitudinal):
-    1. SAFETY authority  — sigmoid on risk_force magnitude
-    2. PERFORMANCE authority — hysteresis on |y_error| (mirrors gap_error in longitudinal)
-
-    Combined: target_lambda = max(lambda_safety, lambda_performance)
-
-    Adaptive smoothing:
-    - alpha_fast when |y_error| > 2× ENTER_THRESHOLD (need quick response)
-    - alpha_base otherwise (need stability)
+    - Safety authority:   sigmoid on risk_force magnitude (unchanged)
+    - Lateral-offset:     Swain & Rath sigmoid — continuous, no hysteresis
+    - Fusion:             max(lambda_safety, lambda_lateral)
+    - Adaptive smoothing: alpha_fast for large errors, alpha_base for small errors
     """
 
     def __init__(self):
-        # Sigmoid parameters for SAFETY (risk-based)
+        """Initialize safety and lateral-offset sigmoid mappings for authority ratio λ."""
+        # Safety sigmoid parameters
         self.lambda_min = AUTHORITY_LAMBDA_MIN
         self.lambda_max = AUTHORITY_LAMBDA_MAX
         self.force_midpoint = AUTHORITY_FORCE_MIDPOINT
@@ -52,77 +56,65 @@ class LateralAuthorityAllocator:
         self.alpha_base = AUTHORITY_ALPHA_BASE
         self.alpha_fast = AUTHORITY_ALPHA_FAST
 
-        # Hysteresis state for PERFORMANCE authority
-        self.in_performance_mode = False
-        self.ENTER_THRESHOLD = AUTHORITY_ENTER_THRESHOLD
-        self.EXIT_THRESHOLD = AUTHORITY_EXIT_THRESHOLD
-        self.lambda_performance_max = AUTHORITY_LAMBDA_PERFORMANCE_MAX
+        # Lateral-offset sigmoid parameters (Swain & Rath 2023, Eq. 15)
+        self.sigmoid_m1 = AUTHORITY_SIGMOID_M1
+        self.sigmoid_m2 = AUTHORITY_SIGMOID_M2
+        self.l_o_max = LANE_WIDTH / 2.0   # max admissible lateral offset [m]
 
-        # Logging
+        # Store last computed values for logging
         self.last_lambda_safety = 0.0
-        self.last_lambda_performance = 0.0
+        self.last_lambda_lateral = 0.0
 
-        print(f"🎯 Authority Allocator V3.0 (Hysteresis) Initialized")
-        print(f"   λ range: {self.lambda_min}-{self.lambda_max}")
-        print(f"   Smoothing: alpha_base={self.alpha_base}, alpha_fast={self.alpha_fast}")
-        print(f"   Hysteresis: enter={self.ENTER_THRESHOLD}m, exit={self.EXIT_THRESHOLD}m")
+        print(f"Authority Allocator (Safety + Swain&Rath Sigmoid) Initialized")
+        print(f"   Safety sigmoid: λ [{self.lambda_min}, {self.lambda_max}], "
+              f"F_mid={self.force_midpoint}N, k={self.k_steepness}")
+        print(f"   Lateral sigmoid: m1={self.sigmoid_m1}, m2={self.sigmoid_m2}, "
+              f"l_max={self.l_o_max:.2f}m  (Swain & Rath 2023, Eq. 15)")
 
     def compute_authority_ratio(self, risk_force: float,
-                                 lateral_error: float = 0.0,
+                                 y_error: float = 0.0,
                                  heading_error: float = 0.0) -> float:
         """
-        Compute authority ratio λ(k) with hysteresis.
+        Compute authority ratio λ(k) using two smooth sigmoid sources.
 
-        Args:
-            risk_force:    Safety field force magnitude [N]
-            lateral_error: y_error = ego_y - target_y [m]  (mirrors gap_error in longitudinal)
-            heading_error: psi_error [rad] (unused in authority computation)
-
-        Returns:
-            lambda_k: Authority ratio (higher = more system authority)
+        - Safety: sigmoid on |risk_force|
+        - Lateral-offset: Swain & Rath sigmoid on |y_error| / l_o_max
+        - Fusion: max(lambda_safety, lambda_lateral)
+        - Adaptive smoothing based on error magnitude
         """
         force_mag = abs(risk_force)
-        abs_y_error = abs(lateral_error)
+        abs_y_error = abs(y_error)
 
-        # --- 1. SAFETY Authority (sigmoid on force) ---
+        # --- 1. SAFETY Authority (sigmoid on risk force, unchanged) ---
         sigmoid_factor = 1.0 / (1.0 + np.exp(-self.k_steepness * (force_mag - self.force_midpoint)))
         lambda_safety = self.lambda_min + (self.lambda_max - self.lambda_min) * sigmoid_factor
 
-        # --- 2. PERFORMANCE Authority with HYSTERESIS ---
-        # Enter: |y_error| > ENTER_THRESHOLD (active lane change)
-        # Exit:  |y_error| < EXIT_THRESHOLD  (close to target)
-        if not self.in_performance_mode:
-            if abs_y_error > self.ENTER_THRESHOLD:
-                self.in_performance_mode = True
-        else:
-            if abs_y_error < self.EXIT_THRESHOLD:
-                self.in_performance_mode = False
+        # --- 2. LATERAL-OFFSET Authority (Swain & Rath 2023, Eq. 15) ---
+        # l_n: normalized distance index (1 = lane centre, 0 = lane boundary)
+        l_n = (self.l_o_max - abs_y_error) / self.l_o_max
+        l_n = float(np.clip(l_n, 0.0, 1.0))
 
-        lambda_performance = self.lambda_min  # Default: human in control
+        # Driver/automation weights
+        gamma1 = 1.0 / (1.0 + np.exp(self.sigmoid_m1 * (-l_n + self.sigmoid_m2)))
+        gamma2 = 1.0 - gamma1
 
-        if self.in_performance_mode:
-            # Progressive authority based on distance from target
-            # Normalized relative to enter/exit band
-            normalized_error = (abs_y_error - self.EXIT_THRESHOLD) / (self.ENTER_THRESHOLD - self.EXIT_THRESHOLD)
-            normalized_error = max(0.0, normalized_error)
-
-            lambda_performance = 1.0 + normalized_error * 0.3 + (abs_y_error - self.EXIT_THRESHOLD) * 0.25
-            lambda_performance = min(lambda_performance, self.lambda_performance_max)
-
-        # --- 3. Fusion: highest urgency wins ---
-        target_lambda = max(lambda_safety, lambda_performance)
+        # Convert to λ ratio (automation / human)
+        lambda_lateral = gamma2 / max(gamma1, 1e-6)
 
         # Store for logging
         self.last_lambda_safety = lambda_safety
-        self.last_lambda_performance = lambda_performance
+        self.last_lambda_lateral = lambda_lateral
 
-        # --- 4. Adaptive smoothing ---
-        if abs_y_error > 2.0 * self.ENTER_THRESHOLD:
+        # --- 3. Fusion: Take the MAX urgency ---
+        target_lambda = max(lambda_safety, lambda_lateral)
+
+        # --- 4. Adaptive Smoothing ---
+        if abs_y_error > AUTHORITY_ALPHA_FAST_THRESHOLD:
             alpha = self.alpha_fast
-        elif abs_y_error > self.ENTER_THRESHOLD:
-            alpha = self.alpha_base + (self.alpha_fast - self.alpha_base) * (
-                (abs_y_error - self.ENTER_THRESHOLD) / self.ENTER_THRESHOLD
-            )
+        elif abs_y_error > AUTHORITY_ALPHA_BASE_THRESHOLD:
+            blend = (abs_y_error - AUTHORITY_ALPHA_BASE_THRESHOLD) / (
+                AUTHORITY_ALPHA_FAST_THRESHOLD - AUTHORITY_ALPHA_BASE_THRESHOLD)
+            alpha = self.alpha_base + (self.alpha_fast - self.alpha_base) * blend
         else:
             alpha = self.alpha_base
 
@@ -132,14 +124,13 @@ class LateralAuthorityAllocator:
         return lambda_k
 
     def get_authority_weights(self, lambda_k: float) -> tuple:
-        """Convert λ to (weight_human, weight_system)."""
+        """Convert λ to human/system weights."""
         total = 1.0 + lambda_k
         return 1.0 / total, lambda_k / total
 
     def reset(self):
         """Reset state for new simulation."""
         self.prev_lambda = self.lambda_min
-        self.in_performance_mode = False
 
 
 __all__ = ['LateralAuthorityAllocator']

@@ -1,34 +1,22 @@
 """
-System Reference Generator for Lateral Control.
-VERSION 4.0 - HEADING-CONSISTENT + SOFT LANE-KEEPING TRANSITION
+System Reference Generator for lateral Nash shared control.
 
-CRITICAL FIX (V4.0):
-====================
-V3.0 had a catastrophic bug: when transitioning from LANE_CHANGE to LANE_KEEPING,
-the reference trajectory jumped instantaneously from the planned trajectory to
-(y=0, ψ=0). If the vehicle hadn't finished the lane change (e.g., cautious driver
-with T_lc=9s but phase transition at t=10s), this created a massive heading error
-(up to 15°), causing saturation and oscillations.
+Research basis and adopted elements:
+1) Li et al. (2019), shared-control game setup:
+    - Provides system-side preview reference R1 over the Nash horizon.
+    - Keeps same final merge target as R2 while allowing different transient shape.
+2) Heading-bounded trajectory design (implemented here via quintic profile math):
+    - Uses quintic lateral profile y(tau) to produce smooth lane-change references.
+    - Enforces a minimum lane-change duration from heading bound psi_max.
+    - Uses the derived peak relation y_dot_max = 1.875*Delta_y/T_lc.
+3) Practical continuity fix used by this codebase:
+    - Soft lane-keeping entry: capture current (y, psi, y_dot) at phase switch.
+    - Build a settling trajectory to avoid discontinuous jumps in reference.
 
-V4.0 introduces a SOFT TRANSITION mechanism:
-- When entering LANE_KEEPING, capture the current state (y, ψ)
-- Generate a settling trajectory from current state to target (y=0, ψ=0)
-- Use a 3rd order polynomial with settling time T_settle
-- After T_settle, switch to pure target reference
-
-This ensures the reference trajectory is ALWAYS continuous with the vehicle state,
-regardless of when the phase transition occurs.
-
-HEADING CONSTRAINT (preserved from V3.0):
-The key insight is that heading angle ψ ≈ dy/dx = (dy/dt)/vx = ẏ/vx
-For ψ < ψ_max, we need: ẏ < vx * tan(ψ_max) ≈ vx * ψ_max
-
-For a 5th order polynomial y(τ) where τ = t/T_lc:
-  ẏ = Δy * (30τ² - 60τ³ + 30τ⁴) / T_lc
-  
-Max ẏ occurs at τ = 0.5: ẏ_max = 1.875 * Δy / T_lc
-
-To satisfy ψ < ψ_max: T_lc > 1.875 * Δy / (vx * ψ_max)
+What this file contributes in code:
+- Phase-aware R1 construction (CRUISE/GAP_SEARCH/LANE_CHANGE/LANE_KEEPING/FOLLOWING).
+- Driver-dependent system T_lc multiplier with heading-safety lower bound.
+- Continuous transition from lane-change to lane-keeping references.
 """
 
 import numpy as np
@@ -38,7 +26,11 @@ from dataclasses import dataclass
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP
+from config import (
+    DRIVER_PARAMS, LANE_WIDTH, NOMINAL_VELOCITY, NASH_CONTROL_DT, NASH_NP,
+    REFGEN_SYSTEM_MAX_HEADING_DEG,
+    REFGEN_MIN_TLC_QUINTIC, REFGEN_MIN_TLC_FREE_ROAD_SYSTEM,
+)
 
 
 class TrajectoryPhase(Enum):
@@ -55,23 +47,21 @@ class DynamicTrajectoryParams:
     target_velocity: float = 20.0
     desired_gap: float = 35.0
     platoon_lane_y: float = 0.0
-    max_heading_angle: float = np.radians(8)
-    
+    max_heading_angle: float = np.radians(REFGEN_SYSTEM_MAX_HEADING_DEG)
+
     def compute_min_T_lc(self, delta_y: float, vx: float) -> float:
-        """Compute minimum T_lc to satisfy heading constraint."""
+        """Compute minimal lane-change duration that satisfies heading-angle bounds."""
         if vx < 1.0 or abs(delta_y) < 0.1:
-            return 5.0
+            return REFGEN_MIN_TLC_FREE_ROAD_SYSTEM
         max_y_dot = vx * np.tan(self.max_heading_angle)
         T_lc_min = 1.875 * abs(delta_y) / max_y_dot
-        return max(T_lc_min, 3.0)
+        return max(T_lc_min, REFGEN_MIN_TLC_QUINTIC)
 
 
 class SystemReferenceGenerator:
     """
     Generate reference trajectories for Nash Solver.
-    
-    VERSION 4.0 - HEADING-CONSISTENT + SOFT LANE-KEEPING TRANSITION
-    
+
     Key improvement: Soft transition when entering LANE_KEEPING phase.
     Instead of jumping to (y=0, ψ=0), generates a settling trajectory
     from current state to target, preventing heading saturation.
@@ -87,13 +77,10 @@ class SystemReferenceGenerator:
         self.lane_width = LANE_WIDTH
         self.target_lane_y = 0.0
         
-        # System T_lc = Human T_lc × 1.5
-        self._system_T_lc_multiplier = 1.5
-        self._human_base_T_lc = {
-            'cautious': 6.0,
-            'normal': 4.5,
-            'aggressive': 3.0
-        }
+        # System T_lc = Human T_lc × multiplier (read from DRIVER_PARAMS)
+        self._human_base_T_lc        = {k: v['tlc']                  for k, v in DRIVER_PARAMS.items()}
+        self._system_tlc_multipliers = {k: v['system_tlc_multiplier'] for k, v in DRIVER_PARAMS.items()}
+        self._system_T_lc_multiplier = self._system_tlc_multipliers.get(driver_type, 1.5)
         human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
         self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
         self.lane_change_duration = self._base_T_lc
@@ -108,27 +95,21 @@ class SystemReferenceGenerator:
         self._lane_change_start_y = None
         self._current_time = 0.0
         
-        # =====================================================================
-        # V4.0 NEW: Soft lane-keeping transition
-        # =====================================================================
+        # Soft lane-keeping transition state.
         self._lane_keeping_entry_time = None
         self._lane_keeping_entry_y = None
         self._lane_keeping_entry_psi = None
         self._lane_keeping_entry_y_dot = None
         
-        # Settling time for lane-keeping entry (adapts to driver type)
-        self._settle_time = {
-            'cautious': 5.0,    # Slow, gentle settling
-            'normal': 3.0,      # Medium
-            'aggressive': 2.0   # Quick settling
-        }
+        # Settling time for lane-keeping entry (from DRIVER_PARAMS)
+        self._settle_time = {k: v['system_settle_time'] for k, v in DRIVER_PARAMS.items()}
         self._T_settle = self._settle_time.get(driver_type, 3.0)
         # =====================================================================
         
         # Velocity tracking
         self._current_vx = NOMINAL_VELOCITY
         
-        print(f"🚀 System Reference Generator V4.0 (Heading-Consistent) Initialized")
+        print(f"🚀 System Reference Generator (Heading-Consistent) Initialized")
         print(f"   Driver type: {driver_type}, Base T_lc={self.lane_change_duration:.1f}s")
         print(f"   (Human T_lc={human_T_lc:.1f}s × {self._system_T_lc_multiplier})")
         print(f"   Max heading constraint: {np.degrees(self.dynamic_params.max_heading_angle):.1f}°")
@@ -140,7 +121,9 @@ class SystemReferenceGenerator:
         self._current_vx = vx
     
     def set_driver_type(self, driver_type: str):
+        """Update driver profile and recompute lane-change and settling parameters."""
         self.driver_type = driver_type
+        self._system_T_lc_multiplier = self._system_tlc_multipliers.get(driver_type, 1.5)
         human_T_lc = self._human_base_T_lc.get(driver_type, 4.5)
         self._base_T_lc = human_T_lc * self._system_T_lc_multiplier
         self.lane_change_duration = self._base_T_lc
@@ -157,7 +140,7 @@ class SystemReferenceGenerator:
         self._base_T_lc = human_T_lc * self._system_T_lc_multiplier * velocity_factor
     
     def update_phase_from_safety_field(self, safety_phase: str):
-        """Sync phase with safety field — with V4.0 soft transition detection."""
+        """Sync phase with safety field and trigger soft transition detection."""
         phase_map = {
             "CRUISE": TrajectoryPhase.CRUISE,
             "GAP_SEARCH": TrajectoryPhase.GAP_SEARCH,
@@ -174,7 +157,7 @@ class SystemReferenceGenerator:
             if new_phase == TrajectoryPhase.LANE_CHANGE:
                 self._lane_change_start_time = self._current_time
             
-            # V4.0: Capture state at LANE_KEEPING entry for soft transition
+            # Capture state at LANE_KEEPING entry for soft transition
             if new_phase in [TrajectoryPhase.LANE_KEEPING, TrajectoryPhase.FOLLOWING]:
                 self._lane_keeping_entry_time = self._current_time
                 # Note: actual y, psi will be set in generate_reference_trajectory
@@ -185,7 +168,7 @@ class SystemReferenceGenerator:
         """
         Generate reference trajectory with heading constraint and soft transitions.
         
-        V4.0: Soft transition when entering LANE_KEEPING or FOLLOWING.
+        Soft transition when entering LANE_KEEPING or FOLLOWING.
         """
         trajectory = np.zeros((self.Np, 2))
         
@@ -208,7 +191,7 @@ class SystemReferenceGenerator:
             print(f"🚀 System: Locked start y={current_y:.2f}m, T_lc={self.lane_change_duration:.1f}s")
             print(f"   (min T_lc for ψ<{np.degrees(self.dynamic_params.max_heading_angle):.1f}°: {min_T_lc:.1f}s)")
         
-        # V4.0: Capture entry state for soft transition
+        # Capture entry state for soft transition
         if self._lane_keeping_entry_time is not None and self._lane_keeping_entry_y is None:
             if self._current_phase in [TrajectoryPhase.LANE_KEEPING, TrajectoryPhase.FOLLOWING]:
                 self._lane_keeping_entry_y = current_y
@@ -226,17 +209,17 @@ class SystemReferenceGenerator:
             trajectory = self._generate_lane_change_trajectory(target_y)
         
         elif self._current_phase in [TrajectoryPhase.LANE_KEEPING, TrajectoryPhase.FOLLOWING]:
-            # V4.0: Use soft transition if within settling period
+            # Use soft transition if within settling period
             if self._lane_keeping_entry_time is not None and self._lane_keeping_entry_y is not None:
                 t_in_phase = self._current_time - self._lane_keeping_entry_time
                 if t_in_phase < self._T_settle:
                     trajectory = self._generate_settling_trajectory(
-                        target_y, current_y, current_psi
+                        target_y, current_y, current_psi, current_y_dot
                     )
                 else:
-                    trajectory = self._generate_target_trajectory(target_y)
+                    trajectory = self._generate_target_trajectory(target_y, current_psi)
             else:
-                trajectory = self._generate_target_trajectory(target_y)
+                trajectory = self._generate_target_trajectory(target_y, current_psi)
         
         return trajectory
     
@@ -303,65 +286,80 @@ class SystemReferenceGenerator:
     
     def _generate_settling_trajectory(self, target_y: float,
                                        current_y: float,
-                                       current_psi: float) -> np.ndarray:
+                                       current_psi: float,
+                                       current_y_dot: float = 0.0) -> np.ndarray:
         """
-        V4.0 NEW: Generate soft settling trajectory for LANE_KEEPING entry.
-        
-        Uses a 3rd order polynomial to smoothly bring the vehicle from its
-        current state (y, ψ) to the target (target_y, 0).
-        
-        This prevents the reference from jumping instantaneously,
-        which would create a massive heading error and cause saturation.
-        
-        The settling polynomial satisfies:
-          y(0) = current_y,  y(T) = target_y
-          ẏ(0) = vx * sin(current_psi) ≈ vx * current_psi,  ẏ(T) = 0
-        
-        From which: ψ_ref(t) = ẏ(t) / vx
+        Generate soft settling trajectory for LANE_KEEPING entry.
+
+        Receding-horizon cubic polynomial from current state to target.
+
+        FIXES applied:
+        ==============
+        Receding horizon: τ always starts at 0 for the current step,
+              ensuring y_ref(i=0) = current_y always (no phantom reference jump).
+
+        Two additional fixes for the body-frame bicycle model (Eq. 2.31):
+
+        1. CORRECT psi_ref SIGN:
+           From A_body_c row-0: ẏ = vy + vx·ψ.  At vy ≈ 0 (pure heading motion):
+               ψ_ref = +ẏ_ref / vx    (POSITIVE sign)
+           This is consistent with the kinematic relationship ẏ_world ≈ vx·ψ for
+           small angles. The code uses the positive sign below.
+
+        2. CLIP INITIAL VELOCITY to prevent polynomial overshoot:
+           For a cubic polynomial with non-zero endpoint velocity, large y_dot_0
+           relative to T_remaining causes the trajectory to pass through the
+           target and return, driving the vehicle past y=0.  Clip y_dot_0 so
+           that the trajectory is monotone (no overshoot).
         """
         trajectory = np.zeros((self.Np, 2))
-        
-        T_settle = self._T_settle
+
         t_in_phase = self._current_time - self._lane_keeping_entry_time
-        
-        # Boundary conditions
+        # Remaining settling time — never less than one control step
+        T_remaining = max(self._T_settle - t_in_phase, self.dt)
+
         y0 = current_y
         y_target = target_y
-        y_dot_0 = self._current_vx * np.sin(current_psi)  # Current lateral velocity
-        y_dot_T = 0.0  # Want zero lateral velocity at end
-        
-        # 3rd order polynomial: y(τ) = a0 + a1*τ + a2*τ² + a3*τ³
-        # where τ = (t - t_entry) / T_settle ∈ [0, 1]
-        # y(0) = y0,  y(1) = y_target
-        # ẏ(0) = y_dot_0 * T_settle,  ẏ(1) = 0
-        
+        delta_y = y_target - y0
+        vx = max(self._current_vx, 1.0)
+
+        # Clip initial velocity to prevent polynomial overshoot.
+        # For a cubic with boundary conditions y(0)=y0, y(T)=y_target,
+        # y'(0)=y_dot_0, y'(T)=0, the trajectory is monotone when
+        #   |y_dot_0| <= 1.5 * |delta_y| / T_remaining
+        if abs(delta_y) > 1e-6:
+            y_dot_max = 1.5 * abs(delta_y) / T_remaining
+            y_dot_0 = float(np.clip(current_y_dot, -y_dot_max, y_dot_max))
+        else:
+            y_dot_0 = 0.0
+
+        # 3rd order polynomial coefficients (τ ∈ [0, 1], τ = t_pred / T_remaining)
         a0 = y0
-        a1 = y_dot_0 * T_settle
-        a2 = 3 * (y_target - y0) - 2 * y_dot_0 * T_settle
-        a3 = -2 * (y_target - y0) + y_dot_0 * T_settle
-        
+        a1 = y_dot_0 * T_remaining
+        a2 = 3 * delta_y - 2 * y_dot_0 * T_remaining
+        a3 = -2 * delta_y + y_dot_0 * T_remaining
+
         for i in range(self.Np):
-            t_pred = t_in_phase + i * self.dt
-            tau = min(t_pred / T_settle, 1.0)
-            
+            t_pred = i * self.dt  # always starts at 0 (receding horizon)
+            tau = min(t_pred / T_remaining, 1.0)
+
             if tau < 1.0:
-                # Position
                 y_ref = a0 + a1 * tau + a2 * tau**2 + a3 * tau**3
-                # Velocity (derivative)
-                y_dot_ref = (a1 + 2 * a2 * tau + 3 * a3 * tau**2) / T_settle
-                # Heading reference
-                psi_ref = np.arctan2(y_dot_ref, self._current_vx)
+                y_dot_ref = (a1 + 2 * a2 * tau + 3 * a3 * tau**2) / T_remaining
+                # Body-frame sign convention: ψ ≈ ẏ_world / vx
+                # Ẏ_world = vx·sin(ψ) ≈ vx·ψ  → ψ_ref = y_dot_ref / vx
+                psi_ref = y_dot_ref / vx
             else:
                 y_ref = y_target
                 psi_ref = 0.0
-            
+
             trajectory[i, 0] = y_ref
             trajectory[i, 1] = psi_ref
-        
+
         return trajectory
     
-    def _generate_target_trajectory(self, target_y: float) -> np.ndarray:
-        """Generate trajectory AT the target."""
+    def _generate_target_trajectory(self, target_y: float, current_psi: float) -> np.ndarray:
+        """Generate trajectory at target (y=0, psi=0)."""
         trajectory = np.zeros((self.Np, 2))
         for i in range(self.Np):
             trajectory[i, 0] = target_y
@@ -377,7 +375,7 @@ class SystemReferenceGenerator:
         self._current_time = 0.0
         self.lane_change_duration = self._base_T_lc
         
-        # V4.0: Reset settling state
+        # Reset settling state
         self._lane_keeping_entry_time = None
         self._lane_keeping_entry_y = None
         self._lane_keeping_entry_psi = None

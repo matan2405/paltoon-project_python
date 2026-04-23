@@ -4,19 +4,18 @@
 File: longitudinal_safety_field.py
 Description: Pure Repulsive Safety Field with Dynamic Phase Detection.
 
-VERSION 3.0 - MERGING/FOLLOWING PHASE SYSTEM
-=============================================
-Key improvements:
-1. Dynamic phase detection based on simulation state (not timers)
-2. MERGING phase: Aggressive safety field for convergence
-3. FOLLOWING phase: Soft transition for steady-state comfort
-4. Hysteresis to prevent oscillation between phases
+Research basis and implementation focus:
+1. Longitudinal repulsive safety-field formulation for leader/follower risk.
+2. Dynamic MERGING/FOLLOWING phase detection from state-based thresholds.
+3. Hysteresis and transition timing for stable phase switching.
 
 The phase transition is based on:
 - Gap error relative to desired_gap
 - Relative velocity relative to target_velocity
 - Acceleration magnitude
-- All conditions must hold for 5 seconds to transition to FOLLOWING
+- Condition must hold for PHASE_TRANSITION_TIME seconds to transition to FOLLOWING
+- Thresholds are parameterized by FOLLOWING_GAP_ERROR_FACTOR,
+  FOLLOWING_VELOCITY_ERROR_FACTOR, and FOLLOWING_ACCELERATION_THRESHOLD
 """
 
 import numpy as np
@@ -28,6 +27,25 @@ from typing import Optional, Dict, TYPE_CHECKING
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vehicle.vehicle import Vehicle
 from control.platoon_control import PlatoonManager
+from config import (
+    SAFETY_MIN_SAFE_DISTANCE, SAFETY_EMERGENCY_BRAKE_DISTANCE, SAFETY_MAX_DECEL,
+    SAFETY_BASE_SAFETY_RADIUS, SAFETY_BASE_OBSTACLE_MASS,
+    SAFETY_BASE_INFLUENCE_FACTOR, SAFETY_BASE_DRIVER_RISK, SAFETY_EPSILON,
+    SAFETY_LEADER_POSITION_MULTIPLIER, SAFETY_MIDDLE_POSITION_MULTIPLIER,
+    SAFETY_FOLLOWER_POSITION_MULTIPLIER,
+    SAFETY_NORMAL_RISK_MULTIPLIER, SAFETY_MODERATE_RISK_MULTIPLIER,
+    SAFETY_HIGH_RISK_MULTIPLIER, SAFETY_EMERGENCY_RISK_MULTIPLIER,
+    SAFETY_VELOCITY_REFERENCE, SAFETY_VELOCITY_SCALING_FACTOR,
+    SAFETY_DISTANCE_DECAY_FACTOR,
+    SAFETY_MAX_REPULSIVE_FORCE, SAFETY_MIN_ATTRACTIVE_FORCE,
+    SAFETY_LEADER_WEIGHT, SAFETY_FOLLOWER_WEIGHT,
+    SAFETY_JOINING_FOLLOWER_WEIGHT, SAFETY_DECELERATING_FOLLOWER_WEIGHT,
+    SAFETY_PLATOON_COHERENCE_FACTOR, SAFETY_MERGING_MULTIPLIER,
+    FOLLOWING_GAP_ERROR_FACTOR, FOLLOWING_VELOCITY_ERROR_FACTOR,
+    FOLLOWING_ACCELERATION_THRESHOLD,
+    MERGING_GAP_ERROR_FACTOR, MERGING_VELOCITY_ERROR_FACTOR,
+    PHASE_TRANSITION_TIME, SAFETY_ROAD_CONDITION_FACTORS,
+)
 
 
 # ============================================================================
@@ -73,72 +91,68 @@ class EllipseLongitudinalParams:
     """Parameters for pure repulsive safety field with phase detection"""
     
     # === Hard Constraints ===
-    min_safe_distance: float = 5.0
-    emergency_brake_distance: float = 8.0
-    max_decel: float = 3.5
-    
+    min_safe_distance: float = SAFETY_MIN_SAFE_DISTANCE
+    emergency_brake_distance: float = SAFETY_EMERGENCY_BRAKE_DISTANCE
+    max_decel: float = SAFETY_MAX_DECEL
+
     # === Base Parameters ===
-    base_safety_radius: float = 10.0
-    base_obstacle_mass: float = 400.0
-    base_influence_factor: float = 1.0
-    base_driver_risk: float = 0.5
-    epsilon: float = 0.1
-    
+    base_safety_radius: float = SAFETY_BASE_SAFETY_RADIUS
+    base_obstacle_mass: float = SAFETY_BASE_OBSTACLE_MASS
+    base_influence_factor: float = SAFETY_BASE_INFLUENCE_FACTOR
+    base_driver_risk: float = SAFETY_BASE_DRIVER_RISK
+    epsilon: float = SAFETY_EPSILON
+
     # === Position Multipliers ===
-    leader_position_multiplier: float = 0.8
-    middle_position_multiplier: float = 1.2
-    follower_position_multiplier: float = 1.0
-    
+    leader_position_multiplier: float = SAFETY_LEADER_POSITION_MULTIPLIER
+    middle_position_multiplier: float = SAFETY_MIDDLE_POSITION_MULTIPLIER
+    follower_position_multiplier: float = SAFETY_FOLLOWER_POSITION_MULTIPLIER
+
     # === Risk Multipliers ===
-    normal_risk_multiplier: float = 1.0
-    moderate_risk_multiplier: float = 1.5
-    high_risk_multiplier: float = 2.0
-    emergency_risk_multiplier: float = 2.5
-    
+    normal_risk_multiplier: float = SAFETY_NORMAL_RISK_MULTIPLIER
+    moderate_risk_multiplier: float = SAFETY_MODERATE_RISK_MULTIPLIER
+    high_risk_multiplier: float = SAFETY_HIGH_RISK_MULTIPLIER
+    emergency_risk_multiplier: float = SAFETY_EMERGENCY_RISK_MULTIPLIER
+
     # === Velocity Scaling ===
-    velocity_reference: float = 120.0
-    velocity_scaling_factor: float = 0.8
-    
+    velocity_reference: float = SAFETY_VELOCITY_REFERENCE
+    velocity_scaling_factor: float = SAFETY_VELOCITY_SCALING_FACTOR
+
     # === Distance Decay ===
-    distance_decay_factor: float = 15.0
-    
+    distance_decay_factor: float = SAFETY_DISTANCE_DECAY_FACTOR
+
     # === Force Limits ===
-    max_repulsive_force: float = 800.0
-    min_attractive_force: float = -500.0  # Lower bound for attractive forces
-    
+    max_repulsive_force: float = SAFETY_MAX_REPULSIVE_FORCE
+    min_attractive_force: float = SAFETY_MIN_ATTRACTIVE_FORCE
+
     # === Follower Weights ===
-    leader_weight: float = 1.0
-    follower_weight: float = 0.5
-    joining_follower_weight: float = 0.2
-    decelerating_follower_weight: float = 0.4
-    
+    leader_weight: float = SAFETY_LEADER_WEIGHT
+    follower_weight: float = SAFETY_FOLLOWER_WEIGHT
+    joining_follower_weight: float = SAFETY_JOINING_FOLLOWER_WEIGHT
+    decelerating_follower_weight: float = SAFETY_DECELERATING_FOLLOWER_WEIGHT
+
     # === Platoon Factors ===
-    platoon_coherence_factor: float = 1.5
-    merging_multiplier: float = 1.2
-    
-    # === NEW: Phase Detection Parameters (relative to platoon) ===
+    platoon_coherence_factor: float = SAFETY_PLATOON_COHERENCE_FACTOR
+    merging_multiplier: float = SAFETY_MERGING_MULTIPLIER
+
+    # === Phase Detection Parameters ===
     # Entry to FOLLOWING thresholds (must ALL be satisfied)
-    following_gap_error_factor: float = 0.15      # 15% of desired_gap
-    following_velocity_error_factor: float = 0.05  # 5% of target_velocity
-    following_acceleration_threshold: float = 0.5  # m/s² absolute
-    
+    following_gap_error_factor: float = FOLLOWING_GAP_ERROR_FACTOR
+    following_velocity_error_factor: float = FOLLOWING_VELOCITY_ERROR_FACTOR
+    following_acceleration_threshold: float = FOLLOWING_ACCELERATION_THRESHOLD
+
     # Exit from FOLLOWING thresholds (ANY triggers exit)
-    merging_gap_error_factor: float = 0.25        # 25% of desired_gap (hysteresis)
-    merging_velocity_error_factor: float = 0.10   # 10% of target_velocity (hysteresis)
-    
+    merging_gap_error_factor: float = MERGING_GAP_ERROR_FACTOR
+    merging_velocity_error_factor: float = MERGING_VELOCITY_ERROR_FACTOR
+
     # Time to confirm phase transition
-    phase_transition_time: float = 5.0  # seconds
-    
+    phase_transition_time: float = PHASE_TRANSITION_TIME
+
     # === Road Conditions ===
     road_condition_factors: Dict[str, float] = None
-    
+
     def __post_init__(self):
         if self.road_condition_factors is None:
-            self.road_condition_factors = {
-                "dry": 1.0,
-                "wet": 0.7,
-                "icy": 0.5
-            }
+            self.road_condition_factors = dict(SAFETY_ROAD_CONDITION_FACTORS)
 
 
 # ============================================================================
@@ -178,7 +192,7 @@ class EllipseLongitudinalSafetyField:
         self._last_rel_velocity = 0.0
         self._last_acceleration = 0.0
         
-        print("🛡️ Safety Field V3.0 (Phase Detection) Initialized")
+        print("🛡️ Safety Field (Phase Detection) Initialized")
         print(f"   📊 Phases: MERGING → FOLLOWING")
         print(f"   ⏱️ Transition time: {self.params.phase_transition_time}s")
         print(f"   📏 FOLLOWING entry: gap_error < {self.params.following_gap_error_factor*100}% of desired_gap")
@@ -666,7 +680,7 @@ __all__ = ['EllipseLongitudinalSafetyField', 'EllipseLongitudinalParams',
 # ============================================================================
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("Safety Field V3.0 - Phase Detection Unit Test")
+    print("Safety Field - Phase Detection Unit Test")
     print("="*60)
     
     params = EllipseLongitudinalParams()

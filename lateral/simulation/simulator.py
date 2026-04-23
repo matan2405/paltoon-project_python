@@ -1,8 +1,22 @@
 """
 Lateral Control Simulator.
-VERSION 2.3 - Simplified (Simulation Only)
+Lane-change simulation with Nash shared control and safety-field authority.
 
-Based on Li et al. 2019: R1 ≠ R2, same target but different trajectory shapes
+Research basis and adopted elements:
+1) Li et al. (2019), shared-control architecture:
+    - Two-player references (R1 system, R2 human) with common final target.
+    - Safety-field driven authority modulation used in closed-loop shared control.
+2) Pustilnik and Borrelli (2025), non-normalized GNE:
+    - Authority embedded in-game through alpha = 1/(1+lambda).
+    - Shared command applied as u_shared = u1 + u2.
+3) Lateral DSF line (Li/Wang family as implemented in this repository):
+    - Risk force computed from surrounding vehicles and phase context.
+    - Risk signal feeds authority allocator and Nash control loop.
+
+What this file contributes in code:
+- End-to-end orchestration of vehicles, phase logic, DSF, allocator, and Nash solver.
+- Multi-rate loop (simulation dt vs Nash control dt).
+- Scenario execution, data logging, and outputs consumed by plots/animation.
 """
 
 import numpy as np
@@ -13,8 +27,9 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import (SIMULATION_DT, DEFAULT_SIMULATION_TIME, LANE_WIDTH, 
-                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_NP, NASH_NU)
+from config import (SIMULATION_DT, DEFAULT_SIMULATION_TIME, LANE_WIDTH,
+                    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, NASH_CONTROL_DT, NASH_NP, NASH_NU,
+                    NOMINAL_VELOCITY, DRIVER_PARAMS, PLATOON_TARGET_VELOCITY)
 from vehicle import Vehicle
 from control import HumanDriver, PlatoonManager, PlatoonParams, MOBILLaneChange
 from nash_solver import (ConstrainedLateralNashSolver, LateralSafetyField, LateralSafetyFieldParams,
@@ -23,37 +38,36 @@ from nash_solver import (ConstrainedLateralNashSolver, LateralSafetyField, Later
 
 
 class LateralSimulation:
-    """
-    Main simulation class - VERSION 2.3 (Simulation Only)
-    """
+    """Main lateral simulation class for platoon merge and shared steering control."""
     
     def __init__(self, dt: float = SIMULATION_DT, T_sim: float = DEFAULT_SIMULATION_TIME, driver_type: str = 'normal'):
         self.dt = dt
         self.T_sim = T_sim
         self.time = 0.0
 
-        # Human vehicle
+        # Human vehicle — velocity offset from DRIVER_PARAMS
+        human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
         self.human_vehicle = Vehicle(
             initial_y=HUMAN_INITIAL_LANE_Y,
             initial_psi=0.0,
             initial_x=0.0,
             vehicle_id="Human",
-            longitudinal_velocity=20.0
+            longitudinal_velocity=human_vx
         )
 
         # Platoon
-        self.platoon_params = PlatoonParams(target_velocity=20.0, platoon_lane_y=PLATOON_LANE_Y)
+        self.platoon_params = PlatoonParams(target_velocity=PLATOON_TARGET_VELOCITY, platoon_lane_y=PLATOON_LANE_Y)
         self.platoon_manager = PlatoonManager(self.platoon_params)
 
-        # Human driver model (Stanley Controller)
+        # Human driver model (Stanley Controller) — initialized with driver_type directly
         self.human_driver = HumanDriver(
             vehicle=self.human_vehicle,
             target_lane_y=PLATOON_LANE_Y,
-            dt=dt
+            dt=dt,
+            driver_type=driver_type
         )
-        self.human_driver.set_driver_type(driver_type)
 
-        # Safety field (V2.0 - no lane centering)
+        # Safety field (collision-focused lateral risk; no lane-centering term)
         self.safety_field_params = LateralSafetyFieldParams(target_lane_y=PLATOON_LANE_Y)
         self.safety_field = LateralSafetyField(self.safety_field_params)
 
@@ -65,6 +79,11 @@ class LateralSimulation:
         self.Nc = NASH_NU
         self.dt_nash = NASH_CONTROL_DT  # Nash solver dt (from config.py)
 
+        # Nash rate control: Nash runs at 20Hz, dynamics at 100Hz
+        self._nash_step_interval = round(self.dt_nash / self.dt)  # = 5
+        self._nash_step_counter = 0
+        self._last_nash_result = None
+
         # Reference generators (R1 and R2 - Li et al. 2019)
         # R1 = System reference (slow, safe - 5th order polynomial, T=6s)
         self.system_ref_generator = SystemReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
@@ -72,8 +91,8 @@ class LateralSimulation:
         # R2 = Human reference (faster, more direct - 3rd order polynomial)
         self.human_ref_generator = HumanReferenceGenerator(Np=self.Np, dt=self.dt_nash, driver_type=driver_type)
 
-        # Use CONSTRAINED Nash solver WITH DPP (V4.0 Optimized)
-        # With V1.0 calibrated weights for smooth trajectories
+        # Use constrained Nash solver with DPP-compliant parameterization
+        # Tuned weights target smooth steering trajectories
         from nash_solver.lateral_constrained_nash_solver import (
             ConstrainedLateralNashSolver,
             ConstrainedLateralNashParams
@@ -97,7 +116,7 @@ class LateralSimulation:
         # - Input bounds: delta_min ≤ δ ≤ delta_max
         # - Rate constraints: |Δδ| ≤ ddelta_max * dt
 
-        # MOBIL lane change decision model (V2.4)
+        # MOBIL lane-change decision model
         self.mobil = MOBILLaneChange()
         self.mobil_approved = False  # Whether MOBIL has approved the lane change
         self.mobil_approval_time = None  # Time when MOBIL approved (for plotting)
@@ -106,23 +125,20 @@ class LateralSimulation:
         self.merge_commanded = False
         self.merge_complete = False
         self.merge_trigger_time = 5.0
-
-        # Nash rate control: run Nash every NASH_CONTROL_DT, not every simulation dt
-        self._nash_step_interval = round(self.dt_nash / self.dt)  # = 5 steps
-        self._nash_step_counter = 0
-        self._last_nash_result = None  # Reused between Nash invocations
         
         # Data storage
         self.data = {
             'time': [], 'human_x': [], 'human_y': [], 'human_psi': [], 
-            'human_vx': [], 'human_y_dot': [], 'human_psi_dot': [], 'human_ay': [],
+            'human_vx': [], 'human_y_dot': [], 'human_y_dot_road': [], 'human_psi_dot': [], 'human_ay': [],
             'delta_system': [], 'delta_human': [], 'delta_shared': [],
-            'authority_ratio': [], 'field_force': [], 'phase': [],
+            'authority_ratio': [], 'lambda_safety': [], 'lambda_performance': [],
+            'field_force': [], 'phase': [],
             'platoon_positions': [], 'y_error': [], 'psi_error': [], 'nash_costs': [],
-            'mobil_approved': []  # Track MOBIL approval status
+            'mobil_approved': [],  # Track MOBIL approval status
+            'human_X_world': [], 'human_Y_world': []  # World-frame (inertial) coordinates
         }
         
-        print(f"🚗 Lateral Simulation V2.0 Initialized - dt={dt}s, T={T_sim}s")
+        print(f"🚗 Lateral Simulation Initialized - dt={dt}s, T={T_sim}s")
     
     def setup_scenario(self, scenario_name: str, scenario_params: Dict):
         print(f"\n{'='*60}")
@@ -131,14 +147,17 @@ class LateralSimulation:
         
         self.reset()
         
+        # Setup driver type first (needed for velocity offset)
+        driver_type = scenario_params.get('driver_type', 'normal')
+
         # Setup human vehicle
         self.human_vehicle.state.x = scenario_params.get('human_initial_x', 0.0)
         self.human_vehicle.state.y = scenario_params.get('human_initial_y', HUMAN_INITIAL_LANE_Y)
-        self.human_vehicle.vx = scenario_params.get('human_velocity', 20.0)
+        human_vx = NOMINAL_VELOCITY + DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])['velocity_offset']
+        self.human_vehicle.vx = human_vx
+        self.human_vehicle.state.vx = human_vx
+        self.human_vehicle._build_all_matrices(self.dt)
         self.human_vehicle.reset_steering()
-        
-        # Setup driver
-        driver_type = scenario_params.get('driver_type', 'normal')
         self.human_driver.target_lane_y = scenario_params.get('target_lane_y', PLATOON_LANE_Y)
 
         # ============================================================
@@ -165,18 +184,18 @@ class LateralSimulation:
     def nash_control_step(self) -> Dict:
         """
         Execute one Nash control step.
-        
-        Li et al. 2019 Implementation:
-        - R1 = System reference (5th order, T=8s, safe trajectory)
-        - R2 = Human reference (3rd order, T=5-7s, driver's preferred trajectory)
-        - Both target same goal (y=0, psi=0) but with different shapes
-        - Q2 = λ * Q1 (authority allocation through cost weights)
+
+        Non-Normalized GNE (Pustilnik & Borrelli, 2025):
+        - R1: system reference trajectory
+        - R2: human reference trajectory
+        - Authority is embedded through alpha = 1/(1+lambda)
+        - Shared steering is applied as u_shared = u1 + u2
         """
         current_state = self.human_vehicle.get_state_vector()
         target_y = self.human_driver.target_lane_y
         obstacles = self.platoon_manager.get_vehicles_as_obstacles()
         
-        # 1. Compute safety field force (V2.0 - no lane centering!)
+        # 1. Compute safety field force (collision-focused lateral risk)
         field_force = self.safety_field.compute_risk_force(
             self.human_vehicle, obstacles, target_y
         )
@@ -264,7 +283,7 @@ class LateralSimulation:
             if self.mobil_approved:
                 self.command_merge()
         
-        # Control — Nash runs at NASH_CONTROL_DT (20 Hz), not simulation dt (100 Hz)
+        # Control (Nash runs at 20Hz, dynamics at 100Hz)
         if self.merge_commanded:
             self._nash_step_counter += 1
             if self._nash_step_counter >= self._nash_step_interval or self._last_nash_result is None:
@@ -383,12 +402,19 @@ class LateralSimulation:
         self.data['human_psi'].append(self.human_vehicle.state.psi)
         self.data['human_vx'].append(self.human_vehicle.vx)
         self.data['human_y_dot'].append(self.human_vehicle.state.y_dot)
+        psi_now = self.human_vehicle.state.psi
+        vy_body = self.human_vehicle.state.y_dot
+        vx_body = self.human_vehicle.state.vx
+        # Road-frame lateral velocity: Ẏ_world = vx_body·sin(ψ) + vy_body·cos(ψ) (Rajamani Eq. 2.11)
+        self.data['human_y_dot_road'].append(vx_body * np.sin(psi_now) + vy_body * np.cos(psi_now))
         self.data['human_psi_dot'].append(self.human_vehicle.state.psi_dot)
         self.data['human_ay'].append(self.human_vehicle.state.ay)
         self.data['delta_system'].append(control_result['delta_system'])
         self.data['delta_human'].append(control_result['delta_human'])
         self.data['delta_shared'].append(control_result['delta_shared'])
         self.data['authority_ratio'].append(control_result['authority_ratio'])
+        self.data['lambda_safety'].append(self.authority_allocator.last_lambda_safety)
+        self.data['lambda_performance'].append(self.authority_allocator.last_lambda_lateral)
         self.data['field_force'].append(control_result['field_force'])
         self.data['phase'].append(control_result['phase'])
         self.data['y_error'].append(control_result['y_error'])
@@ -396,6 +422,8 @@ class LateralSimulation:
         self.data['nash_costs'].append(control_result['nash_costs'])
         self.data['platoon_positions'].append([(v.x, v.y) for v in self.platoon_manager.vehicles])
         self.data['mobil_approved'].append(self.mobil_approved)
+        self.data['human_X_world'].append(self.human_vehicle.state.X_world)
+        self.data['human_Y_world'].append(self.human_vehicle.state.Y_world)
     
     def run(self) -> Dict:
         print(f"\n🚀 Running simulation (T={self.T_sim}s)...")
@@ -475,6 +503,7 @@ class LateralSimulation:
         self.merge_complete = False
         self._nash_step_counter = 0
         self._last_nash_result = None
+        # NOTE: No delta_output_prev - no external filtering
         self.safety_field.reset()
         self.system_ref_generator.reset()
         self.human_ref_generator.reset()  # Reset R2 generator

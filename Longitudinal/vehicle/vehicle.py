@@ -1,274 +1,253 @@
 """
-Main Vehicle class implementing bicycle model dynamics.
-Contains the vehicle physics, control inputs, and state management.
+Vehicle class — longitudinal vehicle model.
+
+Research basis and adopted elements:
+1) Belousov longitudinal vehicle model:
+    - Nonlinear longitudinal equation of motion with resistive forces.
+    - RK4 propagation for simulation-time plant updates.
+2) Rajamani/Fernandez modeling ingredients used in this implementation:
+    - Drag/rolling resistance structure and low-speed blending.
+    - Coupling-friendly state representation for control-oriented prediction.
+3) MPC/Nash prediction practice:
+    - Successive linearization around current operating point.
+    - ZOH discretization at control timestep for solver matrices.
+
+PLANT:      Nonlinear longitudinal model (RK4) — Belousov Eq. 3.11a
+CONTROLLER: Dynamic linearization (Jacobians) — at every timestep, A_t and B_t
+            are recomputed at the current operating point x_long(t) and used
+            by the Nash MPC as prediction matrices.
+
+Two-timestep simulation loop:
+  Every SIMULATION_DT (0.01 s):
+    1. RK4: x_long(t+dt) from full nonlinear Belousov Eq. 3.11a
+    2. Update continuous Jacobians A_c, B_c at new state (no ZOH)
+  Every NASH_CONTROL_DT (0.1 s):
+    3. Nash reads A_c, B_c via get_state_space_matrices(NASH_CONTROL_DT)
+    4. ZOH discretization at NASH_CONTROL_DT: A_d, B_d = expm([A_c·T, B_c·T; 0, 0])
+    5. Nash solves for u_accel; held constant for the next 10 sim steps
+
+Nonlinear EOM — Belousov Eq. 3.11a (no small-angle assumption):
+  m_eff*(v̇x - vy·Ωz) = Fxf·cos(δf) + Fxr - Fyf·sin(δf) - Ra - Rg - Rr
+
+Feedforward cancellation (Nash stays in m/s², B_c = [[0],[1]] preserved):
+  Fxf·cos(δf) + Fxr = m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)
+  ⟹ v̇x = vy·Ωz + u_accel  (double integrator seen by Nash)
+
+All hardware-level logic (engine, transmission, pedal dynamics, force
+calculations) lives in control/lower_level_controller.py.
 """
 
 import numpy as np
-import time
+from scipy.linalg import expm
 from typing import Tuple
-from .components import VehicleParameters, Engine, Transmission, VehicleState
-from config import (SIMULATION_DT)
+from .components import VehicleParameters, VehicleState
+from config import SIMULATION_DT
+
 
 class Vehicle:
-    """Main vehicle class implementing bicycle model dynamics"""
-    
-    def __init__(self, initial_x: float = 0.0, initial_y: float = 0.0, 
+    """Main vehicle class.
+
+    Motion models
+    -------------
+    state-space  : ZOH double integrator — required for Nash solver.
+    kinematic    : Simple kinematic bicycle model.
+    hierarchical : Upper controller plans with double integrator; lower-level
+                   controller (LowerLevelController) converts a_desired to
+                   throttle/brake and propagates full dynamics.
+    complex      : Full engine/transmission dynamics (no upper controller).
+    """
+
+    def __init__(self, initial_x: float = 0.0, initial_y: float = 0.0,
                  initial_heading: float = 0.0, vehicle_id: str = "Vehicle",
                  initial_velocity: float = 0.0):
+        """Initialize vehicle states, model flags, and lower-level control interfaces."""
         self.params = VehicleParameters()
-        self.engine = Engine()
-        self.transmission = Transmission()
         self.state = VehicleState()
         self.vehicle_id = vehicle_id
-        if vehicle_id == "Human":
-            self.human_vehicle = True
-        else:
-            self.human_vehicle = False
+        self.human_vehicle = (vehicle_id == "Human")
         self.max_velocity = self.params.max_velocity  # m/s
-        # Initialize position
+
+        # ── Initial state ───────────────────────────────────────────────────
         self.state.x = initial_x
         self.state.y = initial_y
         self.state.psi = initial_heading
         self.state.vx = initial_velocity
-        
-        # Control inputs
-        self.direct_force = 0.0      # Direct longitudinal force [N]
+
+        # ── Control inputs (live on Vehicle — used by upper controller) ─────
+        self.direct_force = 0.0      # Direct longitudinal force [N] (autonomous)
         self.steering_input = 0.0    # -1 to 1
-        self.a_desired = 0.0         # Desired acceleration [m/s^2]
-        
-        # For compatibility with human driver
-        self.throttle_input = 0.0    # 0 to 1
-        self.brake_input = 0.0       # 0 to 1
-        
-        # Mode controls
+        self.a_desired = 0.0         # Desired acceleration [m/s²] — set by Nash/platoon/IDM
+        # Fxf [N] is stored in self.state.Fxf (computed by _compute_Fxf each step)
+
+        # ── Mode flags ──────────────────────────────────────────────────────
         self.autonomous_mode = False
-        self.use_kinematic_model = False  # False = complex dynamics, True = kinematic model
-        self.use_state_space_model = False  # New state-space bicycle model
-        self.use_hierarchical_model = False  # Hierarchical: upper (double integrator) + lower (complex dynamics)
-        self.lower_level_controller = None  # Assigned when hierarchical mode is activated
-        self.target_velocity = 0.0
-        self.target_acceleration = 0.0
-        
-        # Platoon compatibility variables
-        self.L = self.params.length # vehicle length
-        self.v = initial_velocity  # velocity shorthand for platoon compatibility
-        self.a = 0.0  # acceleration shorthand for platoon compatibility
-        
-        # Track if this vehicle joined the platoon
-        self.joined_platoon = False
-        self.joined_time = None
-    
-        self._debug_counter = 0  # For debug printing frequency control
-        
-        self.nash_acceleration = None  # For Nash equilibrium control input
-        
-        # Acceleration output filter for hierarchical mode
-        # Smooths noisy engine-level acceleration before Rajamani/Nash feedback
-        self._a_filtered = 0.0
-        self._a_filter_initialized = False
-        
-        # State-space matrices cache
-        self.A=None
-        self.B1=None
-        self.B2=None
-        self.C=None
-        
-    # Properties for easy access to state variables
-    @property
-    def x(self) -> float:
-        """Current x position (m)"""
-        return self.state.x
-    
-    @property
-    def y(self) -> float:
-        """Current y position (m)"""
-        return self.state.y
-    
-    @property
-    def psi(self) -> float:
-        """Current yaw angle (rad)"""
-        return self.state.psi
-    
-    @property
-    def vx(self) -> float:
-        """Current longitudinal velocity (m/s)"""
-        return self.state.vx
-    
-    @property
-    def vy(self) -> float:
-        """Current lateral velocity (m/s)"""
-        return self.state.vy
-        
-    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False,
-                         use_hierarchical: bool = False):
-        """Set which motion model to use.
-        
-        Parameters
-        ----------
-        use_kinematic : bool
-            Use simple kinematic model.
-        use_state_space : bool
-            Use double-integrator state-space model.
-        use_hierarchical : bool
-            Use hierarchical model: upper controller plans with double integrator,
-            lower controller converts a_desired to throttle/brake,
-            vehicle propagates with full longitudinal dynamics (engine, drag, etc.).
-        """
-        # Reset all flags first
         self.use_kinematic_model = False
         self.use_state_space_model = False
         self.use_hierarchical_model = False
-        
+
+        # ── Platoon compatibility ────────────────────────────────────────────
+        self.L = self.params.length
+        self.v = initial_velocity
+        self.a = 0.0
+
+        # ── Platoon membership ───────────────────────────────────────────────
+        self.joined_platoon = False
+        self.joined_time = None
+
+        # ── Nash acceleration override ───────────────────────────────────────
+        self.nash_acceleration = None
+
+        # ── Nonlinear longitudinal plant (kept behaviorally aligned with lateral vehicle model) ──────
+        self.x_long = np.array([self.state.x, self.state.vx])  # [x, vx]
+        self.A_c_current = None   # continuous Jacobian (cached for re-discretization)
+        self.B_c_current = None
+        # These are read by Nash solver (same attr names as lateral vehicle):
+        self.A = None; self.B1 = None; self.B2 = None
+        self.A_d = None; self.B_d = None
+        # Effective mass — Belousov Eq. 3.8: m_eff = m + Iw/r²
+        r = self.params.wheel_radius
+        self.m_eff = self.params.mass + self.params.wheel_inertia / (r * r)
+
+        # ── Acceleration output filter (hierarchical mode) ───────────────────
+        self._a_filtered = 0.0
+        self._a_filter_initialized = False
+
+        # ── Lower-level controller (always present — owns hardware) ──────────
+        # Created lazily on first use to avoid import-order issues.
+        self._lower_level_controller = None
+        # Convenience attributes: target_velocity for PlatoonManager.add_vehicle
+        self.target_velocity = 0.0
+        self.target_acceleration = 0.0
+
+        self._debug_counter = 0
+
+    # =========================================================================
+    # LOWER-LEVEL CONTROLLER ACCESS
+    # =========================================================================
+
+    @property
+    def lower_level_controller(self):
+        if self._lower_level_controller is None:
+            from control.lower_level_controller import LowerLevelController
+            self._lower_level_controller = LowerLevelController(self)
+        return self._lower_level_controller
+
+    @lower_level_controller.setter
+    def lower_level_controller(self, value):
+        self._lower_level_controller = value
+
+    # ── Hardware forwarding properties (backward compatibility) ─────────────
+
+    @property
+    def engine(self):
+        return self.lower_level_controller.engine
+
+    @property
+    def transmission(self):
+        return self.lower_level_controller.transmission
+
+    @property
+    def throttle_input(self):
+        return self.lower_level_controller.throttle_input
+
+    @throttle_input.setter
+    def throttle_input(self, val):
+        self.lower_level_controller.throttle_input = val
+
+    @property
+    def brake_input(self):
+        return self.lower_level_controller.brake_input
+
+    @brake_input.setter
+    def brake_input(self, val):
+        self.lower_level_controller.brake_input = val
+
+    @property
+    def actual_throttle(self):
+        return self.lower_level_controller.actual_throttle
+
+    @actual_throttle.setter
+    def actual_throttle(self, val):
+        self.lower_level_controller.actual_throttle = val
+
+    @property
+    def actual_brake(self):
+        return self.lower_level_controller.actual_brake
+
+    @actual_brake.setter
+    def actual_brake(self, val):
+        self.lower_level_controller.actual_brake = val
+
+    # =========================================================================
+    # STATE PROPERTIES
+    # =========================================================================
+
+    @property
+    def x(self) -> float:
+        return self.state.x
+
+    @property
+    def y(self) -> float:
+        return self.state.y
+
+    @property
+    def psi(self) -> float:
+        return self.state.psi
+
+    @property
+    def vx(self) -> float:
+        return self.state.vx
+
+    @property
+    def vy(self) -> float:
+        return self.state.vy
+
+    # =========================================================================
+    # MODEL SELECTION
+    # =========================================================================
+
+    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False,
+                         use_hierarchical: bool = False):
+        """Select the motion model for this vehicle.
+
+        Parameters
+        ----------
+        use_kinematic : bool
+            Simple kinematic model.
+        use_state_space : bool
+            ZOH double-integrator (required for Nash solver).
+        use_hierarchical : bool
+            Upper controller plans with double integrator; lower-level
+            controller converts a_desired to throttle/brake, and the complex
+            dynamics model propagates the actual vehicle state.
+        """
+        self.use_kinematic_model = False
+        self.use_state_space_model = False
+        self.use_hierarchical_model = False
+
         if use_hierarchical:
             self.use_hierarchical_model = True
-            # Also keep state-space flag for get_state_space_matrices() —
-            # Nash solver still uses the double integrator for planning.
-            self.use_state_space_model = True
+            self.use_state_space_model = True  # Nash still uses double integrator for planning
             model_name = "hierarchical (upper: double integrator, lower: complex dynamics)"
-            # Initialize lower-level controller
-            from control.lower_level_controller import LowerLevelController
-            self.lower_level_controller = LowerLevelController(self)
-            # Ensure engine/transmission are in a reasonable state
-            self._sync_engine_to_velocity()
+            # Ensure LLC exists and engine/transmission start in a realistic state
+            self.lower_level_controller._sync_engine_to_velocity()
         elif use_state_space:
             self.use_state_space_model = True
-            model_name = "state-space bicycle model"
+            model_name = "state-space (ZOH double integrator)"
         elif use_kinematic:
             self.use_kinematic_model = True
             model_name = "kinematic"
         else:
             model_name = "complex dynamics"
-        
+
         print(f"{self.vehicle_id}: Motion model set to {model_name}")
-    
-    def _sync_engine_to_velocity(self):
-        """Synchronize engine RPM and gear to current velocity.
-        
-        Simulates sequential upshifting (same thresholds as Transmission.update)
-        so the initial gear is consistent with what the transmission would
-        naturally reach through gear progression at the current speed.
-        """
-        if abs(self.state.vx) > 0.1:
-            wheel_rpm = (self.state.vx * 60) / (2 * np.pi * self.params.wheel_radius)
-            # Walk gears from lowest, shifting up when RPM exceeds upshift threshold
-            # (mirrors Transmission.update sequential shift logic)
-            selected_gear = 0
-            for gear_idx in range(len(self.transmission.gear_ratios)):
-                ratio = (self.transmission.gear_ratios[gear_idx]
-                         * self.transmission.final_drive_ratios[gear_idx])
-                engine_rpm = wheel_rpm * ratio
-                # Skip gears where RPM exceeds redline
-                if engine_rpm > self.engine.redline_rpm:
-                    continue
-                # RPM below idle — gear too high for this speed
-                if engine_rpm < self.engine.idle_rpm:
-                    break
-                selected_gear = gear_idx
-                # Would the transmission upshift from this gear?
-                if (gear_idx < len(self.transmission.upshift_rpm) and
-                        engine_rpm > self.transmission.upshift_rpm[gear_idx]):
-                    continue  # yes — check next gear
-                else:
-                    break     # no — stay in this gear
-            self.transmission.current_gear = selected_gear
-            target_rpm = wheel_rpm * self.transmission.get_total_ratio()
-            target_rpm = np.clip(target_rpm, self.engine.idle_rpm, self.engine.redline_rpm)
-            self.engine.rpm = target_rpm
-        else:
-            self.engine.rpm = self.engine.idle_rpm
-            self.transmission.current_gear = 0
-        
-    def calculate_forces(self) -> Tuple[float, float]:
-        """Calculate longitudinal and lateral forces"""
-        if self.autonomous_mode:
-            # Use direct force control for autonomous vehicles
-            air_density = 1.225  # kg/m³
-            aero_drag = 0.5 * air_density * self.params.drag_coefficient * \
-                       self.params.frontal_area * self.state.vx * abs(self.state.vx)
-            
-            rolling_resistance = 0.012 * self.params.mass * self.params.gravity if abs(self.state.vx) > 0.01 else 0.0
-            total_force = self.direct_force - aero_drag - rolling_resistance
-            
-            return total_force, 0.0
-        else:
-            # Original complex calculation for human-driven vehicles
-            # Engine force
-            if self.throttle_input > 0.001:
-                engine_torque = self.engine.get_torque(self.engine.rpm)
-                total_ratio = self.transmission.get_total_ratio()
-                wheel_torque = engine_torque * total_ratio
-                engine_force = wheel_torque / self.params.wheel_radius
-                engine_force *= self.throttle_input
-            else:
-                # Engine braking: pumping losses + internal friction when
-                # drivetrain is connected but throttle is released.
-                # Real engines produce ~50-80 Nm of retarding torque at
-                # typical highway RPMs due to air compression in cylinders,
-                # bearing friction and auxiliary loads.
-                from config import ENGINE_BRAKING_BASE_TORQUE, ENGINE_BRAKING_MAX_TORQUE
-                if abs(self.state.vx) > 1.0 and self.brake_input < 0.001:
-                    braking_torque = ENGINE_BRAKING_BASE_TORQUE * (self.engine.rpm / 2000.0)
-                    braking_torque = min(braking_torque, ENGINE_BRAKING_MAX_TORQUE)
-                    total_ratio = self.transmission.get_total_ratio()
-                    engine_force = -(braking_torque * total_ratio / self.params.wheel_radius)
-                else:
-                    engine_force = 0.0
-                
-            # Brake force
-            if self.brake_input > 0.001:
-                max_brake_force = self.params.mass * self.params.gravity * self.params.tire_friction_coeff
-                brake_force = max_brake_force * self.brake_input
-            else:
-                brake_force = 0.0
-                
-            # Aerodynamic drag
-            air_density = 1.225  # kg/m³
-            aero_drag = 0.5 * air_density * self.params.drag_coefficient * \
-                       self.params.frontal_area * self.state.vx * abs(self.state.vx)
-            
-            # Rolling resistance
-            if abs(self.state.vx) > 0.01:
-                rolling_resistance = 0.012 * self.params.mass * self.params.gravity
-            else:
-                rolling_resistance = 0.0
-                
-            # Total longitudinal force
-            Fx_total = engine_force - brake_force - aero_drag - rolling_resistance
-            
-            return Fx_total, 0.0
-    
-    def state_equation_platoon(self, delta_f, delta_r, V, dt):
-        """Update vehicle state using platoon_control.py kinematic model"""
-        # Use platoon_control.py parameters
-        l_f = self.params.lf  # from platoon_control.py
-        l_r = self.params.lr  # from platoon_control.py
-        L = self.params.wheelbase  # vehicle wheelbase
-        
-        # kinematic model - exactly like platoon_control.py
-        beta = np.arctan((l_f * np.tan(delta_r) + l_r * np.tan(delta_f)) / L)
-        x_dot = V * np.cos(self.state.psi + beta)  # [m/s]
-        y_dot = V * np.sin(self.state.psi + beta)  # [m/s]
-        psi_dot = (np.tan(delta_f) - np.tan(delta_r)) * np.cos(beta) * V / L  # [rad/s]
 
-        # update state variables
-        self.state.x += x_dot * dt  # [m]
-        self.state.y += y_dot * dt  # [m]
-        self.state.psi += psi_dot * dt  # [rad]
+    # =========================================================================
+    # DYNAMICS DISPATCH
+    # =========================================================================
 
-        self.a = (V - self.v) / dt
-        self.v = V
-        self.state.vx = V
-        self.state.ax = self.a
-    
     def update_dynamics(self, dt: float):
-        """Update vehicle dynamics - choose between complex, kinematic, state-space,
-        or hierarchical model.
-        
-        In hierarchical mode the upper controller (Nash/Rajamani) has already
-        written a_desired using the double-integrator planning model.  Here the
-        lower-level controller converts that into throttle/brake, and the complex
-        dynamics model propagates the actual vehicle state.
-        """
+        """Update vehicle state — routes to the active motion model."""
         if self.use_hierarchical_model:
             self.update_dynamics_hierarchical(dt)
         elif self.use_state_space_model:
@@ -276,361 +255,459 @@ class Vehicle:
         elif self.use_kinematic_model:
             self.update_dynamics_kinematic(dt)
         else:
-            self.update_dynamics_complex(dt)
-    
-    def update_dynamics_complex(self, dt: float):
-        """Update vehicle dynamics using complex model with ZOH-consistent integration.
-        
-        Integration order must match the ZOH double integrator used by the
-        upper controller for planning:
-            x[k+1] = x[k] + v[k]*dt + 0.5*a*dt²   (position first, OLD velocity)
-            v[k+1] = v[k] + a*dt
-        
-        The previous semi-implicit Euler (v first, then x using NEW v) introduced
-        a systematic O(a*dt²) position bias per step relative to ZOH.
-        """
-        # Calculate forces
-        Fx, _ = self.calculate_forces()
-        
-        # Steering angle
-        steering_angle = self.steering_input * self.params.max_steering_angle
-        
-        # Longitudinal acceleration from Newton's 2nd law
-        self.state.ax = Fx / self.params.mass
-        
-        # Bicycle model for lateral dynamics (simplified)
-        if abs(self.state.vx) > 0.1:  # Avoid division by zero
-            beta = np.arctan(self.params.lr * np.tan(steering_angle) / self.params.wheelbase)
-            self.state.psi_dot = (self.state.vx * np.cos(beta) * np.tan(steering_angle)) / self.params.wheelbase
-            self.state.vy = self.state.vx * np.sin(beta)
-        else:
-            self.state.psi_dot = 0.0
-            self.state.vy = 0.0
-        
-        # === ZOH-consistent integration: POSITION first (using OLD velocity) ===
-        cos_psi = np.cos(self.state.psi)
-        sin_psi = np.sin(self.state.psi)
-        
-        self.state.psi += self.state.psi_dot * dt
-        self.state.x += (self.state.vx * cos_psi - self.state.vy * sin_psi) * dt \
-                       + 0.5 * self.state.ax * cos_psi * dt * dt
-        self.state.y += (self.state.vx * sin_psi + self.state.vy * cos_psi) * dt \
-                       + 0.5 * self.state.ax * sin_psi * dt * dt
-        
-        # === VELOCITY update (after position) ===
-        self.state.vx += self.state.ax * dt
-        self.state.vx = np.clip(self.state.vx, 0, self.params.max_velocity)
-        
-        # Update platoon compatibility variables
-        self.v = self.state.vx
-        self.a = self.state.ax
-        
-        # Update engine and transmission
-        if abs(self.state.vx) > 0.1:
-            wheel_rpm = (self.state.vx * 60) / (2 * np.pi * self.params.wheel_radius)
-            target_engine_rpm = wheel_rpm * self.transmission.get_total_ratio()
-            target_engine_rpm = max(target_engine_rpm, self.engine.idle_rpm)
-            
-            self.engine.update_rpm(target_engine_rpm, dt)
-        else:
-            self.engine.update_rpm(self.engine.idle_rpm, dt)
-            
-        self.transmission.update(self.engine.rpm, self.state.vx, dt)
-    
-    def update_dynamics_kinematic(self, dt: float):
-        """Update vehicle dynamics using kinematic model"""
-        # Calculate target acceleration from forces (for human driver inputs)
-        if not self.autonomous_mode:
-            Fx, _ = self.calculate_forces()
-            target_acceleration = Fx / self.params.mass
-        else:
-            # Use a_desired for autonomous mode
-            target_acceleration = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
-        
-        # Calculate new velocity
-        new_velocity = self.v + target_acceleration * dt
-        new_velocity = np.clip(new_velocity, 0, self.max_velocity)  # velocity limits
-        
-        # Update state using kinematic model (with steering)
-        delta_f = self.steering_input * self.params.max_steering_angle
-        delta_r = 0  # rear wheel steering (zero for normal cars)
-        
-        self.state_equation_platoon(delta_f, delta_r, new_velocity, dt)
-    
+            self.lower_level_controller.update_dynamics_complex(dt)
+
+    # =========================================================================
+    # HIERARCHICAL MODEL
+    # =========================================================================
+
     def update_dynamics_hierarchical(self, dt: float):
-        """Update vehicle dynamics using hierarchical control architecture.
-        
-        Architecture (Rajamani Ch.6 / Belousov et al.):
-        ================================================
-        Upper Controller (already executed before this call):
-            - Nash solver / Rajamani / IDM used double-integrator model
-            - Result stored in self.a_desired
-        
-        Lower Controller (executed here):
-            1. Feedforward: F_ff = m*a_desired + F_drag + F_roll
-            2. PI feedback:  F_fb = Kp*m*(a_des - a_actual) + Ki*m*∫error
-            3. Actuator mapping: F_total → (throttle, brake)
-            
-        Complex Dynamics (executed here via update_dynamics_complex):
-            - Engine torque → wheel force
-            - Brake force
-            - Aerodynamic drag, rolling resistance
-            - Newton's 2nd law → actual acceleration
-        
-        The get_state_space_matrices() method still returns the double-integrator
-        matrices so the Nash solver continues to plan with the simplified model.
+        """Hierarchical update: upper controller → lower-level controller → dynamics.
+
+        1. Upper controller (Nash/Rajamani/IDM) has written a_desired.
+        2. lower_level_controller.compute_control(a_desired) converts it to
+           direct_force + display throttle/brake (pure feedforward, no PI).
+        3. lower_level_controller.update_dynamics_complex(dt) propagates state.
+        4. An EMA filter smooths the noisy engine-level acceleration before
+           it is fed back to the upper controller via vehicle.a.
         """
-        if self.lower_level_controller is None:
-            # Fallback: use state-space if controller not initialized
-            self.update_dynamics_state_space(dt)
-            return
-        
-        # --- Lower-level controller: a_desired → (throttle, brake) ---
         a_desired = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
-        throttle, brake = self.lower_level_controller.compute_control(a_desired, dt)
-        
-        # Set throttle/brake on the vehicle (used by calculate_forces / update_dynamics_complex)
-        self.throttle_input = throttle
-        self.brake_input = brake
-        self.steering_input = 0.0  # Longitudinal only
-        
-        # Choose force computation path:
-        # During gear shifts the blending gear ratio causes large force
-        # transients even with frozen throttle (e.g. gear 1→2: ratio drops
-        # ~45%, halving engine force).  Bypass the engine path entirely and
-        # use direct force control — mirroring Unity AutoMode where
-        # Fx = m·a_desired, giving perfectly smooth acceleration during
-        # shifts.  Outside shifts, the normal engine/transmission path runs.
+
+        llc = self.lower_level_controller
+        # Feedforward: convert Nash u_accel [m/s²] → Fxf [N] (stored in self.state.Fxf)
+        Fxf = self._compute_Fxf(a_desired)
+        llc.compute_control(Fxf)
+
         was_autonomous = self.autonomous_mode
-        if hasattr(self, 'transmission') and self.transmission.is_shifting:
-            # Direct force: set F so that calculate_forces returns m·a_desired
-            # (calculate_forces subtracts aero+rolling, so add them here)
-            air_density = 1.225
-            F_aero = (0.5 * air_density * self.params.drag_coefficient
-                      * self.params.frontal_area * self.state.vx * abs(self.state.vx))
-            F_roll = (0.012 * self.params.mass * self.params.gravity
-                      if abs(self.state.vx) > 0.01 else 0.0)
-            self.direct_force = self.params.mass * a_desired + F_aero + F_roll
-            self.autonomous_mode = True
-        else:
-            self.autonomous_mode = False
-        
-        # --- Propagate with complex dynamics (engine, aero, rolling resistance) ---
-        self.update_dynamics_complex(dt)
-        
-        # Restore mode
+        self.autonomous_mode = True
+        llc.update_dynamics_complex(dt)
         self.autonomous_mode = was_autonomous
-        
-        # ---------------------------------------------------------------
+
         # Acceleration output filter (EMA)
-        # Smooths the noisy engine-level acceleration before it feeds back
-        # to the upper controller (Rajamani uses vehicle.a directly).
-        # Without this filter, gear-shift force discontinuities and RPM
-        # slew-rate limiting inject high-frequency noise into Rajamani's
-        # a_des = -k1*Car_1.a - k2*Car_2.a - ..., which then cascades
-        # back through the PI loop creating sustained oscillations.
-        # ---------------------------------------------------------------
+        # Smooths gear-shift noise before upper controller (Rajamani/Nash) sees it.
         from config import LOWER_CTRL_ACCEL_FILTER_ALPHA
-        a_raw = self.a  # set by update_dynamics_complex()
-        
+        a_raw = self.a
+
         if not self._a_filter_initialized:
             self._a_filtered = a_raw
             self._a_filter_initialized = True
         else:
-            alpha = LOWER_CTRL_ACCEL_FILTER_ALPHA
-            self._a_filtered = alpha * a_raw + (1.0 - alpha) * self._a_filtered
-        
-        # Use filtered acceleration for all feedback paths
+            self._a_filtered = (LOWER_CTRL_ACCEL_FILTER_ALPHA * a_raw
+                                + (1.0 - LOWER_CTRL_ACCEL_FILTER_ALPHA) * self._a_filtered)
+
         self.a = self._a_filtered
         self.state.ax = self._a_filtered
-    
-    def update_dynamics_state_space(self, dt: float):
-        """Update vehicle dynamics using state-space bicycle model with ZOH discretization
-        
-        State-space representation (discrete-time with ZOH):
-        x[k+1] = A_d*x[k] + B_d*u[k]
-        y[k] = C*x[k]
-        
-        State vector x = [position, velocity]^T
-        Input u = acceleration
-        """
-        # Get ZOH discrete-time matrices
-        A_d, B_d, C = self.get_state_space_matrices(dt=dt)
-        
-        # Current state vector [x, vx]
-        x_current = np.array([[self.state.x],
-                             [self.state.vx]])
-        
-        # Calculate control input (acceleration)
-        if not self.autonomous_mode:
-            # For manual control, use forces from throttle/brake
-            Fx, _ = self.calculate_forces()
-            # u_acceleration = Fx / self.params.mass
-            u_acceleration = self.a_desired
-        else:
-            # For autonomous mode, use desired acceleration
-            u_acceleration = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
-        
-        # Apply acceleration limits
-        max_accel = 2.5  # m/s^2
-        u_acceleration = np.clip(u_acceleration, -max_accel, max_accel)
-        self.a = u_acceleration  # Update acceleration for logging
-        self.state.ax = self.a  # Store desired acceleration
-        
-        # Control input vector
-        u1 = np.array([[u_acceleration]]) # Control input for acceleration
-        u2 = np.zeros(u1.shape) if not self.autonomous_mode and self.vehicle_id=="Human" else None # Control input for steering (zero for no steering)
 
-        # **ZOH DISCRETE-TIME UPDATE**
-        # x[k+1] = A_d*x[k] + B_d*u[k]
-        x_next = A_d @ x_current + B_d @ u1 + (B_d @ u2 if u2 is not None else 0)
-        
-        # Extract new state values
-        self.state.x = float(x_next[0, 0])    # new position
-        self.state.vx = float(x_next[1, 0])   # new velocity
-        
-        # Apply velocity limits
-        self.state.vx = np.clip(self.state.vx, 0, self.params.max_velocity)
-        
-        # Update acceleration for logging and platoon compatibility
-        self.state.ax = u_acceleration
-        self.a = u_acceleration
+        # Sync x_long with LLC-propagated state and update Jacobians (step 7)
+        # ZOH is computed once per Nash step via get_state_space_matrices(NASH_CONTROL_DT)
+        self.x_long = np.array([self.state.x, self.state.vx])
+        a_des = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
+        self._update_continuous_jacobians(a_des)
+
+    # =========================================================================
+    # KINEMATIC MODEL
+    # =========================================================================
+
+    def update_dynamics_kinematic(self, dt: float):
+        """Update vehicle dynamics using the kinematic model."""
+        if not self.autonomous_mode:
+            Fx, _ = self.lower_level_controller.calculate_forces()
+            target_acceleration = Fx / self.params.mass
+        else:
+            target_acceleration = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
+
+        new_velocity = self.v + target_acceleration * dt
+        new_velocity = np.clip(new_velocity, 0, self.max_velocity)
+
+        delta_f = self.steering_input * self.params.max_steering_angle
+        delta_r = 0.0
+        self._state_equation_platoon(delta_f, delta_r, new_velocity, dt)
+
+    def _state_equation_platoon(self, delta_f, delta_r, V, dt):
+        """Kinematic bicycle model state update."""
+        l_f = self.params.lf
+        l_r = self.params.lr
+        L = self.params.wheelbase
+
+        beta = np.arctan((l_f * np.tan(delta_r) + l_r * np.tan(delta_f)) / L)
+        x_dot = V * np.cos(self.state.psi + beta)
+        y_dot = V * np.sin(self.state.psi + beta)
+        psi_dot = (np.tan(delta_f) - np.tan(delta_r)) * np.cos(beta) * V / L
+
+        self.state.x += x_dot * dt
+        self.state.y += y_dot * dt
+        self.state.psi += psi_dot * dt
+
+        self.a = (V - self.v) / dt
+        self.v = V
+        self.state.vx = V
+        self.state.ax = self.a
+
+    # =========================================================================
+    # NONLINEAR PLANT — Belousov Eq. 3.11a
+    # =========================================================================
+
+    def _discretize_zoh(self, A_c: np.ndarray, B_c: np.ndarray, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+        """ZOH discretization via matrix exponential of the augmented system."""
+        n, m = A_c.shape[0], B_c.shape[1]
+        aug = np.zeros((n + m, n + m))
+        aug[:n, :n] = A_c * dt
+        aug[:n, n:] = B_c * dt
+        e = expm(aug)
+        return e[:n, :n], e[:n, n:]
+
+    def _tire_force(self, alpha: float, C: float, mu: float, Fz: float) -> float:
+        """Nonlinear lateral tire force — Rajamani Eq. 13.45 (parabolic pressure distribution).
+
+        Recovers the linear model Fy = C·α for small slip angles.
+        Saturates at μ·Fz for full sliding.
+        """
+        theta = C / (3.0 * mu * Fz)
+        S = np.tan(alpha)
+        if abs(S) <= 1.0 / theta:
+            return mu * Fz * (3 * theta * S - 3 * theta**2 * S**2 + theta**3 * S**3)
+        return float(np.sign(S)) * mu * Fz
+
+    def _compute_Fxf(self, u_accel: float) -> float:
+        """Feedforward cancellation + parabolic saturation: Nash u_accel [m/s²] → Fxf [N].
+
+        Three-step process:
+          1. Feedforward: isolate Fxf_desired from Belousov Eq. 3.11a (FWD, Fxr=0):
+               Fxf_desired = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf)) / cos(δf)
+          2. Longitudinal slip ratio (linear approximation — Rajamani Eq. 13.45):
+               κ = Fxf_desired / Cx
+          3. Parabolic saturation (same Rajamani Eq. 13.45 model as lateral, S←κ):
+               Fxf = _tire_force(arctan(κ), Cx, μ, Fz_f)
+             Recovers Fxf ≈ Cx·κ = Fxf_desired for small slip; saturates at μ·Fz_f.
+
+        Fyf (lateral cross-coupling) also uses Rajamani Eq. 13.45.
+        Result stored in self.state.Fxf for lateral coupling (Fxf·sin(δf) terms in Eq. 3.11b/c).
+        """
+        vx = self.state.vx
+        p = self.params
+        vy = self.state.vy
+        Omega_z = self.state.psi_dot
+        delta_f = self.state.delta_f
+
+        # Low-speed blending (Fernández Eq. 4.4)
+        f_vx = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
+
+        # Aerodynamic drag — Fernández Eq. 3.6 / Belousov Eq. 3.5
+        Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
+        # Grade resistance — Belousov Eq. 3.11a
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
+        # Rolling resistance — Fernández Eq. 3.7 + 4.4
+        vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
+        Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
+
+        # Front slip angle — Rajamani Eq. 2.27
+        vx_safe = max(abs(vx), 0.1)
+        alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
+        # Static normal load on front axle (50/50 CG assumed)
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        # Nonlinear front lateral tire force — Rajamani Eq. 13.45
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
+
+        # Step 1 — Feedforward: isolate desired Fxf from Belousov Eq. 3.11a
+        cos_df = np.cos(delta_f)
+        Fxf_desired = (self.m_eff * u_accel + Ra + Rg + Rr + Fyf * np.sin(delta_f)) / max(abs(cos_df), 1e-6)
+
+        # Step 2 — Longitudinal slip ratio κ (Rajamani Ch. 13: κ ≈ Fxf / Cx for small slip)
+        kappa = Fxf_desired / p.Cx
+
+        # Step 3 — Parabolic saturation (Rajamani Eq. 13.45, Rajamani Table 13.4 params):
+        #   _tire_force uses S = tan(alpha), so passing arctan(κ) maps S ← κ correctly.
+        #   Saturates at μ·Fz_f; recovers Fxf ≈ Cx·κ = Fxf_desired for small κ.
+        Fxf = self._tire_force(np.arctan(kappa), p.Cx, p.tire_friction_coeff, Fz_f)
+
+        # Store for lateral coupling (Fxf·sin(δf) in Belousov Eq. 3.11b/c)
+        self.state.Fxf = Fxf
+        return Fxf
+
+    def _longitudinal_derivatives(self, x_long: np.ndarray, Fxf: float) -> np.ndarray:
+        """Full nonlinear longitudinal EOM — Belousov Eq. 3.11a (no small-angle assumption).
+
+        State: [x, vx],  Input: Fxf [N] = front axle drive force (FWD: Fxr = 0)
+
+        m_eff*(v̇x - vy·Ωz) = Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr  [Belousov Eq. 3.11a]
+
+        Rearranged:
+          v̇x = vy·Ωz + (Fxf·cos(δf) - Fyf·sin(δf) - Ra - Rg - Rr) / m_eff
+
+        Due to feedforward cancellation (Fxf = (m_eff·u_accel + Ra + Rg + Rr + Fyf·sin(δf))/cos(δf)):
+          v̇x = vy·Ωz + u_accel  (double integrator seen by Nash)
+
+        External params read from self.state (zero for straight-line platooning):
+          vy    = self.state.vy        [lateral velocity — Coriolis coupling]
+          Ωz    = self.state.psi_dot  [yaw rate — Coriolis coupling]
+          δf    = self.state.delta_f  [front steering angle — exact sin(δf)]
+
+        Ra    = 0.5*ρ*Cd*Af*vx*|vx|              [Fernández Eq. 3.6, Belousov Eq. 3.5]
+        Rg    = m·g·sin(θ_road)                   [Belousov Eq. 3.11a grade resistance]
+        Rr    = f_vx * fr * m * g * sign(vx)     [Fernández Eq. 3.7]
+        f_vx  = (tanh(10*|vx| - 8) + 1) / 2     [Fernández Eq. 4.4]
+        Fyf   = Rajamani Eq. 13.45 nonlinear parabolic tire model
+        α_f   = f_vx * (δf - arctan2(vy + lf·Ωz, max(|vx|,0.1)))  [Rajamani Eq. 2.27]
+        m_eff = m + wheel_inertia / r²            [Belousov Eq. 3.8]
+        """
+        _, vx = x_long
+        p = self.params
+        # External state (Coriolis and steering coupling — zero for straight-line)
+        vy = self.state.vy
+        Omega_z = self.state.psi_dot
+        delta_f = self.state.delta_f
+
+        # Low-speed blending (Fernández Eq. 4.4)
+        f_vx = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
+
+        # Aerodynamic drag — Fernández Eq. 3.6 / Belousov Eq. 3.5 (direction-correct)
+        Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
+        # Grade resistance — Belousov Eq. 3.11a
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
+        # Rolling resistance — Fernández Eq. 3.7 + 4.4
+        vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
+        Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
+
+        # Front lateral tire force — slip angle per Rajamani Eq. 2.27, nonlinear Rajamani 13.45
+        # (cross-coupling: Fyf·sin(δf) term in Belousov Eq. 3.11a)
+        vx_safe = max(abs(vx), 0.1)
+        alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
+
+        # Exact steering geometry — no small-angle approximation
+        cos_df = np.cos(delta_f)
+        sin_df = np.sin(delta_f)
+
+        # Belousov Eq. 3.11a — full form (FWD: Fxr=0, so only Fxf·cos(δf) in drive term)
+        vx_dot = vy * Omega_z + (Fxf * cos_df - Fyf * sin_df - Ra - Rg - Rr) / self.m_eff
+        return np.array([vx, vx_dot])
+
+    def _update_continuous_jacobians(self, u_accel: float):
+        """Update continuous Jacobians A_c, B_c at the current operating point.
+
+        Called every simulation step (SIMULATION_DT = 0.01 s) — no ZOH,
+        only numerical forward differences.  Nash re-discretizes via
+        get_state_space_matrices(dt=NASH_CONTROL_DT) once per Nash step (0.1 s),
+        so ZOH is always computed at the correct Nash timestep.
+        """
+        eps = 1e-5
+        # Feedforward: convert Nash u_accel [m/s²] → Fxf [N] at current state
+        Fxf = self._compute_Fxf(u_accel)
+        f0 = self._longitudinal_derivatives(self.x_long, Fxf)
+        n = 2
+        # A_c: ∂f/∂x — state Jacobian (Fxf held constant at nominal)
+        A_c = np.zeros((n, n))
+        for j in range(n):
+            xp = self.x_long.copy()
+            xp[j] += eps
+            A_c[:, j] = (self._longitudinal_derivatives(xp, Fxf) - f0) / eps
+        # B_c: ∂f/∂u_accel — perturb u_accel, recompute Fxf, take numerical derivative
+        # Chain rule: ∂f/∂u = (∂f/∂Fxf)·(∂Fxf/∂u) = (cos(δf)/m_eff)·(m_eff/cos(δf)) = 1 → B_c=[[0],[1]]
+        Fxf_p = self._compute_Fxf(u_accel + eps)
+        B_c = (self._longitudinal_derivatives(self.x_long, Fxf_p) - f0).reshape(n, 1) / eps
+        # Restore nominal Fxf — _compute_Fxf(u+eps) above overwrites self.state.Fxf with the
+        # perturbed value; restore it so lateral coupling (Fxf·sin(δf)) sees the correct force.
+        self.state.Fxf = Fxf
+        self.A_c_current = A_c
+        self.B_c_current = B_c
+
+    def _linearize_at_current_state(self, u_accel: float, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+        """Numerical Jacobians at x_long, then ZOH discretize at the given dt.
+
+        Used for explicit one-shot initialisation (dt = NASH_CONTROL_DT).
+        Normal steady-state updates use _update_continuous_jacobians() each sim
+        step and let Nash re-discretize at NASH_CONTROL_DT via
+        get_state_space_matrices().
+        """
+        self._update_continuous_jacobians(u_accel)
+        A_d, B_d = self._discretize_zoh(self.A_c_current, self.B_c_current, dt)
+        self.A = A_d; self.B1 = B_d; self.B2 = B_d.copy()
+        self.A_d = A_d; self.B_d = B_d
+        return A_d, B_d
+
+    # =========================================================================
+    # STATE-SPACE MODEL (nonlinear plant + RK4)
+    # =========================================================================
+
+    def update_dynamics_state_space(self, dt: float):
+        """Nonlinear plant with RK4 + dynamic linearization.
+
+        Simulation loop (two-timestep architecture):
+          - Every SIMULATION_DT (0.01 s): RK4 propagation + update A_c, B_c
+          - Every NASH_CONTROL_DT (0.1 s): Nash reads A_c, B_c via
+            get_state_space_matrices(NASH_CONTROL_DT) and runs ZOH once.
+        ZOH is therefore always computed at NASH_CONTROL_DT, not at sim dt.
+        """
+        if self.A_c_current is None:
+            self._update_continuous_jacobians(0.0)
+
+        u_accel = np.clip(
+            self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration,
+            self.params.max_deceleration, self.params.max_acceleration)
+
+        # Feedforward: convert u_accel [m/s²] → Fxf [N] (stored in self.state.Fxf)
+        Fxf = self._compute_Fxf(u_accel)
+
+        # RK4 propagation — step 6 in simulation loop (plant takes Fxf [N], not u_accel)
+        f = self._longitudinal_derivatives
+        k1 = f(self.x_long, Fxf)
+        k2 = f(self.x_long + 0.5 * dt * k1, Fxf)
+        k3 = f(self.x_long + 0.5 * dt * k2, Fxf)
+        k4 = f(self.x_long + dt * k3,        Fxf)
+        self.x_long = self.x_long + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        self.x_long[1] = np.clip(self.x_long[1], 0.0, self.params.max_velocity)
+
+        # Sync to VehicleState
+        self.state.x = float(self.x_long[0])
+        self.state.vx = float(self.x_long[1])
         self.v = self.state.vx
-        
-        # For lateral motion - simplified (straight line motion)
+        self.a = float(k1[1])
+        self.state.ax = self.a
         self.state.vy = 0.0
         self.state.psi_dot = 0.0
-        
-        # # Debug output for human vehicle
-        # if self.vehicle_id == "Human" and hasattr(self, '_debug_counter'):
-        #     if self._debug_counter % 100 == 0:  # Print every 100 iterations
-        #         print(f"ZOH Debug {self.vehicle_id}: x={self.state.x:.2f}, vx={self.state.vx:.2f}, ax={u_acceleration:.2f}")
-        #     self._debug_counter += 1
-        # elif self.vehicle_id == "Human":
-        #     self._debug_counter = 0
-        
-        # if hasattr(self, '_debug_counter'):
-        #     if self._debug_counter % 100 == 0:  # Print every 100 iterations
-        #         print(f"ZOH Debug {self.vehicle_id}: x={self.state.x:.2f}, vx={self.state.vx:.2f}, ax={u_acceleration:.2f}")
-        #     self._debug_counter += 1
-    
-    def get_state_space_matrices(self, dt: float = SIMULATION_DT):
-        """Get state-space matrices A, B, C for the longitudinal bicycle model
-        
-        Args:
-            dt: Time step for discrete-time matrices (if None, returns continuous-time)
-            
-        Returns:
-            tuple: (A, B, C) matrices
+
+        # Step 7: Update continuous Jacobians at new state (no ZOH — Nash does ZOH at 0.1s)
+        self._update_continuous_jacobians(u_accel)
+
+        if not np.isfinite(self.x_long).all():
+            print(f"WARNING {self.vehicle_id}: NaN detected, resetting vx")
+            self.x_long[1] = 0.0
+
+    # =========================================================================
+    # STATE-SPACE MATRICES
+    # =========================================================================
+
+    def get_state_space_matrices(self, dt: float = SIMULATION_DT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (A_d, B_d, C) re-discretized at requested dt.
+
+        In hierarchical mode the lower-level controller compensates for all
+        resistive forces (drag, rolling), so the effective plant seen by the
+        upper Nash controller is a pure double integrator:
+            x[k+1] = x[k] + v[k]·dt + 0.5·u·dt²
+            v[k+1] = v[k] + u·dt
+        Using the nonlinear (drag-including) Jacobians here would cause z_free
+        to show natural drag deceleration that never actually occurs in the
+        closed-loop hierarchical system, making the Nash solver output ≈ 0
+        when the vehicle is above target speed.
+
+        Behaviorally aligned with lateral vehicle get_state_space_matrices().
         """
-        # Continuous-time state-space matrices
-        A_continuous = np.array([[0.0, 1.0],   # dx/dt = vx
-                                [0.0, 0.0]])   # dvx/dt = ax (from input)
-        
-        B_continuous = np.array([[0.0],        # position not directly affected by acceleration
-                                [1.0]])        # velocity affected by acceleration
-        
-        C = np.array([[1.0, 0.0],   # output position = x
-                      [0.0, 1.0]])  # output velocity = vx
-        
-        if dt is None:
-            # Return continuous-time matrices
-            return A_continuous, B_continuous, C
-        else:
-            # Convert to discrete-time using ZOH (Zero-Order Hold)
-            # For the double integrator system [position, velocity]:
-            # 
-            # A_continuous = [0  1]    B_continuous = [0]
-            #                [0  0]                   [1]
-            #
-            # The ZOH discretization gives:
-            # A_d = exp(A*dt) = [1  dt]
-            #                   [0   1]
-            #
-            # B_d = ∫[0 to dt] exp(A*τ) dτ * B = [dt^2/2]
-            #                                     [dt  ]
-        
-            from scipy.linalg import expm
-        
-            # Method 1: Using matrix exponential (exact ZOH)
-            try:
-                # Create the augmented matrix for ZOH conversion
-                # [A  B] 
-                # [0  0]
-                n = A_continuous.shape[0]  # 2
-                m = B_continuous.shape[1]  # 1
-            
-                augmented = np.zeros((n + m, n + m))
-                augmented[0:n, 0:n] = A_continuous * dt
-                augmented[0:n, n:n+m] = B_continuous * dt
-            
-                # Matrix exponential of augmented matrix
-                exp_augmented = expm(augmented)
-            
-                # Extract discrete matrices
-                A_discrete = exp_augmented[0:n, 0:n]
-                B_discrete = exp_augmented[0:n, n:n+m]
-            
-            except ImportError:
-                # Fallback: Analytical solution for double integrator
-                # This is the exact ZOH solution for our specific A and B matrices
-                A_discrete = np.array([[1.0, dt],      # x[k+1] = x[k] + vx[k]*dt
-                                      [0.0, 1.0]])     # vx[k+1] = vx[k] + ax[k]*dt
-            
-                B_discrete = np.array([[0.5*dt*dt],    # x[k+1] += 0.5*ax*dt^2 (ZOH effect)
-                                      [dt]])           # vx[k+1] += ax*dt
-            self.A=A_discrete
-            self.B1=B_discrete
-            self.B2=B_discrete if self.autonomous_mode and self.vehicle_id=="Human" else None
-            self.C=C
-            return A_discrete, B_discrete, C
-    
+        C = np.eye(2)
+        # Pure double integrator for hierarchical mode (LLC cancels all drag)
+        if self.use_hierarchical_model:
+            A_d, B_d = self._discretize_zoh(np.array([[0., 1.], [0., 0.]]),
+                                             np.array([[0.], [1.]]), dt)
+            return A_d, B_d, C
+        if self.A_c_current is not None:
+            A_d, B_d = self._discretize_zoh(self.A_c_current, self.B_c_current, dt)
+            return A_d, B_d, C
+        # Fallback: double integrator (before first linearization)
+        A_d, B_d = self._discretize_zoh(np.array([[0., 1.], [0., 0.]]),
+                                         np.array([[0.], [1.]]), dt)
+        return A_d, B_d, C
+
+    # =========================================================================
+    # HELPERS
+    # =========================================================================
+
+    def get_dynamic_max_acceleration(self) -> float:
+        """Engine-based max acceleration ceiling (delegates to lower-level controller)."""
+        if not (self.use_hierarchical_model or
+                (not self.use_kinematic_model and not self.use_state_space_model)):
+            return self.params.max_acceleration
+        return self.lower_level_controller.get_dynamic_max_acceleration()
+
+    def get_u_bounds(self) -> Tuple[float, float]:
+        """Compute dynamic u_accel bounds from physics at the current operating point.
+
+        Inverts the feedforward law to find the u_accel range that the plant
+        can actually deliver, accounting for:
+          - Engine torque at current RPM and gear (including gear-shift torque drop)
+          - Longitudinal tire saturation at μ·Fz_f (from _compute_Fxf parabolic model)
+          - Braking capacity: μ·m·g (full tire friction)
+          - Resistive forces (Ra, Rg, Rr, Fyf·sin(δf)) at current state
+
+        Inverse feedforward (Belousov Eq. 3.11a, FWD: Fxr=0):
+            Fxf·cos(δf) = m_eff·u + Ra + Rg + Rr + Fyf·sin(δf)
+            u = (Fxf·cos(δf) - Ra - Rg - Rr - Fyf·sin(δf)) / m_eff
+
+        Returns
+        -------
+        (u_min, u_max) : float
+            Clipped to config hard limits [NASH_U1_MIN, NASH_U1_MAX].
+        """
+        p = self.params
+        vx = self.state.vx
+        vy = self.state.vy
+        Omega_z = self.state.psi_dot
+        delta_f = self.state.delta_f
+
+        # Resistive forces at current state (same as _compute_Fxf)
+        f_vx = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
+        Ra = 0.5 * p.air_density * p.drag_coefficient * p.frontal_area * vx * abs(vx)
+        Rg = p.mass * p.gravity * np.sin(p.road_grade)
+        vx_sign = np.sign(vx) if abs(vx) > 1e-6 else 0.0
+        Rr = f_vx * p.rolling_resistance_coeff * p.mass * p.gravity * vx_sign
+        F_resist = Ra + Rg + Rr
+
+        # Front lateral force coupling term
+        vx_safe = max(abs(vx), 0.1)
+        alpha_f = f_vx * (delta_f - np.arctan2(vy + p.lf * Omega_z, vx_safe))
+        Fz_f = p.mass * p.gravity * p.lr / (p.lf + p.lr)
+        Fyf = self._tire_force(alpha_f, p.Caf, p.tire_friction_coeff, Fz_f)
+        cos_df = np.cos(delta_f)
+        lateral_coupling = Fyf * np.sin(delta_f)
+
+        # Fxf_max: minimum of engine force (with gear-shift torque drop) and tire limit
+        llc = self.lower_level_controller
+        engine_force = llc.compute_max_engine_force() * llc.transmission.get_torque_multiplier()
+        tire_max = p.tire_friction_coeff * Fz_f   # parabolic saturation ceiling
+        Fxf_max = min(engine_force, tire_max)
+
+        # Fxf_min: full braking (both axles — compute_max_brake_force uses total μ·m·g)
+        Fxf_min = -llc.compute_max_brake_force()
+
+        # Invert feedforward: u = (Fxf·cos(δf) - F_resist - Fyf·sin(δf)) / m_eff
+        cos_df_safe = max(abs(cos_df), 1e-6) * np.sign(cos_df) if abs(cos_df) > 1e-6 else 1.0
+        u_max = (Fxf_max * cos_df_safe - F_resist - lateral_coupling) / self.m_eff
+        u_min = (Fxf_min * cos_df_safe - F_resist - lateral_coupling) / self.m_eff
+
+        # Clip to config hard limits (safety backstop)
+        from config import NASH_U1_MIN, NASH_U1_MAX
+        u_max = float(np.clip(u_max, NASH_U1_MIN, NASH_U1_MAX))
+        u_min = float(np.clip(u_min, NASH_U1_MIN, NASH_U1_MAX))
+        return u_min, u_max
+
     def get_state_vector(self):
-        """Get current state vector [x, vx]^T"""
+        """Return current state as [x, vx]ᵀ."""
         return np.array([[self.state.x],
-                        [self.state.vx]])
-    
+                         [self.state.vx]])
+
     def set_state_vector(self, x_state):
-        """Set state vector [x, vx]^T"""
+        """Set state from [x, vx]ᵀ."""
         self.state.x = float(x_state[0, 0])
         self.state.vx = float(x_state[1, 0])
-        self.v = self.state.vx  # Update platoon compatibility variable
-    
+        self.v = self.state.vx
+        self.x_long = np.array([self.state.x, self.state.vx])
+
     def set_manual_inputs(self, throttle: float, brake: float, steering: float):
-        """Set manual inputs for non-autonomous vehicles (human driver)"""
+        """Set manual inputs for non-autonomous (human-driven) vehicles."""
         if not self.autonomous_mode:
-            self.throttle_input = throttle
-            self.brake_input = brake
-            self.steering_input = steering
-            
-            # Convert throttle/brake to direct force for non-autonomous vehicles
+            self.lower_level_controller.throttle_input = throttle
+            self.lower_level_controller.brake_input = brake
+            self.steering_input = np.clip(steering, -1.0, 1.0)
+
+            # direct_force for state-space / kinematic fallback paths
             if throttle > 0.001:
-                max_drive_force = self.params.mass * self.params.max_acceleration
-                self.direct_force = throttle * max_drive_force
+                self.direct_force = throttle * self.params.mass * self.params.max_acceleration
             elif brake > 0.001:
-                max_brake_force = self.params.mass * self.params.gravity * self.params.tire_friction_coeff
-                self.direct_force = -brake * max_brake_force
+                max_brake = self.params.mass * self.params.gravity * self.params.tire_friction_coeff
+                self.direct_force = -brake * max_brake
             else:
                 self.direct_force = 0.0
-                
+
         self.steering_input = np.clip(steering, -1.0, 1.0)
-    
-    def set_direct_force(self, force: float):
-        """Set direct force for autonomous vehicles"""
-        self.direct_force = force
-    
-    def set_autonomous_target(self, target_velocity: float, target_acceleration: float):
-        """Set autonomous control targets"""
-        self.target_velocity = target_velocity
-        self.target_acceleration = target_acceleration
-        
-    def update_autonomous_control(self, dt: float):
-        """Update autonomous control inputs"""
-        if not self.autonomous_mode:
-            return
-        
-        target_force = self.target_acceleration * self.params.mass
-        self.direct_force = target_force
 
 
 __all__ = ['Vehicle']

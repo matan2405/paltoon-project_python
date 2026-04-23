@@ -1,26 +1,33 @@
 """
 Platoon Control Module.
-VERSION 2.0
+
+Research linkage:
+- Provides the surrounding-platoon motion context used by the lateral merge
+    experiments, safety field evaluation, and gap-selection logic.
+- Encapsulates platoon spacing and follower behavior assumptions.
 """
 
 import numpy as np
 from typing import List, Dict
 from dataclasses import dataclass
-
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from vehicle.components import VehicleParameters
+from config import (
+    PLATOON_TIME_GAP, PLATOON_STANDSTILL_DISTANCE, PLATOON_TARGET_VELOCITY,
+    PLATOON_VEHICLE_LENGTH, PLATOON_MIN_MERGE_GAP, PLATOON_LANE_Y,
+    PLATOON_LEADER_VEL_GAIN, PLATOON_FOLLOWER_DIST_GAIN, PLATOON_FOLLOWER_VEL_GAIN,
+    PLATOON_ACCEL_MAX, PLATOON_ACCEL_MIN,
+)
 
-_vp = VehicleParameters()
 
 @dataclass
 class PlatoonParams:
-    time_gap: float = 1.5
-    standstill_distance: float = 5.0
-    target_velocity: float = 20.0
-    vehicle_length: float = _vp.length
-    min_merge_gap: float = 15.0
-    platoon_lane_y: float = 0.0
+    time_gap: float = PLATOON_TIME_GAP
+    standstill_distance: float = PLATOON_STANDSTILL_DISTANCE
+    target_velocity: float = PLATOON_TARGET_VELOCITY
+    vehicle_length: float = PLATOON_VEHICLE_LENGTH
+    min_merge_gap: float = PLATOON_MIN_MERGE_GAP
+    platoon_lane_y: float = PLATOON_LANE_Y
 
 
 class PlatoonVehicle:
@@ -31,7 +38,7 @@ class PlatoonVehicle:
         self.y = initial_y
         self.vx = initial_vx
         self.ax = 0.0
-        self.L = _vp.length
+        self.L = PLATOON_VEHICLE_LENGTH
         
         class State:
             pass
@@ -70,6 +77,7 @@ class PlatoonManager:
         return vehicle
     
     def create_platoon(self, num_vehicles: int, leader_x: float, gap: float = None):
+        """Create a platoon at leader_x using either provided or policy-derived spacing."""
         if gap is None:
             gap = self.params.time_gap * self.target_velocity + self.params.standstill_distance
         self.vehicles.clear()
@@ -79,21 +87,22 @@ class PlatoonManager:
         print(f"🚛 Created platoon: {num_vehicles} vehicles, gap={gap:.1f}m")
     
     def get_vehicles_as_obstacles(self) -> List[Dict]:
+        """Return platoon vehicles as obstacle dictionaries for safety-field evaluation."""
         return [v.to_dict() for v in self.vehicles]
     
     def update(self, dt: float):
         for i, vehicle in enumerate(self.vehicles):
             if i == 0:
                 v_error = self.target_velocity - vehicle.vx
-                a = 0.5 * v_error
+                a = PLATOON_LEADER_VEL_GAIN * v_error
             else:
                 leader = self.vehicles[i-1]
                 d_des = self.params.vehicle_length + self.params.time_gap * vehicle.vx + self.params.standstill_distance
                 d_actual = leader.x - vehicle.x
                 e_d = d_actual - d_des
                 e_v = leader.vx - vehicle.vx
-                a = 0.3 * e_d + 0.8 * e_v
-            vehicle.update(dt, np.clip(a, _vp.max_deceleration, _vp.max_acceleration))
+                a = PLATOON_FOLLOWER_DIST_GAIN * e_d + PLATOON_FOLLOWER_VEL_GAIN * e_v
+            vehicle.update(dt, np.clip(a, PLATOON_ACCEL_MIN, PLATOON_ACCEL_MAX))
     
     def add_human_vehicle(self, human_vehicle):
         self.human_vehicle = human_vehicle

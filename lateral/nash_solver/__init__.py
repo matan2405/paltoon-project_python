@@ -1,4 +1,4 @@
-"""Nash Solver module - V3.0 Final."""
+"""Nash solver package for lateral shared control with embedded-authority GNE formulation."""
 from .lateral_constrained_nash_solver import (
     ConstrainedLateralNashSolver, 
     ConstrainedLateralNashParams
