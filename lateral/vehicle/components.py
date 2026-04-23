@@ -27,25 +27,41 @@ class VehicleParameters:
     lf: float = 1.2525  # distance from CG to front axle
     lr: float = 1.2525  # distance from CG to rear axle
     
-    # Tire cornering stiffness
-    Cf: float = 55000.0  # Front axle cornering stiffness N/rad
-    Cr: float = 55000.0  # Rear axle cornering stiffness N/rad
+    # Aerodynamics (from official specs)
+    drag_coefficient: float = 0.30  # Cd
+    frontal_area: float = 2.09  # m²
+    
+    # Tire parameters (225/50 R17)
+    wheel_radius: float = 0.3175  # m
+    tire_friction_coeff: float = 0.8
+    
+    # Tire cornering stiffness (matching Unity/Longitudinal system)
+    Cf: float = 15000.0  # Front tire cornering stiffness N/rad
+    Cr: float = 18000.0  # Rear tire cornering stiffness N/rad
     
     # Moment of inertia
     Iz: float = 2500.0  # kg·m² (estimated)
     
-    # Steering constraints (Audi TT specs)
-    max_steering_angle: float = np.radians(25.0)  # rad (25°)
+    # Steering constraints (from official specs)
+    max_steering_angle: float = np.radians(30.0)  # rad (30°)
     max_steering_rate: float = np.radians(15.0)   # rad/s (15°/s)
     steering_ratio: float = 14.6  # from technical data
+    
+    # Performance limits
+    max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
+    max_acceleration: float = 2.5  # m/s² (longitudinal comfort limit)
+    max_deceleration: float = -3.5  # m/s² (emergency braking capability)
+    comfortable_deceleration: float = 2.0  # m/s² (magnitude, for IDM/MOBIL)
     
     # Lateral dynamics constraints
     max_lateral_acceleration: float = 3.0  # m/s²
     max_lateral_jerk: float = 2.5  # m/s³
     
-    # Performance
+    # Operating point
     nominal_velocity: float = NOMINAL_VELOCITY  # m/s
-    max_velocity: float = 250.0 / 3.6  # m/s (250 km/h electronically limited)
+    
+    # Constants
+    gravity: float = 9.81
 
 
 class VehicleState:

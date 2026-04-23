@@ -22,6 +22,9 @@ import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vehicle.components import VehicleParameters
+
+_vp = VehicleParameters()
 
 
 @dataclass
@@ -29,11 +32,11 @@ class IDMParams:
     """Intelligent Driver Model parameters (from Kesting et al.)"""
     v0: float = 33.3          # Desired velocity [m/s] (120 km/h)
     T: float = 1.2            # Safe time headway [s]
-    a: float = 1.5            # Maximum acceleration [m/s²]
-    b: float = 2.0            # Comfortable deceleration [m/s²]
+    a: float = _vp.max_acceleration  # Maximum acceleration [m/s²]
+    b: float = _vp.comfortable_deceleration  # Comfortable deceleration [m/s²]
     s0: float = 2.0           # Minimum spacing [m]
     delta: float = 4.0        # Acceleration exponent
-    L: float = 4.0            # Vehicle length [m]
+    L: float = _vp.length     # Vehicle length [m]
 
 
 @dataclass  

@@ -73,8 +73,6 @@ STANLEY_K_PSI_CAUTIOUS = 0.3
 STANLEY_K_PSI_NORMAL = 0.5
 STANLEY_K_PSI_AGGRESSIVE = 0.7
 
-STANLEY_K_SOFT = 1.0  # Low softening to allow proper gain application
-
 # =============================================================================
 # NASH SOLVER PARAMETERS - Matching longitudinal structure (Li et al. 2019)
 # =============================================================================
@@ -94,29 +92,22 @@ NASH_S1 = 200000.0      # System cares about human effort (was 100000)
 NASH_S2 = 200000.0      # Human cares about system effort
 
 # =============================================================================
-# DRIVER TYPE - NASH PARAMETER MODIFIERS (Li et al. 2019)
+# AUTHORITY ALLOCATOR PARAMETERS - Aligned with longitudinal V5.2
 # =============================================================================
-# These modify how much the human "cares" about control effort vs tracking
-# Aggressive driver: lower R2 (willing to use more control), lower S2 (less cooperative)
-# Cautious driver: higher R2 (gentle control), higher S2 (more cooperative)
+# Sigmoid parameters for SAFETY (risk-based)
+AUTHORITY_LAMBDA_MIN = 0.1          # Human dominant when safe
+AUTHORITY_LAMBDA_MAX = 10.0         # System dominant when dangerous
+AUTHORITY_FORCE_MIDPOINT = 150.0    # Sigmoid center point [N]
+AUTHORITY_K_STEEPNESS = 0.02        # Sigmoid slope
 
-NASH_DRIVER_PARAMS = {
-    'cautious': {
-        'R2_factor': 1.5,      # 50% higher - more gentle
-        'S2_factor': 1.5,      # 50% more cooperative with system
-        'Q_y_factor': 0.8,     # Less aggressive tracking
-    },
-    'normal': {
-        'R2_factor': 1.0,      # Baseline
-        'S2_factor': 1.0,
-        'Q_y_factor': 1.0,
-    },
-    'aggressive': {
-        'R2_factor': 0.6,      # 40% lower - willing to use more control effort
-        'S2_factor': 0.6,      # Less cooperative (more independent)
-        'Q_y_factor': 1.3,     # More aggressive tracking (wants to reach target faster)
-    }
-}
+# Smoothing parameters
+AUTHORITY_ALPHA_BASE = 0.02         # Slow smoothing (stability)
+AUTHORITY_ALPHA_FAST = 0.08         # Fast response (large errors)
+
+# Hysteresis thresholds for PERFORMANCE authority (based on y_error)
+AUTHORITY_ENTER_THRESHOLD = 1.0     # Enter performance mode when |y_error| > 1.0m
+AUTHORITY_EXIT_THRESHOLD = 0.3      # Exit performance mode when |y_error| < 0.3m
+AUTHORITY_LAMBDA_PERFORMANCE_MAX = 5.0  # Performance authority upper bound
 
 # =============================================================================
 # PHASE DETECTION PARAMETERS - From longitudinal controller
@@ -131,7 +122,12 @@ MERGING_Y_ERROR_FACTOR = 0.25        # |y_error| > 25% * lane_width
 MERGING_PSI_ERROR_THRESHOLD = 0.10   # |psi| > ~6 degrees
 
 # Phase transition time
-PHASE_TRANSITION_TIME = 5.0  # seconds of stability required
+PHASE_TRANSITION_TIME = 5.0          # seconds of stability required for FOLLOWING entry
+
+# Phase duration thresholds
+GAP_SEARCH_DURATION = 0.5            # seconds to wait in GAP_SEARCH before LANE_CHANGE
+LANE_CHANGE_MIN_TIME = 3.0           # min seconds in LANE_CHANGE before LANE_KEEPING
+LANE_CHANGE_Y_ERROR_FACTOR = 0.3     # |y_error| < 30% * lane_width to enter LANE_KEEPING
 
 __all__ = [
     'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT', 'NASH_NP', 'NASH_NU',
@@ -139,9 +135,11 @@ __all__ = [
     'LANE_WIDTH', 'PLATOON_LANE_Y', 'HUMAN_INITIAL_LANE_Y', 'VEHICLE_COLORS',
     'STANLEY_K_E_CAUTIOUS', 'STANLEY_K_E_NORMAL', 'STANLEY_K_E_AGGRESSIVE',
     'STANLEY_K_PSI_CAUTIOUS', 'STANLEY_K_PSI_NORMAL', 'STANLEY_K_PSI_AGGRESSIVE',
-    'STANLEY_K_SOFT', 'NASH_Q_Y', 'NASH_Q_PSI', 'NASH_R1', 'NASH_R2',
-    'NASH_S1', 'NASH_S2', 'NASH_DRIVER_PARAMS',
+    'NASH_Q_Y', 'NASH_Q_PSI', 'NASH_R1', 'NASH_R2', 'NASH_S1', 'NASH_S2',
+    'AUTHORITY_LAMBDA_MIN', 'AUTHORITY_LAMBDA_MAX', 'AUTHORITY_FORCE_MIDPOINT',
+    'AUTHORITY_K_STEEPNESS', 'AUTHORITY_ALPHA_BASE', 'AUTHORITY_ALPHA_FAST',
+    'AUTHORITY_ENTER_THRESHOLD', 'AUTHORITY_EXIT_THRESHOLD', 'AUTHORITY_LAMBDA_PERFORMANCE_MAX',
     'FOLLOWING_Y_ERROR_FACTOR', 'FOLLOWING_PSI_ERROR_THRESHOLD',
     'FOLLOWING_Y_DOT_THRESHOLD', 'MERGING_Y_ERROR_FACTOR', 'MERGING_PSI_ERROR_THRESHOLD',
-    'PHASE_TRANSITION_TIME'
+    'PHASE_TRANSITION_TIME', 'GAP_SEARCH_DURATION', 'LANE_CHANGE_MIN_TIME', 'LANE_CHANGE_Y_ERROR_FACTOR',
 ]

@@ -106,6 +106,11 @@ class LateralSimulation:
         self.merge_commanded = False
         self.merge_complete = False
         self.merge_trigger_time = 5.0
+
+        # Nash rate control: run Nash every NASH_CONTROL_DT, not every simulation dt
+        self._nash_step_interval = round(self.dt_nash / self.dt)  # = 5 steps
+        self._nash_step_counter = 0
+        self._last_nash_result = None  # Reused between Nash invocations
         
         # Data storage
         self.data = {
@@ -259,9 +264,13 @@ class LateralSimulation:
             if self.mobil_approved:
                 self.command_merge()
         
-        # Control
+        # Control — Nash runs at NASH_CONTROL_DT (20 Hz), not simulation dt (100 Hz)
         if self.merge_commanded:
-            control_result = self.nash_control_step()
+            self._nash_step_counter += 1
+            if self._nash_step_counter >= self._nash_step_interval or self._last_nash_result is None:
+                self._last_nash_result = self.nash_control_step()
+                self._nash_step_counter = 0
+            control_result = self._last_nash_result
             delta_shared = control_result['delta_shared']
         else:
             delta_shared = 0.0
@@ -464,7 +473,8 @@ class LateralSimulation:
         self.time = 0.0
         self.merge_commanded = False
         self.merge_complete = False
-        # NOTE: No delta_output_prev - no external filtering
+        self._nash_step_counter = 0
+        self._last_nash_result = None
         self.safety_field.reset()
         self.system_ref_generator.reset()
         self.human_ref_generator.reset()  # Reset R2 generator

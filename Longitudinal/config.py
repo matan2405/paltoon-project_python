@@ -67,6 +67,13 @@ NASH_NP = 20                      # Prediction horizon [steps]
 NASH_NU = 10                      # Control horizon [steps]
 DEFAULT_SIMULATION_TIME = 60 * 2  # Default simulation time [s]
 
+# =============================================================================
+# VEHICLE PARAMETERS (single source of truth)
+# Import AFTER SIMULATION_DT so vehicle.py can resolve its top-level import.
+# =============================================================================
+from vehicle.components import VehicleParameters
+_vp = VehicleParameters()
+
 # Vehicle colors for plotting
 VEHICLE_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
 GAP_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
@@ -75,8 +82,8 @@ GAP_COLORS = ['blue', 'red', 'green', 'orange', 'purple', 'brown', 'pink', 'gray
 # PLATOON PARAMETERS
 # =============================================================================
 PLATOON_TARGET_VELOCITY = 120.0 / 3.6   # Target platoon velocity [m/s] (120 km/h)
-PLATOON_MAX_VELOCITY = 250.0             # Max velocity limit [m/s]
-PLATOON_MAX_ACCELERATION = 2.5           # Max acceleration limit [m/s²]
+PLATOON_MAX_VELOCITY = _vp.max_velocity * 3.6  # Max velocity limit [km/h] (from VehicleParameters)
+PLATOON_MAX_ACCELERATION = _vp.max_acceleration  # Max acceleration limit [m/s²] (from VehicleParameters)
 
 # Rajamani controller gains (Chapter 6.4)
 RAJAMANI_H = 1.5           # Desired time headway [s]
@@ -87,6 +94,14 @@ RAJAMANI_K5 = 0.1          # Constraint: k5 > 0
 RAJAMANI_K2 = -RAJAMANI_K1 - RAJAMANI_H * RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K3 = 1.0 / RAJAMANI_H - RAJAMANI_K1 * RAJAMANI_K5
 RAJAMANI_K4 = RAJAMANI_K5 / RAJAMANI_H
+
+# CTH follower controller gains (Ioannou & Chien, 1993)
+# Position/velocity only — no acceleration feedback — robust to noisy dynamics
+CTH_KP = 0.4              # Gap-error gain [-]
+CTH_KD = 0.8              # Relative-velocity gain [-] (must be > CTH_KP * h / 2)
+
+# Jerk limiting (ISO 15622 ACC comfort standard)
+JERK_LIMIT = 2.0           # Maximum da/dt [m/s³]
 
 # Free road acceleration IDM exponent
 FREE_ROAD_DELTA = 4
@@ -108,11 +123,11 @@ NASH_R2 = 800.0                   # Human's cost on its own control effort
 NASH_S1 = 800.0                   # System penalty on human control effort
 NASH_S2 = 800.0                   # Human penalty on system control effort
 
-# Input constraints [m/s²]
-NASH_U1_MIN = -3.5                # System min acceleration
-NASH_U1_MAX = 2.5                 # System max acceleration
-NASH_U2_MIN = -4.0                # Human min acceleration
-NASH_U2_MAX = 3.0                 # Human max acceleration
+# Input constraints [m/s²] — derived from VehicleParameters
+NASH_U1_MIN = _vp.max_deceleration        # System min acceleration (from vehicle specs)
+NASH_U1_MAX = _vp.max_acceleration         # System max acceleration (from vehicle specs)
+NASH_U2_MIN = -4.0                # Human min acceleration (more aggressive than vehicle limit)
+NASH_U2_MAX = 3.0                 # Human max acceleration (more aggressive than vehicle limit)
 
 # Rate constraints (jerk limits) [m/s³]
 NASH_DU1_MAX = 1.5                # System max jerk
@@ -153,6 +168,7 @@ NASH_DRIVER_PARAMS = {
         'target_speed_offset': -10.0,        # [km/h]
         'max_deceleration': -3.0,            # [m/s²]
         'initial_x_offset': 20.0,             # [m] Start with larger gap to leader
+        'initial_speed': 0.0,                # [km/h] Target speed for the driver
     },
     'normal': {
         'max_acceleration': 2.5,
@@ -165,6 +181,7 @@ NASH_DRIVER_PARAMS = {
         'target_speed_offset': 0.0,
         'max_deceleration': -4.0,
         'initial_x_offset': 0.0,              # [m] Start with normal gap to leader
+        'initial_speed': 0.0,                # [km/h] Target speed for the driver
     },
     'aggressive': {
         'max_acceleration': 3.5,
@@ -177,6 +194,7 @@ NASH_DRIVER_PARAMS = {
         'target_speed_offset': +10.0,
         'max_deceleration': -5.0,
         'initial_x_offset': -20.0,             # [m] Start with smaller gap to leader
+        'initial_speed': 0.0,                # [km/h] Target speed for the driver
     }
 }
 
@@ -187,7 +205,7 @@ NASH_DRIVER_PARAMS = {
 # --- Hard Constraints ---
 SAFETY_MIN_SAFE_DISTANCE = 5.0          # [m]
 SAFETY_EMERGENCY_BRAKE_DISTANCE = 8.0   # [m]
-SAFETY_MAX_DECEL = 3.5                  # [m/s²]
+SAFETY_MAX_DECEL = abs(_vp.max_deceleration)   # [m/s²] (from vehicle specs)
 
 # --- Base Ellipse Parameters ---
 SAFETY_BASE_SAFETY_RADIUS = 10.0
@@ -234,8 +252,8 @@ SAFETY_FILTER_ALPHA = 0.2
 # --- Hard Constraint Jerk Limit ---
 SAFETY_HARD_CONSTRAINT_MAX_JERK = 2.0   # [m/s³]
 SAFETY_HARD_CONSTRAINT_DT = 0.02        # [s]
-SAFETY_HARD_CONSTRAINT_U_MIN = -3.5     # [m/s²]
-SAFETY_HARD_CONSTRAINT_U_MAX = 2.5      # [m/s²]
+SAFETY_HARD_CONSTRAINT_U_MIN = _vp.max_deceleration    # [m/s²] (from vehicle specs)
+SAFETY_HARD_CONSTRAINT_U_MAX = _vp.max_acceleration     # [m/s²] (from vehicle specs)
 
 # --- Road Conditions ---
 SAFETY_ROAD_CONDITION_FACTORS = {
@@ -243,6 +261,40 @@ SAFETY_ROAD_CONDITION_FACTORS = {
     "wet": 0.7,
     "icy": 0.5,
 }
+
+# =============================================================================
+# LOWER-LEVEL CONTROLLER PARAMETERS (Rajamani Ch.6 / Belousov et al.)
+# Hierarchical control: Upper (double integrator) → Lower (force-level)
+# =============================================================================
+# PI feedback gains for acceleration tracking
+LOWER_CTRL_KP = 0.4                    # Proportional gain on accel error [-]
+LOWER_CTRL_KI = 0.08                   # Integral gain on accel error [-]
+LOWER_CTRL_INTEGRATOR_LIMIT = 2.0      # Anti-windup saturation [m/s²·s]
+
+# Actuator smoothing (1st-order filter: 1.0 = no smoothing, 0.0 = full hold)
+LOWER_CTRL_THROTTLE_SMOOTHING = 0.08   # Throttle filter coefficient [-]
+LOWER_CTRL_BRAKE_SMOOTHING = 0.10      # Brake filter coefficient [-]
+
+# Dead-band for throttle/brake switching [N]
+LOWER_CTRL_DEADBAND = 50.0
+
+# Acceleration output filter (1st-order EMA on a_actual fed back to upper controller)
+# Smooths engine/gear-shift noise before Rajamani/Nash see it.
+# α = dt/(τ+dt): with dt=0.01s, τ=0.15s → α≈0.062
+LOWER_CTRL_ACCEL_FILTER_ALPHA = 0.06   # Accel output filter coefficient [-]
+
+# Engine braking (pumping losses + friction when throttle = 0, brake = 0)
+# Retarding torque scales linearly with RPM: T_brake = base * (RPM / 2000)
+ENGINE_BRAKING_BASE_TORQUE = 60.0      # Base retarding torque at 2000 RPM [Nm]
+ENGINE_BRAKING_MAX_TORQUE = 120.0      # Maximum retarding torque cap [Nm]
+
+# Gear-shift hold: freeze PI output while transmission is shifting
+# to avoid chasing transient force discontinuities
+LOWER_CTRL_GEAR_SHIFT_HOLD = True      # Freeze actuator output during gear shifts
+
+# Physical constants used by feedforward
+LOWER_CTRL_AIR_DENSITY = 1.225         # Air density [kg/m³]
+LOWER_CTRL_ROLLING_COEFF = 0.012       # Rolling resistance coefficient [-]
 
 # =============================================================================
 # PHASE DETECTION PARAMETERS (MERGING ↔ FOLLOWING)
@@ -293,7 +345,7 @@ REFGEN_TIME_HEADWAY = 1.5          # [s]
 REFGEN_STANDSTILL_DISTANCE = 5.0   # [m]
 
 # Comfortable deceleration (Rajamani Section 6.7.2, typical 0.1g-0.2g)
-REFGEN_A_COMFORT = 1.5             # [m/s²]
+REFGEN_A_COMFORT = 1.5             # [m/s²] (gentler than vehicle comfortable_deceleration for smooth refs)
 
 # Velocity tracking gain (Rajamani Section 6.7.2, typical 0.3-0.5)
 REFGEN_K_V = 0.4                   # [1/s]
@@ -303,8 +355,8 @@ REFGEN_K1 = 0.23                   # [1/s²] position gain (typical 0.2-0.4)
 REFGEN_K2 = 0.6                    # [1/s]  velocity gain (typical 0.6-1.0)
 
 # Comfort limits
-REFGEN_MAX_ACCEL = 2.5             # [m/s²]
-REFGEN_MAX_DECEL = -3.5            # [m/s²]
+REFGEN_MAX_ACCEL = _vp.max_acceleration     # [m/s²] (from vehicle specs)
+REFGEN_MAX_DECEL = _vp.max_deceleration     # [m/s²] (from vehicle specs)
 
 # Cruise catch-up factor
 REFGEN_CATCHUP_FACTOR = 1.15
@@ -320,24 +372,24 @@ REFGEN_LEADER_FF_GAIN = 0.5
 # HUMAN DRIVER PARAMETERS (IDM-based)
 # Source: human_driver.py
 # =============================================================================
-# IDM execution parameters
-HUMAN_MAX_ACCELERATION = 2.5       # [m/s²]
+# IDM execution parameters — derived from VehicleParameters where applicable
+HUMAN_MAX_ACCELERATION = _vp.max_acceleration   # [m/s²] (from vehicle specs)
 HUMAN_DESIRED_TIME_HEADWAY = 1.2   # [s]
 HUMAN_MIN_SPACING = 2.0            # [m]
 HUMAN_DELTA_IDM = 4.0              # IDM exponent
-HUMAN_COMFORTABLE_DECEL = 2.0      # [m/s²]
+HUMAN_COMFORTABLE_DECEL = _vp.comfortable_deceleration  # [m/s²] (from vehicle specs)
 
 # IDM planning parameters (more tolerant for Nash prediction)
 HUMAN_PLAN_TIME_HEADWAY = 0.8      # [s] shorter headway for planning
 HUMAN_PLAN_DECEL = 4.0             # [m/s²] harder braking allowed in planning
 
-# Execution constraints
-HUMAN_ACCEL_MIN = -4.0             # [m/s²]
-HUMAN_ACCEL_MAX = 2.5              # [m/s²]
+# Execution constraints — derived from VehicleParameters
+HUMAN_ACCEL_MIN = -4.0             # [m/s²] (human can brake harder than vehicle limit)
+HUMAN_ACCEL_MAX = _vp.max_acceleration  # [m/s²] (from vehicle specs)
 
 # Lane change rate
 HUMAN_LANE_CHANGE_RATE = 0.25      # Progress per second
-
+LANE_WIDTH = 3.5                     # [m]
 # =============================================================================
 # EXPORT
 # =============================================================================
@@ -345,7 +397,7 @@ __all__ = [
     # System
     'HEADLESS_MODE', 'RESULTS_DIR', 'SIMULATION_DT', 'NASH_CONTROL_DT',
     'NASH_NP', 'NASH_NU', 'DEFAULT_SIMULATION_TIME',
-    'VEHICLE_COLORS', 'GAP_COLORS',
+    'VEHICLE_COLORS', 'GAP_COLORS','LANE_WIDTH',
 
     # Platoon
     'PLATOON_TARGET_VELOCITY', 'PLATOON_MAX_VELOCITY', 'PLATOON_MAX_ACCELERATION',
@@ -403,5 +455,15 @@ __all__ = [
     'HUMAN_DELTA_IDM', 'HUMAN_COMFORTABLE_DECEL',
     'HUMAN_PLAN_TIME_HEADWAY', 'HUMAN_PLAN_DECEL',
     'HUMAN_ACCEL_MIN', 'HUMAN_ACCEL_MAX',
-    'HUMAN_LANE_CHANGE_RATE', 'HUMAN_PREDICTION_DT',
+    'HUMAN_LANE_CHANGE_RATE',
+
+    # Lower-level controller
+    'LOWER_CTRL_KP', 'LOWER_CTRL_KI', 'LOWER_CTRL_INTEGRATOR_LIMIT',
+    'LOWER_CTRL_THROTTLE_SMOOTHING', 'LOWER_CTRL_BRAKE_SMOOTHING',
+    'LOWER_CTRL_DEADBAND', 'LOWER_CTRL_AIR_DENSITY', 'LOWER_CTRL_ROLLING_COEFF',
+    'LOWER_CTRL_ACCEL_FILTER_ALPHA', 'LOWER_CTRL_GEAR_SHIFT_HOLD',
+    'ENGINE_BRAKING_BASE_TORQUE', 'ENGINE_BRAKING_MAX_TORQUE',
+
+    # CTH controller & jerk limit
+    'CTH_KP', 'CTH_KD', 'JERK_LIMIT',
 ]

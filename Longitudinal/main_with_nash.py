@@ -21,7 +21,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from config import setup_matplotlib, HEADLESS_MODE, RESULTS_DIR, SIMULATION_DT, DEFAULT_SIMULATION_TIME, NASH_NP, NASH_NU,NASH_CONTROL_DT
 from simulation.simulator import PlatoonSimulation, run_simulation
 from visualization.animation import create_platoon_animation
-from visualization.plots import create_comprehensive_plots, create_detailed_scenario_summary, create_nash_analysis_plots
+from visualization.plots import create_comprehensive_plots, create_detailed_scenario_summary, create_nash_analysis_plots, create_hierarchical_control_plots
 from vehicle import Vehicle
 from control.human_driver import HumanDriver
 from control.platoon_control import PlatoonManager
@@ -288,6 +288,12 @@ class PlatoonNashSimulation(PlatoonSimulation):
                       f"Total={nash_result['field_force']:.1f}N"
                       f", λ={nash_result['authority_ratio']:.2f}"
                       f", alpha={nash_result['authority_ratio']/(1+nash_result['authority_ratio']):.2f}")
+                # Hierarchical controller metrics for human vehicle
+                if self.human_vehicle.use_hierarchical_model:
+                    gear_num = self.human_vehicle.transmission.current_gear + 1
+                    print(f"   ⚙️ Throttle={self.human_vehicle.throttle_input:.3f}, "
+                          f"Brake={self.human_vehicle.brake_input:.3f}, "
+                          f"RPM={self.human_vehicle.engine.rpm:.0f}, Gear={gear_num}")
 
         super().update()
 
@@ -298,11 +304,11 @@ def get_scenario_params(scenario_name: str, driver_type: str = 'normal') -> Dict
         target_speed = 100.0
         join_trigger_time = 25.0
     elif scenario_name == 'join_middle':
-        initial_x = -300.0
+        initial_x = -150.0
         target_speed = 110.0
         join_trigger_time = 20.0
     elif scenario_name == 'join_after':
-        initial_x = -500.0
+        initial_x = -300.0
         target_speed = 110.0
         join_trigger_time = 15.0
     else:
@@ -345,7 +351,7 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
     print(f"{'='*60}")
     
     # Create Nash simulation
-    sim = PlatoonNashSimulation(driver_type=driver_type,initial_x_human=sim_params.get('initial_x', 0.0),initial_velocity_human=sim_params.get('target_speed', 100.0) / 3.6,)
+    sim = PlatoonNashSimulation(driver_type=driver_type,initial_x_human=sim_params.get('initial_x', 0.0),initial_velocity_human=sim_params.get('initial_speed', 0.0) / 3.6,)
     
     # Apply scenario parameters
     sim.human_vehicle.state.y = sim_params.get('initial_y', -3.5)
@@ -566,6 +572,23 @@ def run_scenario_with_nash(scenario_name: str, sim_params: Dict, driver_type: st
             import traceback
             traceback.print_exc()
             nash_fig = None
+        
+        # 3. Create hierarchical controller plots (throttle, brake, RPM, gear)
+        try:
+            if sim.use_hierarchical:
+                print(f"\n⚙️ Creating hierarchical controller plots...")
+                hier_fig = create_hierarchical_control_plots(sim, scenario_name, show_plots=show_plots)
+                if hier_fig:
+                    print(f"✅ Hierarchical controller plots created and saved successfully")
+                else:
+                    print(f"⚠️ Hierarchical controller plots returned None")
+            else:
+                hier_fig = None
+        except Exception as hier_error:
+            print(f"❌ Failed to create hierarchical controller plots: {hier_error}")
+            import traceback
+            traceback.print_exc()
+            hier_fig = None
         
         # Create animation
         if animate:

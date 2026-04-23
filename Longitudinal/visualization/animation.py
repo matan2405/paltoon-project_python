@@ -14,7 +14,7 @@ import sys
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import HEADLESS_MODE, RESULTS_DIR, VEHICLE_COLORS
+from config import HEADLESS_MODE, RESULTS_DIR, VEHICLE_COLORS, LANE_WIDTH, LANE_WIDTH
 
 
 def create_platoon_animation(simulation, title: str = "Platoon Simulation Animation"):
@@ -85,33 +85,55 @@ def create_platoon_animation(simulation, title: str = "Platoon Simulation Animat
             all_x_positions = [pos[0] for pos in current_positions]
             min_x, max_x = min(all_x_positions), max(all_x_positions)
             ax1.set_xlim(min_x - 20, max_x + 50)
-            ax1.set_ylim(-3, 3)
+            ax1.set_ylim(-6.5, 3)
             
-            # Draw road lanes
-            ax1.axhline(y=0, color='yellow', linestyle='-', linewidth=3, alpha=0.8, label='Lane Center')
-            ax1.axhline(y=1.5, color='black', linestyle='-', linewidth=2, alpha=0.5)
-            ax1.axhline(y=-1.5, color='black', linestyle='-', linewidth=2, alpha=0.5)
-            ax1.axhline(y=-2, color='yellow', linestyle='-', linewidth=3, alpha=0.8, label='Left Lane')
+            # Draw road with proper lane width (3.5m per lane)
+            # Right lane: center y=0, edges y=+1.75 and y=-1.75
+            # Left lane:  center y=-3.5, edges y=-1.75 and y=-5.25
+            lane_width = LANE_WIDTH
+            right_lane_center = 0.0
+            left_lane_center = -lane_width  # -3.5
+            
+            # Road edges (solid black)
+            ax1.axhline(y=right_lane_center + lane_width/2, color='black', linestyle='-', linewidth=2, alpha=0.7, zorder=1)   # Top edge: y=1.75
+            ax1.axhline(y=left_lane_center - lane_width/2, color='black', linestyle='-', linewidth=2, alpha=0.7, zorder=1)    # Bottom edge: y=-5.25
+            
+            # Lane divider (dashed yellow between the two lanes)
+            ax1.axhline(y=-lane_width/2, color='yellow', linestyle='--', linewidth=2, alpha=0.8, label='Lane Divider', zorder=1)  # y=-1.75
+            
+            # Lane centers (thin dotted lines)
+            ax1.axhline(y=right_lane_center, color='white', linestyle=':', linewidth=1, alpha=0.5, label='Right Lane (Platoon)', zorder=1)
+            ax1.axhline(y=left_lane_center, color='white', linestyle=':', linewidth=1, alpha=0.5, label='Left Lane (Human)', zorder=1)
+            
+            # Fill road surface
+            ax1.axhspan(left_lane_center - lane_width/2, right_lane_center + lane_width/2, 
+                        color='gray', alpha=0.15, zorder=0)
             
             # Draw vehicles
             for i, (vehicle, pos) in enumerate(zip(simulation.all_vehicles, current_positions)):
                 x_pos, y_pos = pos
                 color = colors[i % len(colors)]
                 
-                # Vehicle rectangle
-                vehicle_patch = plt.Rectangle((x_pos - 2, y_pos - 0.4), 4, 0.8, 
-                                            color=color, alpha=0.8, 
+                # Vehicle rectangle - scaled to lane width (vehicle ~1.8m wide, ~4.5m long)
+                veh_half_w = 0.9  # half vehicle width in lane coords
+                veh_half_l = 2.5  # half vehicle length
+                vehicle_patch = plt.Rectangle((x_pos - veh_half_l, y_pos - veh_half_w), 
+                                            veh_half_l * 2, veh_half_w * 2, 
+                                            facecolor=color, edgecolor='black', linewidth=1.5,
+                                            alpha=0.9, zorder=5,
                                             label=vehicle.vehicle_id if frame == 0 else "")
                 ax1.add_patch(vehicle_patch)
                 
-                # Vehicle label inside the rectangle
-                ax1.text(x_pos, y_pos, vehicle.vehicle_id, 
-                        ha='center', va='center', fontsize=8, fontweight='bold', color='white')
-                
-                # Show vehicle speed
+                # Show vehicle speed above the vehicle
                 speed_kmh = velocity_history[frame][i]
-                ax1.text(x_pos, y_pos + 0.8, f'{speed_kmh:.0f} km/h', 
-                        ha='center', va='bottom', fontsize=8, fontweight='bold')
+                ax1.text(x_pos, y_pos + veh_half_w + 0.2, f'{speed_kmh:.0f} km/h', 
+                        ha='center', va='bottom', fontsize=8, fontweight='bold', zorder=6)
+                
+                # Vehicle ID label below the vehicle with colored background
+                ax1.text(x_pos, y_pos - veh_half_w - 0.2, vehicle.vehicle_id, 
+                        ha='center', va='top', fontsize=7, fontweight='bold', color='black',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor=color, alpha=0.7, edgecolor='black', linewidth=0.5),
+                        zorder=6)
             
             # Show inter-vehicle gaps based on gap_history (proper platoon gaps)
             gap_displayed = False
@@ -140,9 +162,11 @@ def create_platoon_animation(simulation, title: str = "Platoon Simulation Animat
                         leader_pos, leader_idx, leader_vehicle = platoon_positions[gap_idx]
                         follower_pos, follower_idx, follower_vehicle = platoon_positions[gap_idx + 1]
                         
-                        # Position text at midpoint between vehicles
+                        # Position text at midpoint between vehicles, below them
                         mid_x = (leader_pos[0] + follower_pos[0]) / 2
-                        mid_y = min(leader_pos[1], follower_pos[1]) - 1.5
+                        # Place gap label below the lower vehicle
+                        min_y = min(leader_pos[1], follower_pos[1])
+                        mid_y = min_y - 1.5
                         
                         # Use different colors based on vehicle types
                         if leader_vehicle.vehicle_id == "Human" or follower_vehicle.vehicle_id == "Human":
@@ -154,10 +178,14 @@ def create_platoon_animation(simulation, title: str = "Platoon Simulation Animat
                             color = 'darkblue'
                             bgcolor = 'lightcyan'
                         
+                        # Clamp mid_y to stay within visible y-axis range
+                        mid_y = max(-6.0, mid_y)
+                        
                         # Display the gap value from gap_history
                         ax1.text(mid_x, mid_y, f'{gap_value:.1f}m', 
                                 ha='center', va='top', fontsize=8, color=color, fontweight='bold',
-                                bbox=dict(boxstyle='round,pad=0.3', facecolor=bgcolor, alpha=0.9))
+                                bbox=dict(boxstyle='round,pad=0.3', facecolor=bgcolor, alpha=0.9),
+                                zorder=7)
                 
                 gap_displayed = True
             

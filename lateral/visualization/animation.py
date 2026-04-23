@@ -17,6 +17,9 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import HEADLESS_MODE, RESULTS_DIR, LANE_WIDTH, VEHICLE_COLORS
+from vehicle.components import VehicleParameters
+
+_vp = VehicleParameters()
 
 
 def create_lane_change_animation(sim_data: dict, title: str = "Lane Change Animation"):
@@ -128,7 +131,8 @@ def create_lane_change_animation(sim_data: dict, title: str = "Lane Change Anima
                         continue
                     
                     # Platoon vehicle rectangle
-                    vehicle_patch = plt.Rectangle((px - 2, py - 0.4), 4, 0.8,
+                    vehicle_patch = plt.Rectangle((px - _vp.length/2, py - _vp.width/2),
+                                                 _vp.length, _vp.width,
                                                  color='blue', alpha=0.7)
                     ax1.add_patch(vehicle_patch)
                     ax1.text(px, py, f'P{i+1}', ha='center', va='center', 
@@ -138,8 +142,8 @@ def create_lane_change_animation(sim_data: dict, title: str = "Lane Change Anima
             color = phase_colors.get(current_phase, 'red')
             
             # Vehicle rectangle (rotated by psi)
-            vehicle_length = 4.0
-            vehicle_width = 1.8
+            vehicle_length = _vp.length
+            vehicle_width = _vp.width
             
             # Simple rectangle without rotation for stability
             human_patch = plt.Rectangle((current_x - vehicle_length/2, current_y - vehicle_width/2),

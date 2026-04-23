@@ -10,6 +10,9 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import RESULTS_DIR, LANE_WIDTH, PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y
+from vehicle.components import VehicleParameters
+
+_vp = VehicleParameters()
 
 
 def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation", 
@@ -99,8 +102,8 @@ def create_comprehensive_plots(sim_data: Dict, scenario_name: str = "Simulation"
     
     ax8 = axes[2, 1]
     ax8.plot(time, sim_data['human_ay'], 'b-', linewidth=2)
-    ax8.axhline(y=2.5, color='r', linestyle='--', alpha=0.5)
-    ax8.axhline(y=-2.5, color='r', linestyle='--', alpha=0.5)
+    ax8.axhline(y=_vp.max_acceleration, color='r', linestyle='--', alpha=0.5)
+    ax8.axhline(y=-_vp.max_acceleration, color='r', linestyle='--', alpha=0.5)
     add_mobil_line(ax8)
     ax8.set_xlabel('Time [s]')
     ax8.set_ylabel('ay [m/s^2]')

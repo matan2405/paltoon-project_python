@@ -56,11 +56,11 @@ NASH_Q_PSI = 5000.0           # Weight on heading error
 NASH_R1 = 1000000.0           # System control cost
 NASH_R2 = 1000000.0           # Human control cost (base)
 
-# Driver Type Modifiers
+# Driver Type - Behavioral parameters only (Nash weights are fixed)
 NASH_DRIVER_PARAMS = {
-    'cautious': {'R2_factor': 1.5, 'S2_factor': 1.5, 'Q_y_factor': 0.8},
-    'normal': {'R2_factor': 1.0, 'S2_factor': 1.0, 'Q_y_factor': 1.0},
-    'aggressive': {'R2_factor': 0.6, 'S2_factor': 0.6, 'Q_y_factor': 1.3}
+    'cautious': {},
+    'normal': {},
+    'aggressive': {}
 }
 ```
 

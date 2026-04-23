@@ -608,8 +608,160 @@ def create_nash_analysis_plots(simulation, scenario_name="Nash Equilibrium Analy
         return None
 
 
+def create_hierarchical_control_plots(simulation, scenario_name="Simulation", show_plots=True):
+    """Create plots showing lower-level controller metrics (throttle, brake, RPM, gear).
+    
+    Only meaningful when hierarchical control is active (use_hierarchical=True).
+    Shows how the lower-level controller translates desired acceleration into
+    actuator commands and how the powertrain responds.
+    """
+    try:
+        import matplotlib.pyplot as plt
+
+        # Check if hierarchical data exists
+        if (not hasattr(simulation, 'throttle_history') or
+                len(simulation.throttle_history) == 0):
+            print("⚠️ No hierarchical controller data to plot")
+            return None
+
+        # Identify which vehicles have hierarchical data
+        hierarchical_indices = []
+        for i, vehicle in enumerate(simulation.all_vehicles):
+            if vehicle.use_hierarchical_model:
+                hierarchical_indices.append((i, vehicle.vehicle_id))
+
+        if not hierarchical_indices:
+            print("⚠️ No vehicles using hierarchical control")
+            return None
+
+        print(f"[PALETTE] Creating hierarchical control plots for: {scenario_name}")
+        print(f"   ⚙️ Hierarchical vehicles: {[vid for _, vid in hierarchical_indices]}")
+
+        times = np.array(simulation.time_history)
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # --- Plot 1: Throttle ---
+        ax = axes[0, 0]
+        for idx, vid in hierarchical_indices:
+            throttle_vals = []
+            valid_times = []
+            for j, th_row in enumerate(simulation.throttle_history):
+                if idx < len(th_row) and not np.isnan(th_row[idx]):
+                    throttle_vals.append(th_row[idx])
+                    valid_times.append(times[j])
+            if throttle_vals:
+                ax.plot(valid_times, throttle_vals, label=vid, linewidth=1.2)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Throttle [0-1]')
+        ax.set_title('Throttle Input')
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend()
+        ax.grid(True)
+
+        # --- Plot 2: Brake ---
+        ax = axes[0, 1]
+        for idx, vid in hierarchical_indices:
+            brake_vals = []
+            valid_times = []
+            for j, br_row in enumerate(simulation.brake_history):
+                if idx < len(br_row) and not np.isnan(br_row[idx]):
+                    brake_vals.append(br_row[idx])
+                    valid_times.append(times[j])
+            if brake_vals:
+                ax.plot(valid_times, brake_vals, label=vid, linewidth=1.2)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Brake [0-1]')
+        ax.set_title('Brake Input')
+        ax.set_ylim(-0.05, 1.05)
+        ax.legend()
+        ax.grid(True)
+
+        # --- Plot 3: Engine RPM ---
+        ax = axes[1, 0]
+        for idx, vid in hierarchical_indices:
+            rpm_vals = []
+            valid_times = []
+            for j, rpm_row in enumerate(simulation.rpm_history):
+                if idx < len(rpm_row) and not np.isnan(rpm_row[idx]):
+                    rpm_vals.append(rpm_row[idx])
+                    valid_times.append(times[j])
+            if rpm_vals:
+                ax.plot(valid_times, rpm_vals, label=vid, linewidth=1.2)
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Engine RPM')
+        ax.set_title('Engine Speed')
+        ax.legend()
+        ax.grid(True)
+
+        # --- Plot 4: Gear ---
+        ax = axes[1, 1]
+        for idx, vid in hierarchical_indices:
+            gear_vals = []
+            valid_times = []
+            for j, g_row in enumerate(simulation.gear_history):
+                if idx < len(g_row) and not np.isnan(g_row[idx]):
+                    gear_vals.append(g_row[idx])
+                    valid_times.append(times[j])
+            if gear_vals:
+                ax.step(valid_times, gear_vals, label=vid, linewidth=1.2, where='post')
+        ax.set_xlabel('Time [s]')
+        ax.set_ylabel('Gear')
+        ax.set_title('Transmission Gear')
+        ax.set_ylim(0.5, 7.5)
+        ax.set_yticks(range(1, 7))
+        ax.legend()
+        ax.grid(True)
+
+        plt.tight_layout()
+        fig.suptitle(f'{scenario_name} - Hierarchical Controller Metrics', fontsize=14, y=1.01)
+
+        # Save
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = scenario_name.replace(" ", "_").replace(":", "")
+        filename = f'{safe_name}_hierarchical_ctrl_{timestamp}.png'
+        if not os.path.exists(RESULTS_DIR):
+            os.makedirs(RESULTS_DIR)
+        filepath = os.path.join(RESULTS_DIR, filename)
+
+        try:
+            fig.savefig(filepath, dpi=150, bbox_inches='tight')
+            abs_path = os.path.abspath(filepath)
+            file_size = os.path.getsize(filepath) / 1024
+            print(f"✅ Hierarchical control plot saved!")
+            print(f"   📄 File: {filename}")
+            print(f"   📁 Path: {abs_path}")
+            print(f"   💾 Size: {file_size:.1f} KB")
+        except Exception as save_error:
+            print(f"❌ Could not save hierarchical plot: {save_error}")
+
+        if show_plots:
+            try:
+                if not HEADLESS_MODE:
+                    plt.ion()
+                    plt.show(block=False)
+                    plt.draw()
+                    fig.canvas.flush_events()
+                    time.sleep(1)
+            except Exception:
+                pass
+
+        return fig
+
+    except Exception as e:
+        print(f"❌ Failed to create hierarchical control plots: {e}")
+        import traceback
+        traceback.print_exc()
+        if 'fig' in locals():
+            try:
+                plt.close(fig)
+            except:
+                pass
+        return None
+
+
 __all__ = [
     'create_comprehensive_plots', 
     'create_detailed_scenario_summary',
-    'create_nash_analysis_plots'
+    'create_nash_analysis_plots',
+    'create_hierarchical_control_plots'
 ]

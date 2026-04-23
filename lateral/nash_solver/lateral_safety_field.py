@@ -24,8 +24,9 @@ from enum import Enum
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (LANE_WIDTH, FOLLOWING_Y_ERROR_FACTOR, FOLLOWING_PSI_ERROR_THRESHOLD,
-                    FOLLOWING_Y_DOT_THRESHOLD, MERGING_Y_ERROR_FACTOR, 
-                    MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME)
+                    FOLLOWING_Y_DOT_THRESHOLD, MERGING_Y_ERROR_FACTOR,
+                    MERGING_PSI_ERROR_THRESHOLD, PHASE_TRANSITION_TIME,
+                    GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME, LANE_CHANGE_Y_ERROR_FACTOR)
 
 
 class ControlPhase(Enum):
@@ -52,16 +53,11 @@ class LateralSafetyFieldParams:
     collision_lateral_threshold: float = 2.0    # meters - lateral distance for "danger"
     collision_longitudinal_threshold: float = 10.0  # meters - longitudinal overlap
     safe_lateral_distance: float = 3.0          # meters - no force if > this
-    
-    # Ellipse Parameters (for potential field)
-    base_semi_major: float = 12.0    # Longitudinal zone
-    base_semi_minor: float = 2.5     # Lateral zone
-    time_margin: float = 1.0         # Time horizon for velocity-dependent ellipse
-    
+
     # Force Parameters - MODERATE (safety, not tracking!)
     obstacle_force_gain: float = 150.0
     obstacle_force_scale: float = 5.0     # Scale for tanh
-    
+
     # Boundary Parameters
     road_half_width: float = 7.0
     boundary_force_gain: float = 150.0
@@ -78,11 +74,16 @@ class LateralSafetyFieldParams:
     following_y_error_factor: float = FOLLOWING_Y_ERROR_FACTOR      # 15%
     following_psi_threshold: float = FOLLOWING_PSI_ERROR_THRESHOLD  # ~3 deg
     following_y_dot_threshold: float = FOLLOWING_Y_DOT_THRESHOLD    # 0.3 m/s
-    
+
     merging_y_error_factor: float = MERGING_Y_ERROR_FACTOR          # 25%
     merging_psi_threshold: float = MERGING_PSI_ERROR_THRESHOLD      # ~6 deg
-    
+
     phase_transition_time: float = PHASE_TRANSITION_TIME            # 5 seconds
+
+    # === PHASE DURATION THRESHOLDS ===
+    gap_search_duration: float = GAP_SEARCH_DURATION                # 0.5 seconds
+    lane_change_min_time: float = LANE_CHANGE_MIN_TIME              # 3.0 seconds
+    lane_change_y_error_factor: float = LANE_CHANGE_Y_ERROR_FACTOR  # 30%
 
 
 class LateralSafetyField:
@@ -174,12 +175,12 @@ class LateralSafetyField:
             pass  # Wait for merge command
         
         elif self._current_phase == ControlPhase.GAP_SEARCH:
-            if time_in_phase > 0.5:
+            if time_in_phase > p.gap_search_duration:
                 self._transition_to_phase(ControlPhase.LANE_CHANGE)
-        
+
         elif self._current_phase == ControlPhase.LANE_CHANGE:
             # Transition to LANE_KEEPING when close to target
-            if abs(y_error) < p.lane_width * 0.3 and time_in_phase > 3.0:
+            if abs(y_error) < p.lane_width * p.lane_change_y_error_factor and time_in_phase > p.lane_change_min_time:
                 self._transition_to_phase(ControlPhase.LANE_KEEPING)
         
         elif self._current_phase == ControlPhase.LANE_KEEPING:

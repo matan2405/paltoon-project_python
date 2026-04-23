@@ -4,16 +4,21 @@ VERSION 2.0
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict
 from dataclasses import dataclass
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from vehicle.components import VehicleParameters
+
+_vp = VehicleParameters()
 
 @dataclass
 class PlatoonParams:
     time_gap: float = 1.5
     standstill_distance: float = 5.0
     target_velocity: float = 20.0
-    vehicle_length: float = 4.5
+    vehicle_length: float = _vp.length
     min_merge_gap: float = 15.0
     platoon_lane_y: float = 0.0
 
@@ -26,7 +31,7 @@ class PlatoonVehicle:
         self.y = initial_y
         self.vx = initial_vx
         self.ax = 0.0
-        self.L = 4.5
+        self.L = _vp.length
         
         class State:
             pass
@@ -88,7 +93,7 @@ class PlatoonManager:
                 e_d = d_actual - d_des
                 e_v = leader.vx - vehicle.vx
                 a = 0.3 * e_d + 0.8 * e_v
-            vehicle.update(dt, np.clip(a, -3.0, 2.0))
+            vehicle.update(dt, np.clip(a, _vp.max_deceleration, _vp.max_acceleration))
     
     def add_human_vehicle(self, human_vehicle):
         self.human_vehicle = human_vehicle

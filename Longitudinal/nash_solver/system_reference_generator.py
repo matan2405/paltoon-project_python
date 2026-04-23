@@ -135,6 +135,14 @@ class SystemReferenceGenerator:
         sim_vehicle = Vehicle() 
         sim_vehicle = copy.deepcopy(simulation.human_vehicle)
         
+        # Switch cloned vehicle to state-space (double integrator) mode.
+        # The original vehicle may be in hierarchical mode, but for prediction
+        # we want the simple ZOH double integrator — not the full engine/
+        # transmission dynamics.
+        sim_vehicle.use_hierarchical_model = False
+        sim_vehicle.use_state_space_model = True
+        sim_vehicle.use_kinematic_model = False
+        
         # ========================================================================
         # Identify Leader - USE LOCKED if available
         # ========================================================================
@@ -311,18 +319,11 @@ class SystemReferenceGenerator:
             # === Step 4: Apply Comfort Constraints ===
             a_ref = np.clip(a_ref, self.MAX_DECEL, self.MAX_ACCEL)
             
-            # === Step 5: Update Simulated Vehicle State ===
-            sim_vehicle.state.ax = a_ref
-            if hasattr(sim_vehicle, 'a'):
-                sim_vehicle.a = a_ref
-            
-            # Euler integration
-            sim_vehicle.state.x += sim_vehicle.state.vx * self.dt + 0.5 * a_ref * self.dt**2
-            sim_vehicle.state.vx += a_ref * self.dt
-            sim_vehicle.state.vx = max(0.0, sim_vehicle.state.vx)  # No reverse
-            
-            if hasattr(sim_vehicle, 'v'):
-                sim_vehicle.v = sim_vehicle.state.vx
+            # === Step 5: Propagate state using vehicle's double integrator ===
+            # update_dynamics() routes to update_dynamics_state_space() which
+            # uses ZOH discretization: x[k+1] = A_d @ x[k] + B_d @ u[k]
+            sim_vehicle.a_desired = a_ref
+            sim_vehicle.update_dynamics(self.dt)
             
             # Store prediction
             accel_sequence[i] = a_ref

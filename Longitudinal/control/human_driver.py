@@ -54,8 +54,10 @@ class HumanDriver:
         self.ignore_platoon_before_merge = True
 
         
-    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False):
-        self.vehicle.set_motion_model(use_kinematic, use_state_space)
+    def set_motion_model(self, use_kinematic: bool, use_state_space: bool = False,
+                         use_hierarchical: bool = False):
+        self.vehicle.set_motion_model(use_kinematic, use_state_space,
+                                      use_hierarchical=use_hierarchical)
         
     def _get_leader(self, platoon_vehicles: List):
         if not platoon_vehicles: 
@@ -158,6 +160,14 @@ class HumanDriver:
         state_sequence = np.zeros((Np, 2))
         
         sim_veh = copy.deepcopy(vehicle)
+        
+        # Switch cloned vehicle to state-space (double integrator) mode.
+        # The original may be hierarchical, but for prediction we use the
+        # simple ZOH double integrator — not the full engine dynamics.
+        sim_veh.use_hierarchical_model = False
+        sim_veh.use_state_space_model = True
+        sim_veh.use_kinematic_model = False
+        
         sim_driver = copy.deepcopy(self)
         sim_driver.vehicle = sim_veh
         
@@ -165,9 +175,6 @@ class HumanDriver:
         sim_leader = None
         if leader is not None:
             sim_leader = copy.deepcopy(leader)
-        
-        dt_sim = 0.02
-        steps_per_dt = max(1, int(dt / dt_sim))
         
         for i in range(Np):
             # === NEW: If we have a leader, update its position (constant velocity assumption) ===
@@ -193,9 +200,11 @@ class HumanDriver:
                 # No leader - free road driving
                 a_human = sim_driver.update(dt, platoon_vehicles=[], mode='planning')
             
+            # Propagate state using vehicle's double integrator (planning model)
+            # update_dynamics() routes to update_dynamics_state_space() which
+            # uses ZOH discretization: x[k+1] = A_d @ x[k] + B_d @ u[k]
             sim_veh.a_desired = a_human
-            for _ in range(steps_per_dt):
-                sim_veh.update_dynamics(dt_sim)
+            sim_veh.update_dynamics(dt)
             
             accel_sequence[i] = a_human
             state_sequence[i, 0] = sim_veh.state.x
