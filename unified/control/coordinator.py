@@ -76,7 +76,11 @@ from unified.config import (                                          # noqa: E4
     DRIVER_PARAMS,
     MAX_ACCELERATION, MAX_DECELERATION,
     NOMINAL_VELOCITY, VEHICLE_LENGTH, VEHICLE_MASS,
+    VEHICLE_LF, VEHICLE_LR,
     LONG_NASH_REBUILD_DVX, LAT_NASH_REBUILD_DVX,
+    MA_IDM_ENABLED, MA_IDM_PARAMS, MA_IDM_LAT_PARAMS,
+    MA_IDM_WINDOW_SIZE, MA_IDM_OBS_NOISE, MA_IDM_LAT_OBS_NOISE,
+    NASH_RISK_GAMMA,
 )
 
 
@@ -88,6 +92,106 @@ from unified.nash_solver.lateral_constrained_nash_solver import (
     ConstrainedLateralNashSolver, ConstrainedLateralNashParams as LatNashParams,
 )
 from unified.control.mobil_lane_change import MOBILLaneChange
+
+
+# =============================================================================
+# SE-kernel GP residual (MA-IDM, Zhang & Sun 2024, Eq. 9)
+# =============================================================================
+
+class _SEKernelGP:
+    """Full squared-exponential (SE) kernel GP for sequential simulation.
+
+    Implements exactly Eq. 9 of Zhang & Sun 2024:
+        k(t, t') = σ_k² · exp(−|t−t'|² / (2ℓ²))
+
+    Sequential sampling uses the GP conditional:
+        p(ε(t+1) | history) = N(K_*X (K_XX)^{-1} hist, σ_k² − K_*X (K_XX)^{-1} K_*X')
+
+    K_XX and its inverse are time-invariant (stationary kernel) and precomputed
+    at init — each step costs only one O(W) matrix-vector product.
+
+    predict_mean() returns the GP posterior mean E[ε(t+k)|history] for k=1..horizon,
+    conditioned on the fixed current history (not rolled forward) — suitable for
+    Nash planning horizon feedforward.
+    """
+
+    def __init__(self, sigma_k: float, ell: float, dt: float,
+                 window: int = MA_IDM_WINDOW_SIZE,
+                 obs_noise: float = MA_IDM_OBS_NOISE):
+        self._sigma_k  = sigma_k
+        self._ell      = ell
+        self._dt       = dt
+        self._W        = window
+
+        # History buffer: hist[0]=oldest, hist[-1]=most recent ε
+        self._hist = np.zeros(window)
+        self._eps  = 0.0
+
+        # ── Pre-compute K_XX (W×W, stationary — never changes) ───────────────
+        j = np.arange(window)
+        dt_mat = np.abs(j[:, None] - j[None, :]) * dt          # time-difference matrix
+        K_XX = sigma_k ** 2 * np.exp(-dt_mat ** 2 / (2.0 * ell ** 2))
+        K_XX += obs_noise * np.eye(window)                       # numerical stability
+        self._K_XX_inv = np.linalg.inv(K_XX)
+
+        # ── K_*X: cross-covariance of ε(t+1) with history ───────────────────
+        # hist[j] is at time t − (W−1−j)·dt; next step at t+dt
+        # → distance = (W − j)·dt
+        dist_next = (window - j) * dt                            # [W·dt, …, dt]
+        self._K_star_X = sigma_k ** 2 * np.exp(-dist_next ** 2 / (2.0 * ell ** 2))
+
+        # Predictive variance (scalar, time-invariant)
+        pred_var = float(sigma_k ** 2
+                         - self._K_star_X @ self._K_XX_inv @ self._K_star_X)
+        self._pred_std = float(np.sqrt(max(pred_var, 0.0)))
+
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    def step(self) -> float:
+        """Sample ε(t+1) from GP conditional; advance history buffer."""
+        mu      = float(self._K_star_X @ (self._K_XX_inv @ self._hist))
+        eps_new = mu + self._pred_std * np.random.randn()
+        self._hist[:-1] = self._hist[1:]   # shift left (drop oldest)
+        self._hist[-1]  = eps_new          # append newest
+        self._eps       = eps_new
+        return eps_new
+
+    def predict_mean(self, horizon: int, dt_query: float = None) -> np.ndarray:
+        """GP posterior mean E[ε(t+k·dt_query)|history] for k=1..horizon.
+
+        Parameters
+        ----------
+        horizon   : number of steps to predict
+        dt_query  : time between query points [s].  Defaults to self._dt (simulation dt).
+                    Pass the Nash control DT (e.g. LONG_NASH_CONTROL_DT) so that
+                    predictions align with the Nash reference horizon instead of the
+                    100 Hz simulation grid.
+
+        Conditioned on the fixed current history — does not roll forward.
+        """
+        dt_q  = dt_query if dt_query is not None else self._dt
+        alpha = self._K_XX_inv @ self._hist          # W-vector, reused for all k
+        j     = np.arange(self._W)
+        means = np.empty(horizon)
+        for k in range(1, horizon + 1):
+            # hist[j] is at t − (W−1−j)·dt_sim; query at t + k·dt_query
+            # distance = k·dt_query + (W−1−j)·dt_sim
+            dist  = k * dt_q + (self._W - 1 - j) * self._dt
+            K_k_X = self._sigma_k ** 2 * np.exp(-dist ** 2 / (2.0 * self._ell ** 2))
+            means[k - 1] = float(K_k_X @ alpha)
+        return means
+
+    @property
+    def current(self) -> float:
+        return self._eps
+
+    @property
+    def sigma_k(self) -> float:
+        return self._sigma_k
+
+    @property
+    def ell(self) -> float:
+        return self._ell
 
 
 # =============================================================================
@@ -123,7 +227,11 @@ class UnifiedCoordinator:
       R2 (human):  IDM free-road for long; hold-lane or natural lane change for lat
     """
 
-    def __init__(self, ego, driver_type: str = 'normal', merge_scenario: str = 'back'):
+    def __init__(self, ego, driver_type: str = 'normal', merge_scenario: str = 'back',
+                 noise_mode: str = 'gp',
+                 fixed_lambda_long: Optional[float] = None,
+                 fixed_lambda_lat: Optional[float] = None,
+                 weight_overrides: Optional[dict] = None):
         """
         Parameters
         ----------
@@ -132,10 +240,25 @@ class UnifiedCoordinator:
             'cautious' | 'normal' | 'aggressive'
         merge_scenario : str
             'back' | 'middle' | 'front'
+        noise_mode : str
+            'deterministic' — no noise injected
+            'iid'           — i.i.d. Gaussian N(0, sigma_k²) per step (B-IDM baseline)
+            'gp'            — MA-IDM SE-kernel GP (default, Zhang & Sun 2024)
+        fixed_lambda_long : float or None
+            If set, bypass the Safety Field and use this fixed λ for longitudinal Nash.
+        fixed_lambda_lat : float or None
+            If set, bypass the DSF and use this fixed λ for lateral Nash.
+        weight_overrides : dict or None
+            Override Nash cost weights. Keys (all optional):
+              'long_Q_pos', 'long_Q_vel', 'long_R1', 'long_R2'
+              'lat_Q_y', 'lat_Q_psi', 'lat_R1', 'lat_R2'
         """
         self.ego         = ego
         self.driver_type = driver_type
         self.merge_scenario   = merge_scenario   # 'back' | 'middle' | 'front'
+        self.noise_mode       = noise_mode        # 'deterministic' | 'iid' | 'gp'
+        self._fixed_lambda_long = fixed_lambda_long
+        self._fixed_lambda_lat  = fixed_lambda_lat
         self.locked_leader    = None  # set at APPROACH→MERGE transition
         self.locked_follower  = None  # set at APPROACH→MERGE transition
         self._merge_locked    = False
@@ -165,18 +288,33 @@ class UnifiedCoordinator:
         self._long_force_filt = 0.0
         self._lat_force_filt  = 0.0
 
+        # ── MA-IDM SE-kernel GP residual states (Zhang & Sun 2024, Eq. 9) ───────
+        _ma     = MA_IDM_PARAMS.get(driver_type, MA_IDM_PARAMS['normal'])
+        _ma_lat = MA_IDM_LAT_PARAMS.get(driver_type, MA_IDM_LAT_PARAMS['normal'])
+        self._gp     = _SEKernelGP(
+            sigma_k=_ma['sigma_k'], ell=_ma['ell'], dt=SIMULATION_DT,
+        )
+        self._gp_lat = _SEKernelGP(
+            sigma_k=_ma_lat['sigma_k'], ell=_ma_lat['ell'], dt=SIMULATION_DT,
+            obs_noise=MA_IDM_LAT_OBS_NOISE,
+        )
+
         # ── MOBIL ─────────────────────────────────────────────────────────────
         self.mobil         = MOBILLaneChange()
         self.mobil_approved = False
         self.mobil.set_politeness(driver_type)
 
         # ── Long Nash solver ──────────────────────────────────────────────────
+        _gamma = NASH_RISK_GAMMA if (MA_IDM_ENABLED and noise_mode == 'gp') else 0.0
+        _wo = weight_overrides or {}
         long_params = LongNashParams(
             Np=NASH_NP, Nu=NASH_NU, dt=LONG_NASH_CONTROL_DT,
-            Q_pos=LONG_NASH_Q_POS,        Q_vel=LONG_NASH_Q_VEL,
-            Q_pos_terminal=10.0 * LONG_NASH_Q_POS,
-            Q_vel_terminal= 4.0 * LONG_NASH_Q_VEL,
-            R1=LONG_NASH_R1, R2=LONG_NASH_R2,
+            Q_pos=_wo.get('long_Q_pos', LONG_NASH_Q_POS),
+            Q_vel=_wo.get('long_Q_vel', LONG_NASH_Q_VEL),
+            Q_pos_terminal=10.0 * _wo.get('long_Q_pos', LONG_NASH_Q_POS),
+            Q_vel_terminal= 4.0 * _wo.get('long_Q_vel', LONG_NASH_Q_VEL),
+            R1=_wo.get('long_R1', LONG_NASH_R1),
+            R2=_wo.get('long_R2', LONG_NASH_R2),
             S1=LONG_NASH_S1, S2=LONG_NASH_S2,
             u1_min=LONG_NASH_U1_MIN, u1_max=LONG_NASH_U1_MAX,
             u2_min=LONG_NASH_U2_MIN, u2_max=LONG_NASH_U2_MAX,
@@ -184,6 +322,7 @@ class UnifiedCoordinator:
             v_min=LONG_NASH_V_MIN,     v_max=LONG_NASH_V_MAX,
             gap_min=LONG_NASH_GAP_MIN,
             lambda_levels=LONG_NASH_LAMBDA_LEVELS,
+            sigma_k=_ma['sigma_k'],  ell=_ma['ell'],  gamma_risk=_gamma,
         )
         self.long_nash = ConstrainedLongitudinalNashSolver(
             vehicle=ego.long_proxy,
@@ -194,18 +333,23 @@ class UnifiedCoordinator:
         lat_params = LatNashParams(
             Np=NASH_NP, Nu=NASH_NU, dt=LAT_NASH_CONTROL_DT,
         )
-        # Override weights from unified config
-        lat_params.Q_y               = LAT_NASH_Q_Y
-        lat_params.Q_psi             = LAT_NASH_Q_PSI
-        lat_params.Q_y_terminal      = LAT_NASH_Q_Y_TERMINAL_FAC  * LAT_NASH_Q_Y
-        lat_params.Q_psi_terminal    = LAT_NASH_Q_PSI_TERMINAL_FAC * LAT_NASH_Q_PSI
-        lat_params.R1                = LAT_NASH_R1
-        lat_params.R2                = LAT_NASH_R2
+        # Override weights from unified config (or from weight_overrides)
+        _lat_Q_y   = _wo.get('lat_Q_y',  LAT_NASH_Q_Y)
+        _lat_Q_psi = _wo.get('lat_Q_psi', LAT_NASH_Q_PSI)
+        lat_params.Q_y               = _lat_Q_y
+        lat_params.Q_psi             = _lat_Q_psi
+        lat_params.Q_y_terminal      = LAT_NASH_Q_Y_TERMINAL_FAC   * _lat_Q_y
+        lat_params.Q_psi_terminal    = LAT_NASH_Q_PSI_TERMINAL_FAC  * _lat_Q_psi
+        lat_params.R1                = _wo.get('lat_R1', LAT_NASH_R1)
+        lat_params.R2                = _wo.get('lat_R2', LAT_NASH_R2)
         lat_params.S1                = LAT_NASH_S1
         lat_params.S2                = LAT_NASH_S2
         lat_params.delta_min         = LAT_NASH_DELTA_MIN
         lat_params.delta_max         = LAT_NASH_DELTA_MAX
         lat_params.lambda_levels     = LAT_NASH_LAMBDA_LEVELS
+        lat_params.sigma_k           = _ma_lat['sigma_k']
+        lat_params.ell               = _ma_lat['ell']
+        lat_params.gamma_risk        = _gamma
 
         self.lat_nash = ConstrainedLateralNashSolver(
             vehicle=ego.lat_proxy,
@@ -239,6 +383,11 @@ class UnifiedCoordinator:
         u_long : float  — desired longitudinal acceleration [m/s²]
         delta_lat : float — desired front steering angle [rad]
         """
+        # ── MA-IDM: advance GP residual states every sim step (execution) ──────
+        if MA_IDM_ENABLED and self.noise_mode == 'gp':
+            self._gp.step()
+            self._gp_lat.step()
+
         # ── Longitudinal Nash (10 Hz) ──────────────────────────────────────────
         self._long_counter += 1
         if self._long_counter >= LONG_NASH_STEP_INTERVAL:
@@ -262,7 +411,40 @@ class UnifiedCoordinator:
         self.data['delta_lat'].append(self._last_delta_lat)
         self.data['phase'].append(self.phase.value)
 
-        return self._last_u_long, self._last_delta_lat
+        # ── Noise injection (mode-dependent) ─────────────────────────────────
+        u_long_out    = self._last_u_long
+        delta_lat_out = self._last_delta_lat
+        _in_lat_phase = self.phase in (MergePhase.MERGE, MergePhase.FOLLOWING)
+
+        if self.noise_mode == 'gp' and MA_IDM_ENABLED:
+            # MA-IDM: SE-kernel GP residual (Zhang & Sun 2024)
+            u_long_out = float(np.clip(
+                u_long_out + self._gp.current, MAX_DECELERATION, MAX_ACCELERATION
+            ))
+            if _in_lat_phase:
+                _L_wb = VEHICLE_LF + VEHICLE_LR
+                _vx   = max(float(self.ego.state.vx), 1.0)
+                delta_lat_out = float(np.clip(
+                    delta_lat_out + self._gp_lat.current * _L_wb / _vx,
+                    LAT_NASH_DELTA_MIN, LAT_NASH_DELTA_MAX
+                ))
+        elif self.noise_mode == 'iid':
+            # B-IDM baseline: i.i.d. Gaussian N(0, σ_k²) — no temporal correlation
+            eps_long = float(self._gp.sigma_k * np.random.randn())
+            u_long_out = float(np.clip(
+                u_long_out + eps_long, MAX_DECELERATION, MAX_ACCELERATION
+            ))
+            if _in_lat_phase:
+                eps_lat = float(self._gp_lat.sigma_k * np.random.randn())
+                _L_wb = VEHICLE_LF + VEHICLE_LR
+                _vx   = max(float(self.ego.state.vx), 1.0)
+                delta_lat_out = float(np.clip(
+                    delta_lat_out + eps_lat * _L_wb / _vx,
+                    LAT_NASH_DELTA_MIN, LAT_NASH_DELTA_MAX
+                ))
+        # 'deterministic': no noise — u_long_out and delta_lat_out unchanged
+
+        return u_long_out, delta_lat_out
 
     # =========================================================================
     # Longitudinal Nash step
@@ -311,8 +493,12 @@ class UnifiedCoordinator:
         _vel_err = self.ego.state.vx - float(
             getattr(leader, 'v', getattr(leader.state, 'vx', PLATOON_TARGET_VELOCITY)))
 
-        # Authority (safety + gap/velocity Swain & Rath)
-        lam = self._long_authority(force, gap_error=_gap_err, vel_error=_vel_err)
+        # Authority (safety + gap/velocity Swain & Rath) — or fixed if set
+        if self._fixed_lambda_long is not None:
+            lam = float(self._fixed_lambda_long)
+            self._long_lambda = lam   # keep smoothed state in sync for logging
+        else:
+            lam = self._long_authority(force, gap_error=_gap_err, vel_error=_vel_err)
 
         # Reference trajectories
         R1 = self._long_sys_ref(leader, NASH_NP, LONG_NASH_CONTROL_DT)
@@ -375,9 +561,13 @@ class UnifiedCoordinator:
         # Safety force (DSF)
         force = self._lat_safety_force(platoon_vehicles)
 
-        # Authority
+        # Authority — or fixed if set
         y_err = ego.state.y - target_y
-        lam   = self._lat_authority(force, y_err)
+        if self._fixed_lambda_lat is not None:
+            lam = float(self._fixed_lambda_lat)
+            self._lat_lambda = lam
+        else:
+            lam = self._lat_authority(force, y_err)
 
         # Reference trajectories
         R1 = self._lat_sys_ref(target_y, NASH_NP, LAT_NASH_CONTROL_DT)
@@ -912,6 +1102,7 @@ class UnifiedCoordinator:
         lv = float(getattr(leader, 'v', getattr(leader.state, 'vx', PLATOON_TARGET_VELOCITY))) if leader is not None else 0.0
 
         ref = np.empty(Np * 2)
+        gp_means = self._gp.predict_mean(Np, dt_query=LONG_NASH_CONTROL_DT) if MA_IDM_ENABLED else None
         for k in range(Np):
             # Free-road term
             v_ratio = vx / max(v0, 1.0)
@@ -927,6 +1118,8 @@ class UnifiedCoordinator:
                 interaction_term = -(s_star / s_safe) ** 2
 
             a_human = float(np.clip(a_max * (free_road_term + interaction_term), a_min, a_max))
+            if gp_means is not None:
+                a_human = float(np.clip(a_human + gp_means[k], a_min, a_max))
 
             # Advance leader (constant velocity)
             if lx is not None:
@@ -983,11 +1176,18 @@ class UnifiedCoordinator:
         return ref
 
     def _lat_hum_ref(self, Np: int, dt: float) -> np.ndarray:
-        """R2 (human): quintic polynomial lane-change / lane-keeping prediction.
+        """R2 (human): cubic polynomial lane-change / lane-keeping prediction
+        with MA-IDM GP ψ-space feedforward (all phases).
 
-        Mirrors lateral/nash_solver/human_reference_generator.py:
-          - LANE_KEEPING / APPROACH: hold current y, exponential psi decay
-          - MERGE phase: cubic polynomial from current (y, vy, ay=0) to target y over T_lc
+        Phases (nominal trajectory):
+          - FOLLOWING: hold target_y, psi=0
+          - APPROACH / GAP_SEARCH: hold current y, exponential psi decay
+          - MERGE: cubic polynomial from (y0, vy0) to target_y over T_lc
+
+        GP feedforward (all phases): ε_gp_lat lives in heading [rad ψ], not steering.
+        Applied per-step, non-cumulative — analogous to longitudinal adding ε to acceleration:
+          Δψ_k = ε_k              [σ ≈ 0.018 rad = 1°, direct heading perturbation]
+          Δy_k = vx · ε_k · dt   [≈ 0.008 m one-step lateral shift]
 
         Returns (Np*2,) flattened [y0,psi0, y1,psi1, ...].
         """
@@ -998,14 +1198,15 @@ class UnifiedCoordinator:
         T_lc  = max(self._tlc, 1.0)   # human lane-change duration
         target_y = PLATOON_LANE_Y
 
+        # Compute GP means once for all phases (queried at Nash time step dt).
+        gp_lat_means = self._gp_lat.predict_mean(Np, dt_query=dt) if MA_IDM_ENABLED else None
+
         ref = np.empty(Np * 2)
 
         if self.phase == MergePhase.FOLLOWING:
-            # FOLLOWING: human wants to stay at platoon lane centre — both players agree on target_y
             for k in range(Np):
-                t = (k + 1) * dt
                 ref[2 * k]     = target_y
-                ref[2 * k + 1] = psi0 * np.exp(-t / max(T_lc, 1e-3))
+                ref[2 * k + 1] = 0.0
         elif self.phase != MergePhase.MERGE:
             # APPROACH / GAP_SEARCH: human holds current lane, psi decays
             for k in range(Np):
@@ -1013,18 +1214,15 @@ class UnifiedCoordinator:
                 ref[2 * k]     = y0
                 ref[2 * k + 1] = psi0 * np.exp(-t / max(T_lc, 1e-3))
         else:
-            # LANE_CHANGE mode: cubic polynomial trajectory to target_y
+            # MERGE: cubic polynomial trajectory to target_y
             # Boundary conditions: y(0)=y0, y(T)=y_target, ẏ(0)=vy0, ẏ(T)=0
             delta_y = target_y - y0
-
-            # Clip initial velocity to prevent polynomial overshoot
             if abs(delta_y) > 1e-6:
                 y_dot_max = 1.5 * abs(delta_y) / T_lc
                 y_dot_0   = float(np.clip(vy0, -y_dot_max, y_dot_max))
             else:
                 y_dot_0 = 0.0
 
-            # Cubic polynomial coefficients (tau = t / T_lc, tau in [0, 1])
             a0 = y0
             a1 = y_dot_0 * T_lc
             a2 = 3.0 * delta_y - 2.0 * y_dot_0 * T_lc
@@ -1042,6 +1240,13 @@ class UnifiedCoordinator:
                     psi_ref = 0.0
                 ref[2 * k]     = y_ref
                 ref[2 * k + 1] = psi_ref
+
+        # ── GP ψ-space feedforward (all phases, per-step, non-cumulative) ────
+        if gp_lat_means is not None:
+            for k in range(Np):
+                ref[2 * k]     += vx * gp_lat_means[k] * dt
+                ref[2 * k + 1] += gp_lat_means[k]
+
         return ref
 
     # =========================================================================

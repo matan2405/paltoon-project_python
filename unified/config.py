@@ -162,6 +162,7 @@ NASH_WARM_START      = True
 NASH_VERBOSE         = False
 NASH_POLISH          = False
 NASH_REGULARIZATION  = 1e-5
+NASH_RISK_GAMMA      = 0.1   # γ in E[J]+γ·Var[J]; risk sensitivity for SE-kernel GP uncertainty
 LONG_NASH_MAX_ITER   = 1000
 LONG_NASH_EPS_ABS    = 1e-4
 LONG_NASH_EPS_REL    = 1e-4
@@ -331,6 +332,35 @@ DRIVER_PARAMS = {
         'mobil_a_th':             0.05,
     },
 }
+
+# =============================================================================
+# MA-IDM (Memory-Augmented IDM, Zhang & Sun 2024)
+# =============================================================================
+MA_IDM_ENABLED = True          # Toggle GP noise on/off globally
+
+# Longitudinal GP hyperparameters per driver type — from Table I, hierarchical MA-IDM
+# σ_k: noise std [m/s²], ell: memory lengthscale [s]
+MA_IDM_PARAMS = {
+    'cautious':   {'sigma_k': 0.172, 'ell': 1.55},
+    'normal':     {'sigma_k': 0.202, 'ell': 1.435},
+    'aggressive': {'sigma_k': 0.240, 'ell': 1.30},
+}
+
+# Lateral GP hyperparameters per driver type
+# σ_k: steering noise std [rad], ell: memory lengthscale [s]
+# (shorter than longitudinal — steering reacts faster)
+MA_IDM_LAT_PARAMS = {
+    'cautious':   {'sigma_k': 0.012, 'ell': 0.80},
+    'normal':     {'sigma_k': 0.018, 'ell': 0.65},
+    'aggressive': {'sigma_k': 0.025, 'ell': 0.50},
+}
+
+# Future full-GP upgrade hooks (unused by AR(1)):
+MA_IDM_WINDOW_SIZE   = 50    # history window = 5s @ 10Hz
+MA_IDM_OBS_NOISE     = 0.01  # GP observation noise σ_obs² [(m/s²)²] — longitudinal
+MA_IDM_LAT_OBS_NOISE = 1e-5  # GP observation noise σ_obs² [rad²]    — lateral
+# Note: lateral sigma_k² ≈ 1.4e-4..6.3e-4 rad²; obs_noise=1e-5 → SNR=14..63
+# Previous value (0.01) had SNR<1 → GP sampled i.i.d. at 100 Hz → steering oscillations
 
 # =============================================================================
 # LOWER-LEVEL CONTROLLER  (Longitudinal/control/lower_level_controller.py)

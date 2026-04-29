@@ -74,7 +74,11 @@ class UnifiedSimulation:
                  merge_scenario: str = 'back',
                  ego_initial_x: Optional[float] = None,
                  T_sim: float = DEFAULT_SIMULATION_TIME,
-                 merge_trigger_time: float = 30.0):
+                 merge_trigger_time: float = 30.0,
+                 noise_mode: str = 'gp',
+                 fixed_lambda_long: Optional[float] = None,
+                 fixed_lambda_lat: Optional[float] = None,
+                 weight_overrides: Optional[Dict] = None):
 
         self.dt                 = SIMULATION_DT
         self.T_sim              = T_sim
@@ -82,6 +86,10 @@ class UnifiedSimulation:
         self.driver_type        = driver_type
         self.merge_scenario     = merge_scenario
         self.merge_trigger_time = merge_trigger_time
+        self._noise_mode        = noise_mode
+        self._fixed_lambda_long = fixed_lambda_long
+        self._fixed_lambda_lat  = fixed_lambda_lat
+        self._weight_overrides  = weight_overrides
 
         dp = DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])
 
@@ -190,7 +198,14 @@ class UnifiedSimulation:
 
         # ── Coordinator ──────────────────────────────────────────────────────
         self.coordinator = UnifiedCoordinator(
-            self.ego, driver_type=driver_type, merge_scenario=merge_scenario)
+            self.ego,
+            driver_type=driver_type,
+            merge_scenario=merge_scenario,
+            noise_mode=noise_mode,
+            fixed_lambda_long=fixed_lambda_long,
+            fixed_lambda_lat=fixed_lambda_lat,
+            weight_overrides=weight_overrides,
+        )
 
         # Platoon membership — set True once ego is inserted via add_vehicle()
         self.ego_in_platoon: bool = False

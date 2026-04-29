@@ -81,6 +81,7 @@ from dataclasses import dataclass
 import time
 from unified.config import (
     LONG_NASH_CONTROL_DT     as NASH_CONTROL_DT,
+    NASH_RISK_GAMMA,
     NASH_NP, NASH_NU,
     LONG_NASH_Q_POS          as NASH_Q_POS,
     LONG_NASH_Q_VEL          as NASH_Q_VEL,
@@ -175,6 +176,14 @@ class ConstrainedNashParams:
     # Rebuild when vx has drifted more than this from the last rebuild point.
     # Derived from vehicle aero drag sensitivity — see unified/config.py.
     rebuild_dvx: float = LONG_NASH_REBUILD_DVX
+
+    # ── Risk-aware planning: E[J] + γ·Var[J] (MA-IDM, Zhang & Sun 2024) ─────
+    # SE-kernel GP hyperparameters for the human player's residual process.
+    # sigma_k: stationary std [m/s²];  ell: lengthscale [s]  (from Table I)
+    # gamma_risk: risk sensitivity γ;  0 = disabled.
+    sigma_k:    float = 0.0
+    ell:        float = 1.0
+    gamma_risk: float = 0.0
 
 
 class ConstrainedLongitudinalNashSolver:
@@ -381,6 +390,28 @@ class ConstrainedLongitudinalNashSolver:
         self.HQ1H = self.H.T @ self.Q1_full @ self.H
         self.HQ1H += self.params.regularization * np.eye(self.params.Nu)
 
+        # ── Risk-aware Hessian: HQ1H_risk = (I + 4γ̃·HQ1H·Σ_ε) @ HQ1H ─────────
+        # Σ_ε[i,j] = σ_k² · exp(−(i−j)²·dt² / (2ℓ²))  — SE kernel (Eq. 9)
+        #
+        # Dimensional normalisation: Var[J] has units [cost]², so γ must have
+        # units 1/[cost].  We use γ̃ = γ / trace(HQ1H) so that γ=0.1 means
+        # "add 10% risk weight relative to the nominal cost scale."
+        Nu = self.params.Nu
+        if self.params.gamma_risk > 0.0 and self.params.sigma_k > 0.0:
+            idx = np.arange(Nu)
+            dt_mat    = np.abs(idx[:, None] - idx[None, :]) * self.params.dt
+            Sigma_eps = self.params.sigma_k ** 2 * np.exp(
+                -dt_mat ** 2 / (2.0 * self.params.ell ** 2)
+            )
+            norm_factor       = max(float(np.trace(self.HQ1H)), 1.0)
+            gamma_scaled      = self.params.gamma_risk / norm_factor
+            M_risk            = 4.0 * gamma_scaled * self.HQ1H @ Sigma_eps
+            self.I_plus_Mrisk = np.eye(Nu) + M_risk
+            self.HQ1H_risk    = self.I_plus_Mrisk @ self.HQ1H
+        else:
+            self.I_plus_Mrisk = np.eye(Nu)
+            self.HQ1H_risk    = self.HQ1H.copy()
+
     # ==========================================
     # DMPC Problem Construction (IBR)
     # ==========================================
@@ -407,7 +438,7 @@ class ConstrainedLongitudinalNashSolver:
         du2_lim = p.du2_max * p.dt
 
         # ---- Player 1: lambda-independent ----
-        P1 = self.HQ1H + p.R1 * np.eye(Nu)
+        P1 = self.HQ1H_risk + p.R1 * np.eye(Nu)
         P1 = 0.5 * (P1 + P1.T)  # ensure symmetric
 
         u1_var = cp.Variable(Nu, name='u1')
@@ -450,7 +481,7 @@ class ConstrainedLongitudinalNashSolver:
 
         for lam in self.lambda_levels:
             alpha = self._pustilnik_alpha(lam)
-            P2 = alpha * self.HQ1H + self.R2_eff * np.eye(Nu)
+            P2 = alpha * self.HQ1H_risk + self.R2_eff * np.eye(Nu)
             P2 = 0.5 * (P2 + P2.T)
 
             u2_var = cp.Variable(Nu, name=f'u2_lam{lam}')
@@ -540,9 +571,10 @@ class ConstrainedLongitudinalNashSolver:
         z_free = self.U @ x0
 
         # Pre-compute constant parts of q terms (updated each IBR step with u_other)
-        HQ1_r1 = self.H.T @ self.Q1_full @ (r1 - z_free)
-        HQ1_r2 = self.H.T @ self.Q1_full @ (r2 - z_free)
-        HQ1H = self.HQ1H
+        # Apply risk modification: HQ1_r_risk = (I + 4γ·HQ1H·Σ_ε) @ HQ1_r
+        HQ1_r1 = self.I_plus_Mrisk @ (self.H.T @ self.Q1_full @ (r1 - z_free))
+        HQ1_r2 = self.I_plus_Mrisk @ (self.H.T @ self.Q1_full @ (r2 - z_free))
+        HQ1H = self.HQ1H_risk  # risk-aware Hessian used in IBR linear terms
 
         prob1 = self.prob1
         prob2 = self.prob2[lambda_used]
