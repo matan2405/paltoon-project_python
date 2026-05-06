@@ -72,7 +72,7 @@ from unified.config import (                                          # noqa: E4
     APPROACH_MOBIL_CHECK_DISTANCE,
     MERGE_COMPLETE_Y_ERROR, MERGE_COMPLETE_PSI_ERROR, MERGE_COMPLETE_GAP_RATIO,
     PHASE_TRANSITION_HOLD_TIME,
-    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, LANE_WIDTH,
+    PLATOON_LANE_Y, HUMAN_INITIAL_LANE_Y, LANE_WIDTH, LAT_HUMAN_Y_BIAS,
     DRIVER_PARAMS,
     MAX_ACCELERATION, MAX_DECELERATION,
     NOMINAL_VELOCITY, VEHICLE_LENGTH, VEHICLE_MASS,
@@ -342,6 +342,7 @@ class UnifiedCoordinator:
         lat_params.Q_psi_terminal    = LAT_NASH_Q_PSI_TERMINAL_FAC  * _lat_Q_psi
         lat_params.R1                = _wo.get('lat_R1', LAT_NASH_R1)
         lat_params.R2                = _wo.get('lat_R2', LAT_NASH_R2)
+        self._lat_human_y_bias       = float(_wo.get('lat_human_y_bias', LAT_HUMAN_Y_BIAS))
         lat_params.S1                = LAT_NASH_S1
         lat_params.S2                = LAT_NASH_S2
         lat_params.delta_min         = LAT_NASH_DELTA_MIN
@@ -1089,8 +1090,8 @@ class UnifiedCoordinator:
         a_max      = MOBIL_IDM_A_MAX         # [m/s²]
         v0         = PLATOON_TARGET_VELOCITY + dp.get('velocity_offset', 0.0)  # desired speed
         delta_idm  = MOBIL_IDM_DELTA         # acceleration exponent
-        plan_T     = 2.0                     # planning time headway (more tolerant) [s]
-        plan_b     = 4.0                     # planning deceleration [m/s²]
+        plan_T     = dp.get('plan_time_headway', 2.0)   # planning time headway [s]
+        plan_b     = dp.get('plan_decel', 4.0)          # planning deceleration [m/s²]
         s0         = MOBIL_IDM_S0            # minimum spacing [m]
         a_min      = MAX_DECELERATION        # maximum deceleration [m/s²]
 
@@ -1139,27 +1140,24 @@ class UnifiedCoordinator:
     def _lat_sys_ref(self, target_y: float, Np: int, dt: float) -> np.ndarray:
         """R1 (system): 5th-order polynomial lane-change to target_y.
 
+        T scales with |dy| via the heading constraint, so the polynomial naturally
+        handles all phases without a phase check:
+          - MERGE  (large dy): gradual multi-second lane change
+          - FOLLOWING (tiny dy): T≈dt → tau=1 at every step → reference = target_y
+
         Returns (Np*2,) flattened [y0,psi0, y1,psi1, ...].
         """
         y0   = float(self.ego.state.y)
         dy   = target_y - y0
-        horizon = Np * dt                                   # prediction horizon [s]
-
-        # Heading-constrained minimum TLC (mirrors lateral/nash_solver/system_reference_generator.py
-        # DynamicTrajectoryParams.compute_min_T_lc):
-        #   T_min = 1.875 × |Δy| / (vx × tan(max_heading))
-        # This ensures the quintic trajectory never exceeds the driver's heading limit.
-        dp = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
+        dp   = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
         max_heading_rad = np.radians(dp.get('max_heading_deg', 5.0))
-        vx = max(float(self.ego.state.vx), 1.0)
-        if abs(dy) > 0.1 and vx > 1.0:
-            T_min_heading = 1.875 * abs(dy) / (vx * np.tan(max_heading_rad))
-        else:
-            T_min_heading = horizon
+        vx   = max(float(self.ego.state.vx), 1.0)
 
-        # Also clip to [horizon, 2×horizon] so Nash sees meaningful movement
-        # within the prediction window (avoids near-zero steering incentive).
-        T = float(max(T_min_heading, np.clip(self._sys_tlc, horizon, 2.0 * horizon)))
+        # T from heading constraint: T = 1.875·|dy| / (vx·tan(ψ_max)).
+        # Scales linearly with |dy| — no artificial floor needed:
+        #   large dy (MERGE, ~3.5 m)  → T ≈ 3–4 s, gradual lane change
+        #   tiny dy  (FOLLOWING, ~mm) → T ≈ dt, tau=1 at every step → target_y immediately
+        T = max(dt, 1.875 * abs(dy) / (vx * np.tan(max_heading_rad))) if abs(dy) > 1e-4 else dt
 
         # 5th-order polynomial coefficients (boundary: y(0)=y0, y(T)=yf, ẏ=0, ÿ=0 at both ends)
         # y(t) = y0 + dy * (10τ³ - 15τ⁴ + 6τ⁵),  τ = t/T
@@ -1196,50 +1194,50 @@ class UnifiedCoordinator:
         vy0   = float(self.ego.state.vy)
         vx    = max(float(self.ego.state.vx), 1.0)
         T_lc  = max(self._tlc, 1.0)   # human lane-change duration
-        target_y = PLATOON_LANE_Y
+        target_y = PLATOON_LANE_Y + self._lat_human_y_bias
 
         # Compute GP means once for all phases (queried at Nash time step dt).
         gp_lat_means = self._gp_lat.predict_mean(Np, dt_query=dt) if MA_IDM_ENABLED else None
 
         ref = np.empty(Np * 2)
 
-        if self.phase == MergePhase.FOLLOWING:
-            for k in range(Np):
-                ref[2 * k]     = target_y
-                ref[2 * k + 1] = 0.0
-        elif self.phase != MergePhase.MERGE:
-            # APPROACH / GAP_SEARCH: human holds current lane, psi decays
-            for k in range(Np):
-                t = (k + 1) * dt
-                ref[2 * k]     = y0
-                ref[2 * k + 1] = psi0 * np.exp(-t / max(T_lc, 1e-3))
-        else:
-            # MERGE: cubic polynomial trajectory to target_y
-            # Boundary conditions: y(0)=y0, y(T)=y_target, ẏ(0)=vy0, ẏ(T)=0
+        if self.phase in (MergePhase.MERGE, MergePhase.FOLLOWING):
+            # MERGE/FOLLOWING: cubic polynomial to target_y, T scales with |delta_y|
+            # via heading constraint — tiny residual → T≈dt → tau=1 → target_y naturally
+            dp = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
+            max_heading_rad = np.radians(dp.get('max_heading_deg', 5.0))
             delta_y = target_y - y0
+            T = max(dt, 1.5 * abs(delta_y) / (vx * np.tan(max_heading_rad))) if abs(delta_y) > 1e-4 else dt
+
             if abs(delta_y) > 1e-6:
-                y_dot_max = 1.5 * abs(delta_y) / T_lc
+                y_dot_max = 1.5 * abs(delta_y) / T
                 y_dot_0   = float(np.clip(vy0, -y_dot_max, y_dot_max))
             else:
                 y_dot_0 = 0.0
 
             a0 = y0
-            a1 = y_dot_0 * T_lc
-            a2 = 3.0 * delta_y - 2.0 * y_dot_0 * T_lc
-            a3 = -2.0 * delta_y + y_dot_0 * T_lc
+            a1 = y_dot_0 * T
+            a2 = 3.0 * delta_y - 2.0 * y_dot_0 * T
+            a3 = -2.0 * delta_y + y_dot_0 * T
 
             for k in range(Np):
                 t   = (k + 1) * dt
-                tau = min(t / T_lc, 1.0)
+                tau = min(t / T, 1.0)
                 if tau < 1.0:
                     y_ref     = a0 + a1 * tau + a2 * tau ** 2 + a3 * tau ** 3
-                    y_dot_ref = (a1 + 2.0 * a2 * tau + 3.0 * a3 * tau ** 2) / T_lc
+                    y_dot_ref = (a1 + 2.0 * a2 * tau + 3.0 * a3 * tau ** 2) / T
                     psi_ref   = y_dot_ref / vx
                 else:
                     y_ref   = target_y
                     psi_ref = 0.0
                 ref[2 * k]     = y_ref
                 ref[2 * k + 1] = psi_ref
+        else:
+            # APPROACH / GAP_SEARCH: human holds current lane, psi decays with T_lc
+            for k in range(Np):
+                t = (k + 1) * dt
+                ref[2 * k]     = y0
+                ref[2 * k + 1] = psi0 * np.exp(-t / max(T_lc, 1e-3))
 
         # ── GP ψ-space feedforward (all phases, per-step, non-cumulative) ────
         if gp_lat_means is not None:

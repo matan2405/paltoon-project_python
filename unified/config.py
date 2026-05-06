@@ -116,6 +116,7 @@ MAX_STEERING_RATE    = np.radians(15.0)            # [rad/s] ~15°/s
 LANE_WIDTH          = 3.5     # [m]
 PLATOON_LANE_Y      = 0.0     # Platoon centre lane y-position [m]
 HUMAN_INITIAL_LANE_Y = LANE_WIDTH  # Human starts in adjacent lane [m]
+LAT_HUMAN_Y_BIAS     = 0.0         # Human steady-state y offset from PLATOON_LANE_Y [m] (0 = no bias)
 
 # =============================================================================
 # LONGITUDINAL NASH SOLVER PARAMETERS
@@ -166,7 +167,7 @@ NASH_RISK_GAMMA      = 0.1   # γ in E[J]+γ·Var[J]; risk sensitivity for SE-ke
 LONG_NASH_MAX_ITER   = 1000
 LONG_NASH_EPS_ABS    = 1e-4
 LONG_NASH_EPS_REL    = 1e-4
-LAT_NASH_MAX_ITER    = 200
+LAT_NASH_MAX_ITER    = 600
 LAT_NASH_EPS_ABS     = 1e-3
 LAT_NASH_EPS_REL     = 1e-3
 
@@ -219,7 +220,7 @@ LAT_AUTHORITY_SIGMOID_M2      =  0.5   # Centre shift
 # PLATOON CONTROL
 # =============================================================================
 PLATOON_TIME_GAP            = 1.5    # Desired time headway [s]
-PLATOON_STANDSTILL_DISTANCE = _vp.length    # Minimum gap at standstill [m]
+PLATOON_STANDSTILL_DISTANCE = 2.0           # Minimum gap at standstill [m] — matches IDM s0
 PLATOON_TARGET_VELOCITY     = NOMINAL_VELOCITY
 PLATOON_VEHICLE_LENGTH      = _vp.length  # [m]
 
@@ -231,11 +232,11 @@ _Cd_aero = VEHICLE_AIR_DENSITY * VEHICLE_CD * VEHICLE_FRONTAL_AREA / VEHICLE_M_E
 LONG_NASH_REBUILD_DVX = 0.2 / (_Cd_aero * LONG_NASH_CONTROL_DT * NASH_NP * max(LONG_NASH_V_MAX, 1.0))
 
 # Lateral: dominant changing term is Coriolis → A_c[1,3] ≈ -vx → dA_c/dvx ≈ -1
-#   Rebuild when lateral velocity prediction error exceeds ε_vy = 0.05 m/s:
+#   Rebuild when lateral velocity prediction error exceeds ε_vy = 0.20 m/s:
 #   ψ̇_max ≈ μ·g / V_target (max yaw rate at cruise)
 #   Δvx_thr = ε_vy / (dt_lat · Np · ψ̇_max)
 _psi_dot_max = _vp.tire_friction_coeff * _vp.gravity / max(PLATOON_TARGET_VELOCITY, 1.0)
-LAT_NASH_REBUILD_DVX = 0.05 / (LAT_NASH_CONTROL_DT * NASH_NP * max(_psi_dot_max, 0.01))
+LAT_NASH_REBUILD_DVX = 0.20 / (LAT_NASH_CONTROL_DT * NASH_NP * max(_psi_dot_max, 0.01))
 
 # Platoon control dynamics
 JERK_LIMIT       = 2.0   # Maximum da/dt [m/s³]
@@ -312,6 +313,8 @@ DRIVER_PARAMS = {
         'system_tlc_multiplier':  1.5,
         'mobil_p':                0.8,
         'mobil_a_th':             0.2,
+        'plan_time_headway':      2.5,   # IDM planning time gap [s] — cautious keeps more distance
+        'plan_decel':             3.0,   # IDM comfortable decel [m/s²] — softer braking
     },
     'normal': {
         'velocity_offset':        0.0,
@@ -321,6 +324,8 @@ DRIVER_PARAMS = {
         'system_tlc_multiplier':  1.5,
         'mobil_p':                0.5,
         'mobil_a_th':             0.1,
+        'plan_time_headway':      2.0,   # IDM planning time gap [s]
+        'plan_decel':             4.0,   # IDM comfortable decel [m/s²]
     },
     'aggressive': {
         'velocity_offset':        5.0,
@@ -330,6 +335,8 @@ DRIVER_PARAMS = {
         'system_tlc_multiplier':  1.5,
         'mobil_p':                0.2,
         'mobil_a_th':             0.05,
+        'plan_time_headway':      1.3,   # IDM planning time gap [s] — aggressive follows closely
+        'plan_decel':             6.0,   # IDM comfortable decel [m/s²] — accepts harder braking
     },
 }
 

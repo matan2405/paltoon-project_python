@@ -111,6 +111,40 @@ def _control_effort_rms(data: dict, key: str) -> float:
     return float(np.sqrt(np.mean(u ** 2)))
 
 
+def _merge_smoothness_rms(data: dict) -> float:
+    """RMS of delta_lat during MERGE phase — measures lane-change control effort.
+
+    Higher value = more aggressive steering during merge.
+    Used to distinguish Q_y configurations now that FOLLOWING is perfect for all Q_y.
+    Falls back to all-finite values if MERGE phase never occurs.
+    """
+    delta = np.asarray(data.get('delta_lat', []), dtype=float)
+    phase = data.get('phase', [])
+    mask  = np.array([p == 'MERGE' for p in phase], dtype=bool)
+    if mask.sum() < 2:
+        mask = np.ones(len(delta), dtype=bool)
+    mask &= np.isfinite(delta)
+    if mask.sum() < 2:
+        return float('nan')
+    return float(np.sqrt(np.mean(delta[mask] ** 2)))
+
+
+def _merge_duration(data: dict) -> float:
+    """Duration of MERGE phase in seconds.
+
+    Returns NaN if MERGE phase never occurs (e.g. purely longitudinal runs).
+    Small λ (human dominant, large α) → human tracks r2 aggressively → large u2
+    → faster merge.  Large λ (system dominant, small α) → human passive → slower merge.
+    """
+    t     = np.asarray(data.get('time', []), dtype=float)
+    phase = data.get('phase', [])
+    mask  = np.array([p == 'MERGE' for p in phase], dtype=bool)
+    if mask.sum() < 2:
+        return float('nan')
+    t_merge = t[mask]
+    return float(t_merge[-1] - t_merge[0])
+
+
 def _autocorr_of_signal(u: np.ndarray, t: np.ndarray, max_lag_s: float = 5.0) -> np.ndarray:
     """Normalised autocorrelation of a 1-D signal array up to max_lag_s seconds."""
     u = u[np.isfinite(u)]
@@ -194,7 +228,7 @@ class MonteCarloExperiment:
                  n_trials: int = 20,
                  driver_type: str = 'normal',
                  merge_scenario: str = 'back',
-                 T_sim: float = 90.0,
+                 T_sim: float = 120.0,
                  merge_trigger_time: float = 25.0):
         self.n_trials          = n_trials
         self.cfg_override      = {
@@ -386,7 +420,7 @@ class QWeightSweepExperiment:
                  lat_Q_ratio:       float = _DEFAULT_Q_RATIO,
                  driver_type:       str   = 'normal',
                  merge_scenario:    str   = 'back',
-                 T_sim:             float = 90.0,
+                 T_sim:             float = 120.0,
                  merge_trigger_time: float = 25.0,
                  noise_mode:        str   = 'deterministic'):
         self.long_Q_pos_values    = long_Q_pos_values
@@ -437,6 +471,7 @@ class QWeightSweepExperiment:
                 print(f"  lat  Q_y={q_y:6.0f}  Q_psi={q_psi:8.0f}  "
                       f"y_rms={_y_error_rms(data):.4f}  "
                       f"u_rms={_control_effort_rms(data, 'delta_lat'):.5f}  "
+                      f"merge_δ={_merge_smoothness_rms(data):.5f}  "
                       f"({done}/{total})")
 
         self._compute_summary()
@@ -453,10 +488,11 @@ class QWeightSweepExperiment:
         ]
         self.summary['lat'] = [
             {
-                'Q_y':        r['Q_y'],
-                'Q_psi':      r['Q_psi'],
-                'y_rms':      _y_error_rms(r['data']),
-                'u_lat_rms':  _control_effort_rms(r['data'], 'delta_lat'),
+                'Q_y':             r['Q_y'],
+                'Q_psi':           r['Q_psi'],
+                'y_rms':           _y_error_rms(r['data']),
+                'u_lat_rms':       _control_effort_rms(r['data'], 'delta_lat'),
+                'merge_delta_rms': _merge_smoothness_rms(r['data']),
             }
             for r in self.results['lat']
         ]
@@ -503,7 +539,7 @@ class RWeightSweepExperiment:
                  lat_configs:  Optional[list] = None,
                  driver_type:  str = 'normal',
                  merge_scenario: str = 'back',
-                 T_sim:        float = 90.0,
+                 T_sim:        float = 120.0,
                  merge_trigger_time: float = 25.0,
                  noise_mode:   str = 'deterministic'):
         self.long_configs  = long_configs or self._DEFAULT_LONG_CONFIGS
@@ -599,12 +635,14 @@ class LambdaSweepExperiment:
                  lat_lambdas:  tuple = LAT_NASH_LAMBDA_LEVELS,
                  driver_type:  str   = 'normal',
                  merge_scenario: str = 'back',
-                 T_sim:        float = 90.0,
+                 T_sim:        float = 120.0,
                  merge_trigger_time: float = 25.0,
-                 noise_mode:   str   = 'deterministic'):
+                 noise_mode:   str   = 'deterministic',
+                 lat_human_y_bias: float = 0.75):
         self.long_lambdas      = long_lambdas
         self.lat_lambdas       = lat_lambdas
         self.noise_mode        = noise_mode
+        self.lat_human_y_bias  = lat_human_y_bias
         self.cfg_override = {
             'driver_type':    driver_type,
             'merge_scenario': merge_scenario,
@@ -637,7 +675,8 @@ class LambdaSweepExperiment:
             alpha = 1.0 / (1.0 + lam)
             data  = _run_single(self.cfg_override,
                                 noise_mode=self.noise_mode,
-                                fixed_lambda_lat=float(lam))
+                                fixed_lambda_lat=float(lam),
+                                weight_overrides={'lat_human_y_bias': self.lat_human_y_bias})
             self.results['lat'].append({'lambda': lam, 'alpha': alpha, 'data': data})
             done += 1
             if verbose:
@@ -660,11 +699,13 @@ class LambdaSweepExperiment:
         ]
         self.summary['lat'] = [
             {
-                'lambda':  r['lambda'],
-                'alpha':   r['alpha'],
-                'y_rms':   _y_error_rms(r['data']),
-                'u1_rms':  _control_effort_rms(r['data'], 'u1_lat'),
-                'u2_rms':  _control_effort_rms(r['data'], 'u2_lat'),
+                'lambda':          r['lambda'],
+                'alpha':           r['alpha'],
+                'y_rms':           _y_error_rms(r['data']),
+                'merge_duration':  _merge_duration(r['data']),
+                'merge_delta_rms': _merge_smoothness_rms(r['data']),
+                'u1_rms':          _control_effort_rms(r['data'], 'u1_lat'),
+                'u2_rms':          _control_effort_rms(r['data'], 'u2_lat'),
             }
             for r in self.results['lat']
         ]
@@ -678,8 +719,14 @@ class LambdaSweepExperiment:
         for r in self.summary['long']:
             print(f"  {r['lambda']:7.2f}  {r['alpha']:6.3f}  {r['gap_rms']:9.3f}  "
                   f"{r['u1_rms']:9.3f}  {r['u2_rms']:9.3f}")
-        print("\n  LATERAL")
-        print(f"  {'λ':>7}  {'α':>6}  {'y_rms':>9}  {'u1_rms':>9}  {'u2_rms':>9}")
+        print("\n  LATERAL  (α = human tracking weight; small λ → human dominant)")
+        print(f"  {'λ':>7}  {'α (hum)':>8}  {'merge_dur[s]':>13}  {'y_rms[m]':>9}  {'δ_rms[rad]':>11}  {'u1_rms':>9}  {'u2_rms':>9}")
         for r in self.summary['lat']:
-            print(f"  {r['lambda']:7.2f}  {r['alpha']:6.3f}  {r['y_rms']:9.4f}  "
+            dur  = r.get('merge_duration',  float('nan'))
+            yrms = r.get('y_rms',           float('nan'))
+            drms = r.get('merge_delta_rms', float('nan'))
+            dur_s  = f"{dur:13.1f}"  if np.isfinite(dur)  else "          N/A"
+            yrms_s = f"{yrms:9.4f}"  if np.isfinite(yrms) else "      N/A"
+            drms_s = f"{drms:11.5f}" if np.isfinite(drms) else "        N/A"
+            print(f"  {r['lambda']:7.2f}  {r['alpha']:8.3f}  {dur_s}  {yrms_s}  {drms_s}  "
                   f"{r['u1_rms']:9.5f}  {r['u2_rms']:9.5f}")

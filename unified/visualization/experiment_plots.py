@@ -312,14 +312,16 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
                         show: bool = True,
                         save: bool = True):
     """
-    2 × 2 figure:
+    2 × 3 figure:
       [0,0] Long Pareto: gap_rms vs u_long_rms as Q_pos varies
       [0,1] Long:        gap_rms vs Q_pos bar chart
-      [1,0] Lat  Pareto: y_rms   vs u_lat_rms  as Q_y varies
-      [1,1] Lat:         y_rms   vs Q_y  bar chart
+      [0,2] Long:        u_long_rms vs Q_pos bar chart
+      [1,0] Lat  Pareto: y_rms (FOLLOWING) vs u_lat_rms as Q_y varies
+      [1,1] Lat:         y_rms (FOLLOWING) vs Q_y bar chart
+      [1,2] Lat:         MERGE delta_rms vs Q_y bar chart
     """
     apply_ieee_style()
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
     fig.suptitle(f'Q-Weight Sweep{" — " + title if title else ""}',
                  fontsize=11, fontweight='bold')
 
@@ -344,36 +346,53 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         axes[0, 0].legend(fontsize=7)
         axes[0, 0].grid(True, alpha=0.3)
 
-        bars = axes[0, 1].bar(range(n), gap_vals, color=colors, edgecolor='k', linewidth=0.5)
+        axes[0, 1].bar(range(n), gap_vals, color=colors, edgecolor='k', linewidth=0.5)
         axes[0, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_pos', ylabel='Gap error RMS [m]',
                        title='Long: gap RMS vs Q_pos')
         axes[0, 1].grid(True, alpha=0.3, axis='y')
+
+        axes[0, 2].bar(range(n), u_vals, color=colors, edgecolor='k', linewidth=0.5)
+        axes[0, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
+                       xlabel='Q_pos', ylabel='u_long RMS [m/s²]',
+                       title='Long: u_long RMS vs Q_pos')
+        axes[0, 2].grid(True, alpha=0.3, axis='y')
 
     # ── Lateral ───────────────────────────────────────────────────────────────
     lat_s = q_summary['lat']
     if lat_s:
         n      = len(lat_s)
         colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
-        q_vals  = [s['Q_y']      for s in lat_s]
-        y_vals  = [s['y_rms']    for s in lat_s]
-        u_vals  = [s['u_lat_rms'] for s in lat_s]
+        q_vals   = [s['Q_y']       for s in lat_s]
+        y_vals   = [s['y_rms']     for s in lat_s]
+        u_vals   = [s['u_lat_rms'] for s in lat_s]
+        m_vals   = [s.get('merge_delta_rms', float('nan')) for s in lat_s]
 
+        # [1,0] FOLLOWING Pareto — should collapse near y=0 after fix
         for i, s in enumerate(lat_s):
             axes[1, 0].scatter(s['u_lat_rms'], s['y_rms'],
                                color=colors[i], s=80, zorder=3,
                                label=f"Q_y={s['Q_y']:.0f}")
         axes[1, 0].plot(u_vals, y_vals, color='gray', linewidth=0.8, linestyle='--', zorder=2)
         axes[1, 0].set(xlabel='δ RMS [rad]', ylabel='y error RMS [m]',
-                       title='Lat: Pareto (effort vs tracking)')
+                       title='Lat FOLLOWING: Pareto (effort vs tracking)')
         axes[1, 0].legend(fontsize=7)
         axes[1, 0].grid(True, alpha=0.3)
 
+        # [1,1] FOLLOWING y_rms bar — flat (≈0) for all Q_y
         axes[1, 1].bar(range(n), y_vals, color=colors, edgecolor='k', linewidth=0.5)
         axes[1, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_y', ylabel='y error RMS [m]',
-                       title='Lat: y RMS vs Q_y')
+                       title='Lat FOLLOWING: y RMS vs Q_y')
         axes[1, 1].grid(True, alpha=0.3, axis='y')
+
+        # [1,2] MERGE delta_rms bar — NEW: Q_y selection criterion
+        m_plot = [v if np.isfinite(v) else 0.0 for v in m_vals]
+        axes[1, 2].bar(range(n), m_plot, color=colors, edgecolor='k', linewidth=0.5)
+        axes[1, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
+                       xlabel='Q_y', ylabel='MERGE δ RMS [rad]',
+                       title='Lat MERGE: δ_rms vs Q_y\n(lane-change effort)')
+        axes[1, 2].grid(True, alpha=0.3, axis='y')
 
     fig.tight_layout()
     _save_fig(fig, 'experiment_q_sweep.png', save)
@@ -465,8 +484,13 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
                       save: bool = True):
     """
     2 × 3 figure:
-      Row 0 (long): α vs λ  | gap_rms vs λ  | u1/u2 RMS vs α
-      Row 1 (lat):  α vs λ  | y_rms   vs λ  | u1/u2 RMS vs α
+      Row 0 (long): α vs λ  | gap_rms vs λ         | u1/u2 RMS vs α
+      Row 1 (lat):  α vs λ  | y_rms FOLLOWING vs λ  | u1/u2 RMS vs α
+                               (twin-axis: y_rms left, δ_rms MERGE right)
+
+    α = 1/(1+λ) is the HUMAN tracking weight in J2 = α·Q1:
+      small λ → large α → human dominant (tracks r2 aggressively) → fast/aggressive merge
+      large λ → small α → system dominant (human withdraws)       → slow/gentle merge
     """
     apply_ieee_style()
     fig, axes = plt.subplots(2, 3, figsize=(13, 7))
@@ -475,44 +499,86 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
 
     def _alpha(lam): return 1.0 / (1.0 + lam)
 
-    def _plot_row(row, summary, metric_key, metric_label):
-        lams    = [s['lambda']  for s in summary]
-        alphas  = [s['alpha']   for s in summary]
-        metrics = [s[metric_key] for s in summary]
-        u1s     = [s['u1_rms']  for s in summary]
-        u2s     = [s['u2_rms']  for s in summary]
+    def _plot_alpha_col(ax, lams, alphas):
+        lam_fine = np.logspace(np.log10(min(lams)), np.log10(max(lams)), 200)
+        ax.semilogx(lam_fine, _alpha(lam_fine), 'k--', linewidth=1.0,
+                    label='α=1/(1+λ)')
+        ax.semilogx(lams, alphas, 'o', color='#1f77b4', markersize=7)
+        ax.set(xlabel='λ (log)', ylabel='α  (human tracking weight)',
+               title='Human weight α vs λ\nsmall λ→human active, large λ→system carries',
+               ylim=(0, 1))
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
 
-        # α vs λ (theoretical curve)
-        lam_fine  = np.logspace(np.log10(min(lams)), np.log10(max(lams)), 200)
-        axes[row, 0].semilogx(lam_fine, _alpha(lam_fine), 'k--',
-                              linewidth=1.0, label='α=1/(1+λ)')
-        axes[row, 0].semilogx(lams, alphas, 'o', color='#1f77b4', markersize=7)
-        axes[row, 0].set(xlabel='λ (log)', ylabel='α (system authority)',
-                         title='Authority α vs λ', ylim=(0, 1))
-        axes[row, 0].legend(fontsize=7)
-        axes[row, 0].grid(True, alpha=0.3)
+    def _plot_effort_col(ax, alphas, u1s, u2s, xlabel='α (human tracking weight)'):
+        ax.plot(alphas, u1s, 'o-', color='#1f77b4', linewidth=1.4,
+                markersize=6, label='u1 (system)')
+        ax.plot(alphas, u2s, 's-', color='#ff7f0e', linewidth=1.4,
+                markersize=6, label='u2 (human)')
+        ax.set(xlabel=xlabel, ylabel='RMS', title='Control effort vs α')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
 
-        # metric vs λ
-        axes[row, 1].semilogx(lams, metrics, 'o-', color='#2ca02c', linewidth=1.5,
-                              markersize=6)
-        axes[row, 1].set(xlabel='λ (log)', ylabel=metric_label,
-                         title=f'{metric_label} vs λ')
-        axes[row, 1].grid(True, alpha=0.3)
-
-        # u1/u2 vs α
-        axes[row, 2].plot(alphas, u1s, 'o-', color='#1f77b4', linewidth=1.4,
-                          markersize=6, label='u1 (system)')
-        axes[row, 2].plot(alphas, u2s, 's-', color='#ff7f0e', linewidth=1.4,
-                          markersize=6, label='u2 (human)')
-        axes[row, 2].set(xlabel='α (system authority)', ylabel='RMS',
-                         title='Control effort vs α')
-        axes[row, 2].legend(fontsize=7)
-        axes[row, 2].grid(True, alpha=0.3)
-
+    # ── Row 0: Longitudinal ───────────────────────────────────────────────────
     if lam_summary['long']:
-        _plot_row(0, lam_summary['long'], 'gap_rms', 'Gap error RMS [m]')
+        s     = lam_summary['long']
+        lams  = [r['lambda']  for r in s]
+        alphas = [r['alpha']  for r in s]
+
+        _plot_alpha_col(axes[0, 0], lams, alphas)
+
+        metrics = [r['gap_rms'] for r in s]
+        axes[0, 1].semilogx(lams, metrics, 'o-', color='#2ca02c',
+                             linewidth=1.5, markersize=6)
+        axes[0, 1].set(xlabel='λ (log)', ylabel='Gap error RMS [m]',
+                       title='Long: gap error vs λ')
+        axes[0, 1].grid(True, alpha=0.3)
+
+        _plot_effort_col(axes[0, 2], alphas,
+                         [r['u1_rms'] for r in s],
+                         [r['u2_rms'] for r in s])
+
+    # ── Row 1: Lateral — MERGE metrics ───────────────────────────────────────
     if lam_summary['lat']:
-        _plot_row(1, lam_summary['lat'],  'y_rms',   'y error RMS [m]')
+        s      = lam_summary['lat']
+        lams   = [r['lambda']  for r in s]
+        alphas = [r['alpha']   for r in s]
+
+        _plot_alpha_col(axes[1, 0], lams, alphas)
+
+        # [1,1] merge_duration (left) + merge_delta_rms (right twin)
+        durs = [r.get('merge_duration',  float('nan')) for r in s]
+        drms = [r.get('merge_delta_rms', float('nan')) for r in s]
+        ax_d  = axes[1, 1]
+        ax_dr = ax_d.twinx()
+
+        fin_lams_d = [lams[i] for i in range(len(lams)) if np.isfinite(durs[i])]
+        fin_durs   = [durs[i] for i in range(len(durs))  if np.isfinite(durs[i])]
+        fin_lams_r = [lams[i] for i in range(len(lams)) if np.isfinite(drms[i])]
+        fin_drms   = [drms[i] for i in range(len(drms))  if np.isfinite(drms[i])]
+
+        if fin_lams_d:
+            ax_d.semilogx(fin_lams_d, fin_durs, 'o-', color='#9467bd',
+                          linewidth=1.5, markersize=6, label='Merge duration [s]')
+        if fin_lams_r:
+            ax_dr.semilogx(fin_lams_r, fin_drms, 's--', color='#d62728',
+                           linewidth=1.4, markersize=6, label='δ RMS MERGE [rad]')
+
+        ax_d.set(xlabel='λ (log)', ylabel='Merge duration [s]',
+                 title='Lat MERGE: duration & steering effort vs λ\n'
+                       'λ<1 (human dominant) → merge fails (94.5s); λ≥1 → success')
+        ax_dr.set_ylabel('MERGE δ RMS [rad]', color='#d62728')
+        ax_dr.tick_params(axis='y', labelcolor='#d62728')
+        ax_d.grid(True, alpha=0.3)
+
+        h1, l1 = ax_d.get_legend_handles_labels()
+        h2, l2 = ax_dr.get_legend_handles_labels()
+        ax_d.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper right')
+
+        # [1,2] control effort vs α
+        _plot_effort_col(axes[1, 2], alphas,
+                         [r['u1_rms'] for r in s],
+                         [r['u2_rms'] for r in s])
 
     fig.tight_layout()
     _save_fig(fig, 'experiment_lambda_sweep.png', save)
