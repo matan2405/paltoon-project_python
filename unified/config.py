@@ -315,6 +315,10 @@ DRIVER_PARAMS = {
         'mobil_a_th':             0.2,
         'plan_time_headway':      2.5,   # IDM planning time gap [s] — cautious keeps more distance
         'plan_decel':             3.0,   # IDM comfortable decel [m/s²] — softer braking
+        # Swain & Rath (2023) neuromuscular IIR — slow, highly damped
+        'neuro_J':                0.0050,   # arm inertia [kg*m^2]
+        'neuro_B':                0.2200,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.0500,   # spring stiffness [N*m/rad]
     },
     'normal': {
         'velocity_offset':        0.0,
@@ -326,6 +330,10 @@ DRIVER_PARAMS = {
         'mobil_a_th':             0.1,
         'plan_time_headway':      2.0,   # IDM planning time gap [s]
         'plan_decel':             4.0,   # IDM comfortable decel [m/s²]
+        # Swain & Rath (2023) D1 baseline
+        'neuro_J':                0.0037,   # arm inertia [kg*m^2]
+        'neuro_B':                0.1363,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.1742,   # spring stiffness [N*m/rad]
     },
     'aggressive': {
         'velocity_offset':        5.0,
@@ -337,6 +345,10 @@ DRIVER_PARAMS = {
         'mobil_a_th':             0.05,
         'plan_time_headway':      1.3,   # IDM planning time gap [s] — aggressive follows closely
         'plan_decel':             6.0,   # IDM comfortable decel [m/s²] — accepts harder braking
+        # Swain & Rath (2023) neuromuscular IIR — fast, low damping
+        'neuro_J':                0.0020,   # arm inertia [kg*m^2]
+        'neuro_B':                0.0800,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.3000,   # spring stiffness [N*m/rad]
     },
 }
 

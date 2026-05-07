@@ -299,6 +299,12 @@ class UnifiedCoordinator:
             obs_noise=MA_IDM_LAT_OBS_NOISE,
         )
 
+        # ── Neuromuscular IIR filter state (Swain & Rath 2023) ───────────────
+        # [psi_exec[k-1], psi_exec[k-2]] — real heading history for IIR initial conditions
+        self._neuro_psi_state = np.array([
+            float(ego.state.psi), float(ego.state.psi)
+        ])
+
         # ── MOBIL ─────────────────────────────────────────────────────────────
         self.mobil         = MOBILLaneChange()
         self.mobil_approved = False
@@ -555,6 +561,11 @@ class UnifiedCoordinator:
         if abs(self.ego.state.vx - self._vx_at_last_lat_rebuild) > LAT_NASH_REBUILD_DVX:
             self._rebuild_lat_nash_once()
 
+        # Advance neuromuscular IIR history with real ego heading (runs at 20 Hz)
+        _psi_now = float(self.ego.state.psi)
+        self._neuro_psi_state[1] = self._neuro_psi_state[0]
+        self._neuro_psi_state[0] = _psi_now
+
         ego     = self.ego
         x0      = ego.get_lat_state_vector()   # [y, vy, psi, psi_dot]
         target_y = PLATOON_LANE_Y
@@ -620,6 +631,9 @@ class UnifiedCoordinator:
                 self.phase = MergePhase.MERGE
                 # Rebuild lateral Nash matrices once at cruise speed before first MERGE solve
                 self._rebuild_lat_nash_once()
+                # Reset neuromuscular IIR to current heading (clean entry into merge)
+                _psi_entry = float(self.ego.state.psi)
+                self._neuro_psi_state[:] = _psi_entry
                 print(f"[Coordinator] Phase: GAP_SEARCH -> MERGE at t={sim_time:.1f}s")
 
         elif self.phase == MergePhase.MERGE:
@@ -1174,38 +1188,45 @@ class UnifiedCoordinator:
         return ref
 
     def _lat_hum_ref(self, Np: int, dt: float) -> np.ndarray:
-        """R2 (human): cubic polynomial lane-change / lane-keeping prediction
-        with MA-IDM GP ψ-space feedforward (all phases).
+        """R2 (human): three-layer lateral human reference.
 
-        Phases (nominal trajectory):
-          - FOLLOWING: hold target_y, psi=0
-          - APPROACH / GAP_SEARCH: hold current y, exponential psi decay
-          - MERGE: cubic polynomial from (y0, vy0) to target_y over T_lc
+        Layer 1 (Gu & Dolan): geometry-aware T_lc = 1.5·|Δy|/(vx·tan(ψ_max)).
+        Layer 2 (Swain & Rath 2023): neuromuscular IIR G_d(z) converts ψ_des → ψ_exec.
+        Layer 3 (Zhang & Sun 2024): GP models residual ε = ψ_actual − G_d·ψ_des.
 
-        GP feedforward (all phases): ε_gp_lat lives in heading [rad ψ], not steering.
-        Applied per-step, non-cumulative — analogous to longitudinal adding ε to acceleration:
-          Δψ_k = ε_k              [σ ≈ 0.018 rad = 1°, direct heading perturbation]
-          Δy_k = vx · ε_k · dt   [≈ 0.008 m one-step lateral shift]
-
+        y column: polynomial only (Option B — avoids y/ψ drift that destabilises solver).
         Returns (Np*2,) flattened [y0,psi0, y1,psi1, ...].
         """
         y0    = float(self.ego.state.y)
         psi0  = float(self.ego.state.psi)
         vy0   = float(self.ego.state.vy)
         vx    = max(float(self.ego.state.vx), 1.0)
-        T_lc  = max(self._tlc, 1.0)   # human lane-change duration
+        T_lc  = max(self._tlc, 1.0)
         target_y = PLATOON_LANE_Y + self._lat_human_y_bias
 
-        # Compute GP means once for all phases (queried at Nash time step dt).
         gp_lat_means = self._gp_lat.predict_mean(Np, dt_query=dt) if MA_IDM_ENABLED else None
+
+        # Layer 1 params — moved before branch so neuro_J/B/K available in both phases
+        dp = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
+        max_heading_rad = np.radians(dp.get('max_heading_deg', 5.0))
+
+        # Layer 2: IIR coefficients (Swain & Rath 2023, Eq. 7, Euler discretisation)
+        _neuro_J = float(dp.get('neuro_J', 0.0037))
+        _neuro_B = float(dp.get('neuro_B', 0.1363))
+        _neuro_K = float(dp.get('neuro_K', 1.1742))
+        _nd  = _neuro_J + _neuro_B * dt + _neuro_K * dt * dt
+        _na0 = (dt * dt) / _nd
+        _na1 = (2.0 * _neuro_J + _neuro_B * dt) / _nd
+        _na2 = -_neuro_J / _nd
 
         ref = np.empty(Np * 2)
 
+        # IIR initial conditions from real-world history — prediction-local, not written back
+        _psi_km1 = self._neuro_psi_state[0]
+        _psi_km2 = self._neuro_psi_state[1]
+
         if self.phase in (MergePhase.MERGE, MergePhase.FOLLOWING):
-            # MERGE/FOLLOWING: cubic polynomial to target_y, T scales with |delta_y|
-            # via heading constraint — tiny residual → T≈dt → tau=1 → target_y naturally
-            dp = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
-            max_heading_rad = np.radians(dp.get('max_heading_deg', 5.0))
+            # Layer 1: T scales with geometry
             delta_y = target_y - y0
             T = max(dt, 1.5 * abs(delta_y) / (vx * np.tan(max_heading_rad))) if abs(delta_y) > 1e-4 else dt
 
@@ -1226,20 +1247,29 @@ class UnifiedCoordinator:
                 if tau < 1.0:
                     y_ref     = a0 + a1 * tau + a2 * tau ** 2 + a3 * tau ** 3
                     y_dot_ref = (a1 + 2.0 * a2 * tau + 3.0 * a3 * tau ** 2) / T
-                    psi_ref   = y_dot_ref / vx
+                    psi_des   = y_dot_ref / vx
                 else:
                     y_ref   = target_y
-                    psi_ref = 0.0
-                ref[2 * k]     = y_ref
-                ref[2 * k + 1] = psi_ref
+                    psi_des = 0.0
+                # Layer 2: neuromuscular IIR
+                psi_exec = _na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2
+                _psi_km2 = _psi_km1
+                _psi_km1 = psi_exec
+                ref[2 * k]     = y_ref    # polynomial y unchanged (Option B)
+                ref[2 * k + 1] = psi_exec
         else:
             # APPROACH / GAP_SEARCH: human holds current lane, psi decays with T_lc
             for k in range(Np):
-                t = (k + 1) * dt
+                t       = (k + 1) * dt
+                psi_des = psi0 * np.exp(-t / max(T_lc, 1e-3))
+                # Layer 2: neuromuscular IIR
+                psi_exec = _na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2
+                _psi_km2 = _psi_km1
+                _psi_km1 = psi_exec
                 ref[2 * k]     = y0
-                ref[2 * k + 1] = psi0 * np.exp(-t / max(T_lc, 1e-3))
+                ref[2 * k + 1] = psi_exec
 
-        # ── GP ψ-space feedforward (all phases, per-step, non-cumulative) ────
+        # Layer 3: GP ψ-space feedforward — residual of G_d (Zhang & Sun 2024)
         if gp_lat_means is not None:
             for k in range(Np):
                 ref[2 * k]     += vx * gp_lat_means[k] * dt
@@ -1286,6 +1316,8 @@ class UnifiedCoordinator:
         self.locked_leader      = None
         self.locked_follower    = None
         self._merge_locked      = False
+        _psi_reset = float(self.ego.state.psi)
+        self._neuro_psi_state   = np.array([_psi_reset, _psi_reset])
         self.long_nash.reset()
         self.lat_nash.reset()
         for lst in self.data.values():
