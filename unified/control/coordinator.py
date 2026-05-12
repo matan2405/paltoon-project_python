@@ -38,13 +38,14 @@ from unified.config import (                                          # noqa: E4
     NASH_NP, NASH_NU,
     LONG_NASH_Q_POS, LONG_NASH_Q_VEL,
     LONG_NASH_R1, LONG_NASH_R2, LONG_NASH_S1, LONG_NASH_S2,
+    LONG_NASH_R2_START, LONG_NASH_R2_FOLLOW,
     LONG_NASH_U1_MIN, LONG_NASH_U1_MAX, LONG_NASH_U2_MIN, LONG_NASH_U2_MAX,
     LONG_NASH_DU1_MAX, LONG_NASH_DU2_MAX,
     LONG_NASH_V_MIN, LONG_NASH_V_MAX, LONG_NASH_GAP_MIN,
     LONG_NASH_LAMBDA_LEVELS,
     LAT_NASH_Q_Y, LAT_NASH_Q_PSI,
     LAT_NASH_Q_Y_TERMINAL_FAC, LAT_NASH_Q_PSI_TERMINAL_FAC,
-    LAT_NASH_R1, LAT_NASH_R2, LAT_NASH_S1, LAT_NASH_S2,
+    LAT_NASH_R1, LAT_NASH_R2, LAT_NASH_R2_START, LAT_NASH_R2_FOLLOW, LAT_NASH_S1, LAT_NASH_S2,
     AUTHORITY_GAP_ERROR_MAX, AUTHORITY_VEL_ERROR_MAX, FOLLOWING_GAP_ERROR_FACTOR,
     GAP_SEARCH_DURATION, LANE_CHANGE_MIN_TIME,
     DSF_SPEED_COEFF, DSF_SPEED_EXPONENT, DSF_SPEED_OFFSET, DSF_VEHICLE_MASS, DSF_EPSILON,
@@ -53,6 +54,8 @@ from unified.config import (                                          # noqa: E4
     LONG_AUTHORITY_LAMBDA_MIN, LONG_AUTHORITY_LAMBDA_MAX,
     LONG_AUTHORITY_FORCE_MIDPOINT, LONG_AUTHORITY_K_STEEPNESS,
     LONG_AUTHORITY_ALPHA_BASE, LONG_AUTHORITY_ALPHA_FAST,
+    LONG_AUTHORITY_ALPHA_FOLLOWING,
+    LONG_AUTHORITY_LAMBDA_MAX_FOLLOWING,
     LAT_AUTHORITY_LAMBDA_MIN, LAT_AUTHORITY_LAMBDA_MAX,
     LAT_AUTHORITY_FORCE_MIDPOINT, LAT_AUTHORITY_K_STEEPNESS,
     LAT_AUTHORITY_ALPHA_BASE, LAT_AUTHORITY_ALPHA_FAST,
@@ -60,6 +63,9 @@ from unified.config import (                                          # noqa: E4
     LAT_AUTHORITY_SIGMOID_M1, LAT_AUTHORITY_SIGMOID_M2,
     LONG_SAFETY_MIN_SAFE_DISTANCE, LONG_SAFETY_EMERGENCY_BRAKE_DIST,
     LONG_SAFETY_MAX_REPULSIVE_FORCE, LONG_SAFETY_FILTER_ALPHA,
+    LONG_SAFETY_BASE_RADIUS, LONG_SAFETY_OBSTACLE_MASS, LONG_SAFETY_INFLUENCE_FACTOR,
+    LONG_SAFETY_DRIVER_RISK, LONG_SAFETY_EPSILON, LONG_SAFETY_DISTANCE_DECAY,
+    LONG_SAFETY_FOLLOWING_SOFT_FACTOR,
     LAT_DSF_TS, LAT_DSF_TAU, LAT_DSF_A_MIN, LAT_DSF_G,
     LAT_DSF_K1, LAT_DSF_K2, LAT_DSF_DR,
     LAT_SAFETY_MAX_FORCE, LAT_SAFETY_FILTER_ALPHA,
@@ -251,7 +257,9 @@ class UnifiedCoordinator:
         weight_overrides : dict or None
             Override Nash cost weights. Keys (all optional):
               'long_Q_pos', 'long_Q_vel', 'long_R1', 'long_R2'
+              'long_R2_start', 'long_R2_follow'   ← R2 adaptive range endpoints (long)
               'lat_Q_y', 'lat_Q_psi', 'lat_R1', 'lat_R2'
+              'lat_R2_start',  'lat_R2_follow'    ← R2 adaptive range endpoints (lat)
         """
         self.ego         = ego
         self.driver_type = driver_type
@@ -263,6 +271,8 @@ class UnifiedCoordinator:
         self.locked_follower  = None  # set at APPROACH→MERGE transition
         self._merge_locked    = False
         self.phase       = MergePhase.APPROACH
+
+        _wo = weight_overrides or {}   # resolved early — used by R2 state init below
 
         dp = DRIVER_PARAMS.get(driver_type, DRIVER_PARAMS['normal'])
         self._tlc     = dp['tlc']              # lane-change duration [s]
@@ -283,6 +293,17 @@ class UnifiedCoordinator:
         # ── Authority smoothing state ─────────────────────────────────────────
         self._long_lambda = LONG_AUTHORITY_LAMBDA_MIN
         self._lat_lambda  = LAT_AUTHORITY_LAMBDA_MIN
+
+        # ── Adaptive R2 state (interpolated per-step with merge progress) ─────
+        # Endpoints can be overridden per-experiment via weight_overrides so that
+        # the R-weight sweep (B2) tests different effort scales without breaking
+        # the adaptive mechanism.  Defaults: config constants.
+        self._r2_long_start  = float(_wo.get('long_R2_start', LONG_NASH_R2_START))
+        self._r2_long_follow = float(_wo.get('long_R2_follow', LONG_NASH_R2_FOLLOW))
+        self._r2_lat_start   = float(_wo.get('lat_R2_start',  LAT_NASH_R2_START))
+        self._r2_lat_follow  = float(_wo.get('lat_R2_follow', LAT_NASH_R2_FOLLOW))
+        self._r2_long = self._r2_long_start
+        self._r2_lat  = self._r2_lat_start
 
         # ── Safety force filter state ─────────────────────────────────────────
         self._long_force_filt = 0.0
@@ -312,7 +333,6 @@ class UnifiedCoordinator:
 
         # ── Long Nash solver ──────────────────────────────────────────────────
         _gamma = NASH_RISK_GAMMA if (MA_IDM_ENABLED and noise_mode == 'gp') else 0.0
-        _wo = weight_overrides or {}
         long_params = LongNashParams(
             Np=NASH_NP, Nu=NASH_NU, dt=LONG_NASH_CONTROL_DT,
             Q_pos=_wo.get('long_Q_pos', LONG_NASH_Q_POS),
@@ -629,6 +649,7 @@ class UnifiedCoordinator:
             if (self._gap_search_start is not None and
                     sim_time - self._gap_search_start >= GAP_SEARCH_DURATION):
                 self.phase = MergePhase.MERGE
+                # R2 is now managed adaptively in _long_authority / _lat_authority per-step
                 # Rebuild lateral Nash matrices once at cruise speed before first MERGE solve
                 self._rebuild_lat_nash_once()
                 # Reset neuromuscular IIR to current heading (clean entry into merge)
@@ -660,6 +681,7 @@ class UnifiedCoordinator:
                     self._phase_hold_start = sim_time
                 elif sim_time - self._phase_hold_start >= PHASE_TRANSITION_HOLD_TIME:
                     self.phase = MergePhase.FOLLOWING
+                    # R2 is now managed adaptively in _long_authority per-step
                     self._last_delta_lat = 0.0
                     print(f"[Coordinator] Phase: MERGE -> FOLLOWING at t={sim_time:.1f}s")
             else:
@@ -750,35 +772,48 @@ class UnifiedCoordinator:
     def _long_leader_force_raw(self, leader) -> float:
         """Raw repulsive/attractive force from the leader [N].
 
-        Force > 0 ↔ leader too close (repulsive); Force < 0 ↔ gap too large (attractive).
+        Force > 0 ↔ leader too close (repulsive, Li et al. 2019 elliptic DSF).
+        Force < 0 ↔ gap too large (attractive, linear — not in split module but
+                     needed to pull ego toward the platoon when falling behind).
         """
-        ego = self.ego
+        ego     = self.ego
         gap     = leader.state.x - ego.state.x - VEHICLE_LENGTH
         des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
 
+        # Hard safety zones — linear cap (same as split module apply_hard_constraint)
         if gap < LONG_SAFETY_EMERGENCY_BRAKE_DIST:
             return LONG_SAFETY_MAX_REPULSIVE_FORCE
         elif gap < LONG_SAFETY_MIN_SAFE_DISTANCE:
             t = 1.0 - (gap - LONG_SAFETY_EMERGENCY_BRAKE_DIST) / max(
                 LONG_SAFETY_MIN_SAFE_DISTANCE - LONG_SAFETY_EMERGENCY_BRAKE_DIST, 1e-3)
             return t * LONG_SAFETY_MAX_REPULSIVE_FORCE
-        else:
-            gap_error = des_gap - gap
+
+        gap_error = des_gap - gap          # >0 → too close, <0 → too far
+        v_rel     = ego.state.vx - leader.state.vx  # >0 when closing
+
+        if gap_error <= 0.0:
+            # Gap >= desired: linear attractive pull (bidirectional, capped)
             return float(np.clip(
                 gap_error / max(des_gap, 1.0) * LONG_SAFETY_MAX_REPULSIVE_FORCE,
                 -0.25 * LONG_SAFETY_MAX_REPULSIVE_FORCE,
-                LONG_SAFETY_MAX_REPULSIVE_FORCE,
+                0.0,
             ))
+        # Gap < desired: Li et al. (2019) elliptic DSF repulsive force
+        r_ell     = gap_error / (LONG_SAFETY_BASE_RADIUS + LONG_SAFETY_EPSILON)
+        potential = (LONG_SAFETY_OBSTACLE_MASS * LONG_SAFETY_INFLUENCE_FACTOR) / (r_ell + LONG_SAFETY_EPSILON) ** 2
+        w_dist    = np.exp(-gap_error / LONG_SAFETY_DISTANCE_DECAY)
+        w_vel     = np.exp(max(0.0, v_rel) / 5.0)
+        w_risk    = 1.0 + LONG_SAFETY_DRIVER_RISK
+        return float(min(potential * w_dist * w_vel * w_risk, LONG_SAFETY_MAX_REPULSIVE_FORCE))
 
     def _long_follower_force_raw(self, follower) -> float:
         """Raw repulsive force from the follower [N].
 
         Force >= 0: follower too close → ego must accelerate (push-forward risk).
-        No attractive component — we do not penalise the ego for being too far ahead.
-        Mirrors the split-module _compute_force_to_vehicle(is_leader=False) logic
-        (EllipseLongitudinalSafetyField, longitudinal_safety_field.py line 395–399).
+        No attractive component — mirrors split-module _compute_force_to_vehicle(is_leader=False).
+        Uses Li et al. (2019) elliptic DSF formula for the normal zone.
         """
-        ego = self.ego
+        ego      = self.ego
         gap_rear = ego.state.x - follower.state.x - VEHICLE_LENGTH
         des_gap  = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
 
@@ -788,9 +823,18 @@ class UnifiedCoordinator:
             t = 1.0 - (gap_rear - LONG_SAFETY_EMERGENCY_BRAKE_DIST) / max(
                 LONG_SAFETY_MIN_SAFE_DISTANCE - LONG_SAFETY_EMERGENCY_BRAKE_DIST, 1e-3)
             return t * LONG_SAFETY_MAX_REPULSIVE_FORCE
-        else:
-            gap_error = des_gap - gap_rear   # positive when follower too close
-            return float(max(0.0, gap_error / max(des_gap, 1.0) * LONG_SAFETY_MAX_REPULSIVE_FORCE))
+
+        gap_error = des_gap - gap_rear   # >0 when follower too close
+        if gap_error <= 0.0:
+            return 0.0  # follower is safe distance away — no repulsive force
+
+        v_rel     = follower.state.vx - ego.state.vx  # >0 when follower closing
+        r_ell     = gap_error / (LONG_SAFETY_BASE_RADIUS + LONG_SAFETY_EPSILON)
+        potential = (LONG_SAFETY_OBSTACLE_MASS * LONG_SAFETY_INFLUENCE_FACTOR) / (r_ell + LONG_SAFETY_EPSILON) ** 2
+        w_dist    = np.exp(-gap_error / LONG_SAFETY_DISTANCE_DECAY)
+        w_vel     = np.exp(max(0.0, v_rel) / 5.0)
+        w_risk    = 1.0 + LONG_SAFETY_DRIVER_RISK
+        return float(min(potential * w_dist * w_vel * w_risk, LONG_SAFETY_MAX_REPULSIVE_FORCE))
 
     def _long_safety_force(self, leader, follower=None) -> float:
         """Compute total longitudinal safety field force [N].
@@ -801,11 +845,22 @@ class UnifiedCoordinator:
 
         F_leader > 0 ↔ leader too close (brake); < 0 ↔ gap too large (attract).
         F_follower ≥ 0 ↔ follower too close (accelerate).
+        In FOLLOWING phase, force is scaled quadratically for small gap errors
+        (mirrors split-module _apply_soft_transition, line 293–314).
         Combined force is EMA low-pass filtered to reduce noise.
         """
         F_leader   = self._long_leader_force_raw(leader)   if leader   is not None else 0.0
         F_follower = self._long_follower_force_raw(follower) if follower is not None else 0.0
         raw = F_leader + F_follower
+
+        # Quadratic soft transition in FOLLOWING — prevents force saturation at small errors
+        if self.phase == MergePhase.FOLLOWING and leader is not None:
+            gap     = leader.state.x - self.ego.state.x - VEHICLE_LENGTH
+            des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * self.ego.state.vx
+            threshold = LONG_SAFETY_FOLLOWING_SOFT_FACTOR * max(des_gap, 1.0)
+            gap_err   = abs(des_gap - gap)
+            scale     = min(1.0, (gap_err / threshold) ** 2) if threshold > 0 else 1.0
+            raw *= scale
 
         self._long_force_filt = (LONG_SAFETY_FILTER_ALPHA * raw
                                  + (1 - LONG_SAFETY_FILTER_ALPHA) * self._long_force_filt)
@@ -843,12 +898,30 @@ class UnifiedCoordinator:
         gamma2  = 1.0 - gamma1
         lam_gap = gamma2 / max(gamma1, 1e-6)
 
+        # --- 2b. Adaptive R2: interpolate with merge-progress signal l_n ---
+        # l_n≈0 → far from platoon (large errors) → R2=R2_START (system leads).
+        # l_n≈1 → integrated (small errors)        → R2=R2_FOLLOW (human leads).
+        # Endpoints are instance vars so experiments can scale them via weight_overrides.
+        _r2_target    = self._r2_long_start + (self._r2_long_follow - self._r2_long_start) * l_n
+        _r2_new       = 0.05 * _r2_target + 0.95 * self._r2_long
+        if abs(_r2_new - self._r2_long) > 50.0:   # skip rebuild if change < 50 N·s²/m
+            self._r2_long = _r2_new
+            self.long_nash.update_r2(self._r2_long)
+
         # --- 3. Fusion: max urgency ---
         lam_raw = min(max(lam_safety, lam_gap), LONG_AUTHORITY_LAMBDA_MAX)
 
+        # --- 3b. FOLLOWING phase: cap λ so human always retains ≥33% tracking weight ---
+        if self.phase == MergePhase.FOLLOWING:
+            lam_raw = min(lam_raw, LONG_AUTHORITY_LAMBDA_MAX_FOLLOWING)
+
         # --- 4. Adaptive EMA ---
+        # FOLLOWING uses a faster time constant (~3 s) so λ tracks small perturbations
+        # without the slow APPROACH ramp-up delay.
         combined_error = max(abs_gap_err, abs_vel_err)
-        if combined_error > 5.0:
+        if self.phase == MergePhase.FOLLOWING:
+            alpha = LONG_AUTHORITY_ALPHA_FOLLOWING
+        elif combined_error > 5.0:
             alpha = LONG_AUTHORITY_ALPHA_FAST
         elif combined_error > 2.0:
             alpha = LONG_AUTHORITY_ALPHA_BASE + (LONG_AUTHORITY_ALPHA_FAST - LONG_AUTHORITY_ALPHA_BASE) * (
@@ -979,6 +1052,16 @@ class UnifiedCoordinator:
         l_n     = (l_o_max - abs(y_error)) / l_o_max
         l_n     = float(np.clip(l_n, 0.0, 1.0))
 
+        # --- 2b. Adaptive R2: interpolate with lane-change progress l_n ---
+        # l_n≈0 → far from target lane → R2=R2_START (matched effort, system leads via high λ).
+        # l_n≈1 → lane-centred         → R2=R2_FOLLOW (human leads laterally).
+        # Endpoints are instance vars so experiments can scale them via weight_overrides.
+        _r2_lat_target = self._r2_lat_start + (self._r2_lat_follow - self._r2_lat_start) * l_n
+        _r2_lat_new    = 0.05 * _r2_lat_target + 0.95 * self._r2_lat
+        if abs(_r2_lat_new - self._r2_lat) > 200.0:   # skip rebuild if change < 200 N·s²/m
+            self._r2_lat = _r2_lat_new
+            self.lat_nash.update_r2(self._r2_lat)
+
         m1, m2  = LAT_AUTHORITY_SIGMOID_M1, LAT_AUTHORITY_SIGMOID_M2
         gamma1  = 1.0 / (1.0 + np.exp(m1 * (-l_n + m2)))
         gamma2  = 1.0 - gamma1
@@ -1092,10 +1175,17 @@ class UnifiedCoordinator:
         return ref
 
     def _long_hum_ref(self, leader, Np: int, dt: float) -> np.ndarray:
-        """R2: Human — IDM free-road + interaction prediction (mirrors HumanDriver).
+        """R2: Human — phase-aware IDM prediction (mirrors split-module HumanDriver).
 
-        Free-road: a_free = a_max * (1 - (v/v0)^delta)
-        With leader: full IDM using gap, relative velocity, plan_time_headway, plan_decel
+        Three-mode behaviour matching the split module's ignore_platoon_before_merge logic:
+          APPROACH / GAP_SEARCH : free-road only (leader suppressed) — human accelerates
+                                  toward target speed; gap is still large so no collision
+                                  risk; u2 > 0 → cooperative with system u1 > 0.
+          MERGE                 : IDM with leader, plan_T=1.0 s — gap-aware but less
+                                  conservative than T=1.5; smaller IDM-Rajamani conflict.
+          FOLLOWING             : IDM with leader, plan_T from driver profile (1.5 s) —
+                                  standard shared control.
+
         Returns (Np*2,) flattened [x0,vx0, x1,vx1, ...].
         """
         dp = DRIVER_PARAMS.get(self.driver_type, DRIVER_PARAMS['normal'])
@@ -1104,10 +1194,15 @@ class UnifiedCoordinator:
         a_max      = MOBIL_IDM_A_MAX         # [m/s²]
         v0         = PLATOON_TARGET_VELOCITY + dp.get('velocity_offset', 0.0)  # desired speed
         delta_idm  = MOBIL_IDM_DELTA         # acceleration exponent
-        plan_T     = dp.get('plan_time_headway', 2.0)   # planning time headway [s]
         plan_b     = dp.get('plan_decel', 4.0)          # planning deceleration [m/s²]
         s0         = MOBIL_IDM_S0            # minimum spacing [m]
         a_min      = MAX_DECELERATION        # maximum deceleration [m/s²]
+
+        # Phase-dependent time headway
+        if self.phase == MergePhase.MERGE:
+            plan_T = 1.0   # assertive but gap-aware; T=1.0 < T=1.5 → less IDM-Rajamani conflict
+        else:
+            plan_T = dp.get('plan_time_headway', 2.0)   # FOLLOWING: driver-profile default (1.5 s)
 
         x  = float(self.ego.state.x)
         vx = float(self.ego.state.vx)
@@ -1115,6 +1210,12 @@ class UnifiedCoordinator:
         # Simulate leader at constant velocity (planning assumption)
         lx = float(leader.state.x) if leader is not None else None
         lv = float(getattr(leader, 'v', getattr(leader.state, 'vx', PLATOON_TARGET_VELOCITY))) if leader is not None else 0.0
+
+        # APPROACH / GAP_SEARCH: suppress leader so human uses free-road only.
+        # Mirrors split module ignore_platoon_before_merge=True: human accelerates
+        # toward v0 → u2 > 0, cooperative with u1. Safe because gap is still large.
+        if self.phase in (MergePhase.APPROACH, MergePhase.GAP_SEARCH):
+            lx = None
 
         ref = np.empty(Np * 2)
         gp_means = self._gp.predict_mean(Np, dt_query=LONG_NASH_CONTROL_DT) if MA_IDM_ENABLED else None

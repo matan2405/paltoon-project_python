@@ -179,34 +179,46 @@ def run_experiment_mc(n_trials: int = 20, driver_type: str = 'normal'):
     return mc
 
 
-def run_experiment_q_sweep(driver_type: str = 'normal'):
+def run_experiment_q_sweep(driver_type: str = 'normal',
+                           noise_mode: str = 'gp', n_avg: int = 5):
     """Proposal B1: Q-weight sweep (both longitudinal and lateral)."""
     print(f"\n{'=' * 65}")
-    print(f"  Experiment B1: Q-Weight Sweep (driver={driver_type})")
+    print(f"  Experiment B1: Q-Weight Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
     print(f"{'=' * 65}")
-    exp = QWeightSweepExperiment(driver_type=driver_type)
+    exp = QWeightSweepExperiment(driver_type=driver_type,
+                                 noise_mode=noise_mode,
+                                 n_avg=n_avg, seed_offset=100)
     exp.run(verbose=True)
     plot_all_experiments(q_sweep=exp, show=True, save=True)
     return exp
 
 
-def run_experiment_r_sweep(driver_type: str = 'normal'):
+def run_experiment_r_sweep(driver_type: str = 'normal',
+                           noise_mode: str = 'gp', n_avg: int = 5):
     """Proposal B2: R-weight (effort) sweep (both longitudinal and lateral)."""
     print(f"\n{'=' * 65}")
-    print(f"  Experiment B2: R-Weight Sweep (driver={driver_type})")
+    print(f"  Experiment B2: R-Weight Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
     print(f"{'=' * 65}")
-    exp = RWeightSweepExperiment(driver_type=driver_type)
+    exp = RWeightSweepExperiment(driver_type=driver_type,
+                                 noise_mode=noise_mode,
+                                 n_avg=n_avg, seed_offset=200)
     exp.run(verbose=True)
     plot_all_experiments(r_sweep=exp, show=True, save=True)
     return exp
 
 
-def run_experiment_lambda_sweep(driver_type: str = 'normal'):
+def run_experiment_lambda_sweep(driver_type: str = 'normal',
+                                noise_mode: str = 'gp', n_avg: int = 5):
     """Proposal B3: Fixed-λ authority sweep (both longitudinal and lateral)."""
     print(f"\n{'=' * 65}")
-    print(f"  Experiment B3: Fixed-λ Sweep (driver={driver_type})")
+    print(f"  Experiment B3: Fixed-λ Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
     print(f"{'=' * 65}")
-    exp = LambdaSweepExperiment(driver_type=driver_type)
+    exp = LambdaSweepExperiment(driver_type=driver_type,
+                                noise_mode=noise_mode,
+                                n_avg=n_avg, seed_offset=300)
     exp.run(verbose=True)
     exp.print_summary()
     plot_all_experiments(lam_sweep=exp, show=True, save=True)

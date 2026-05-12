@@ -346,13 +346,19 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         axes[0, 0].legend(fontsize=7)
         axes[0, 0].grid(True, alpha=0.3)
 
-        axes[0, 1].bar(range(n), gap_vals, color=colors, edgecolor='k', linewidth=0.5)
+        gap_stds = [s.get('gap_rms_std', 0.0) for s in long_s]
+        u_stds   = [s.get('u_long_rms_std', 0.0) for s in long_s]
+        axes[0, 1].bar(range(n), gap_vals,
+                       yerr=gap_stds if any(v > 0 for v in gap_stds) else None,
+                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
         axes[0, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_pos', ylabel='Gap error RMS [m]',
                        title='Long: gap RMS vs Q_pos')
         axes[0, 1].grid(True, alpha=0.3, axis='y')
 
-        axes[0, 2].bar(range(n), u_vals, color=colors, edgecolor='k', linewidth=0.5)
+        axes[0, 2].bar(range(n), u_vals,
+                       yerr=u_stds if any(v > 0 for v in u_stds) else None,
+                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
         axes[0, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_pos', ylabel='u_long RMS [m/s²]',
                        title='Long: u_long RMS vs Q_pos')
@@ -380,15 +386,22 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         axes[1, 0].grid(True, alpha=0.3)
 
         # [1,1] FOLLOWING y_rms bar — flat (≈0) for all Q_y
-        axes[1, 1].bar(range(n), y_vals, color=colors, edgecolor='k', linewidth=0.5)
+        y_stds = [s.get('y_rms_std', 0.0) for s in lat_s]
+        m_stds = [s.get('merge_delta_rms_std', 0.0) for s in lat_s]
+        axes[1, 1].bar(range(n), y_vals,
+                       yerr=y_stds if any(v > 0 for v in y_stds) else None,
+                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
         axes[1, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_y', ylabel='y error RMS [m]',
                        title='Lat FOLLOWING: y RMS vs Q_y')
         axes[1, 1].grid(True, alpha=0.3, axis='y')
 
         # [1,2] MERGE delta_rms bar — NEW: Q_y selection criterion
-        m_plot = [v if np.isfinite(v) else 0.0 for v in m_vals]
-        axes[1, 2].bar(range(n), m_plot, color=colors, edgecolor='k', linewidth=0.5)
+        m_plot      = [v if np.isfinite(v) else 0.0 for v in m_vals]
+        m_stds_plot = [m_stds[i] if np.isfinite(m_vals[i]) else 0.0 for i in range(n)]
+        axes[1, 2].bar(range(n), m_plot,
+                       yerr=m_stds_plot if any(v > 0 for v in m_stds_plot) else None,
+                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
         axes[1, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_y', ylabel='MERGE δ RMS [rad]',
                        title='Lat MERGE: δ_rms vs Q_y\n(lane-change effort)')
@@ -439,7 +452,12 @@ def plot_r_weight_sweep(r_results: Dict[str, list],
     def _metric_line(ax, summary, ratio_key, metric_key, xlabel, ylabel, base_idx=None):
         ratios  = [s[ratio_key]  for s in summary]
         metrics = [s[metric_key] for s in summary]
+        stds    = [s.get(metric_key + '_std', 0.0) for s in summary]
         ax.plot(ratios, metrics, 'o-', color='#2ca02c', linewidth=1.5, markersize=6)
+        if any(v > 0 for v in stds):
+            lo = [m - s for m, s in zip(metrics, stds)]
+            hi = [m + s for m, s in zip(metrics, stds)]
+            ax.fill_between(ratios, lo, hi, color='#2ca02c', alpha=0.15)
         if base_idx is not None:
             ax.axvline(ratios[base_idx], color='gray', linewidth=0.8, linestyle='--',
                        label='default')
@@ -481,19 +499,23 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
                       lam_summary: Dict[str, list],
                       title: str = '',
                       show: bool = True,
-                      save: bool = True):
+                      save: bool = True,
+                      dynamic_ref: Optional[dict] = None):
     """
-    2 × 3 figure:
-      Row 0 (long): α vs λ  | gap_rms vs λ         | u1/u2 RMS vs α
-      Row 1 (lat):  α vs λ  | y_rms FOLLOWING vs λ  | u1/u2 RMS vs α
-                               (twin-axis: y_rms left, δ_rms MERGE right)
+    2 × 5 figure:
+      Row 0 (long): α vs λ | gap_rms±std vs λ | u1/u2 signed-mean FOLLOWING | GP uncertainty bar | λ histogram (dynamic ref)
+      Row 1 (lat):  α vs λ | duration & δ vs λ | y_rms±std vs λ (success)   | y_rms±std (success) | λ histogram (dynamic ref)
+
+    dynamic_ref: data dict from a single simulation run with Safety Field active (no fixed λ).
+      If provided, panels [0,4] and [1,4] show the actual λ distribution during FOLLOWING,
+      which is what the fixed-λ ablation sweep compares against.
 
     α = 1/(1+λ) is the HUMAN tracking weight in J2 = α·Q1:
       small λ → large α → human dominant (tracks r2 aggressively) → fast/aggressive merge
       large λ → small α → system dominant (human withdraws)       → slow/gentle merge
     """
     apply_ieee_style()
-    fig, axes = plt.subplots(2, 3, figsize=(13, 7))
+    fig, axes = plt.subplots(2, 5, figsize=(21, 7))
     fig.suptitle(f'Fixed-λ Authority Sweep{" — " + title if title else ""}',
                  fontsize=11, fontweight='bold')
 
@@ -510,33 +532,73 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
-    def _plot_effort_col(ax, alphas, u1s, u2s, xlabel='α (human tracking weight)'):
-        ax.plot(alphas, u1s, 'o-', color='#1f77b4', linewidth=1.4,
-                markersize=6, label='u1 (system)')
-        ax.plot(alphas, u2s, 's-', color='#ff7f0e', linewidth=1.4,
-                markersize=6, label='u2 (human)')
+    def _plot_effort_col(ax, alphas, u1s, u2s, xlabel='α (human tracking weight)',
+                         u1_stds=None, u2_stds=None):
+        yerr1 = u1_stds if (u1_stds is not None and any(v > 0 for v in u1_stds)) else None
+        yerr2 = u2_stds if (u2_stds is not None and any(v > 0 for v in u2_stds)) else None
+        ax.errorbar(alphas, u1s, yerr=yerr1, fmt='o-', color='#1f77b4',
+                    linewidth=1.4, markersize=6, capsize=4, label='u1 (system)')
+        ax.errorbar(alphas, u2s, yerr=yerr2, fmt='s-', color='#ff7f0e',
+                    linewidth=1.4, markersize=6, capsize=4, label='u2 (human)')
         ax.set(xlabel=xlabel, ylabel='RMS', title='Control effort vs α')
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
     # ── Row 0: Longitudinal ───────────────────────────────────────────────────
     if lam_summary['long']:
-        s     = lam_summary['long']
-        lams  = [r['lambda']  for r in s]
+        s      = lam_summary['long']
+        lams   = [r['lambda'] for r in s]
         alphas = [r['alpha']  for r in s]
 
         _plot_alpha_col(axes[0, 0], lams, alphas)
 
-        metrics = [r['gap_rms'] for r in s]
-        axes[0, 1].semilogx(lams, metrics, 'o-', color='#2ca02c',
-                             linewidth=1.5, markersize=6)
-        axes[0, 1].set(xlabel='λ (log)', ylabel='Gap error RMS [m]',
-                       title='Long: gap error vs λ')
-        axes[0, 1].grid(True, alpha=0.3)
+        metrics  = [r['gap_rms']              for r in s]
+        met_stds = [r.get('gap_rms_std', 0.0) for r in s]
+        vel_mets = [r.get('vel_rms', float('nan')) for r in s]
+        vel_stds = [r.get('vel_rms_std', 0.0)      for r in s]
+
+        ax_g = axes[0, 1]
+        ax_v = ax_g.twinx()
+
+        ax_g.semilogx(lams, metrics, 'o-', color='#2ca02c',
+                      linewidth=1.5, markersize=6, label='gap RMS')
+        if any(v > 0 for v in met_stds):
+            lo = [m - d for m, d in zip(metrics, met_stds)]
+            hi = [m + d for m, d in zip(metrics, met_stds)]
+            ax_g.fill_between(lams, lo, hi, color='#2ca02c', alpha=0.15)
+
+        if any(np.isfinite(v) for v in vel_mets):
+            ax_v.semilogx(lams, vel_mets, 's--', color='#ff7f0e',
+                          linewidth=1.4, markersize=6, label='vel RMS')
+            if any(v > 0 for v in vel_stds):
+                lo_v = [m - d for m, d in zip(vel_mets, vel_stds)]
+                hi_v = [m + d for m, d in zip(vel_mets, vel_stds)]
+                ax_v.fill_between(lams, lo_v, hi_v, color='#ff7f0e', alpha=0.12)
+            ax_v.set_ylabel('Vel error RMS [m/s]', color='#ff7f0e')
+            ax_v.tick_params(axis='y', labelcolor='#ff7f0e')
+
+        ax_g.set(xlabel='λ (log)', ylabel='Gap error RMS [m]',
+                 title='Long: gap & vel error vs λ\nhigh fixed-λ → worse tracking → adaptive needed')
+        ax_g.grid(True, alpha=0.3)
+        h1, l1 = ax_g.get_legend_handles_labels()
+        h2, l2 = ax_v.get_legend_handles_labels()
+        ax_g.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper left')
 
         _plot_effort_col(axes[0, 2], alphas,
                          [r['u1_rms'] for r in s],
-                         [r['u2_rms'] for r in s])
+                         [r['u2_rms'] for r in s],
+                         u1_stds=[r.get('u1_rms_std', 0.0) for r in s],
+                         u2_stds=[r.get('u2_rms_std', 0.0) for r in s])
+
+        # [0,3] GP uncertainty bar: gap_rms_std per λ
+        x_pos = np.arange(len(lams))
+        axes[0, 3].bar(x_pos, met_stds, color='#2ca02c', alpha=0.7)
+        axes[0, 3].set_xticks(x_pos)
+        axes[0, 3].set_xticklabels([f'{l:.1f}' for l in lams],
+                                    rotation=45, fontsize=7)
+        axes[0, 3].set(xlabel='λ', ylabel='gap_rms std [m]',
+                       title='Long: GP uncertainty vs λ\n(std over n_avg trials)')
+        axes[0, 3].grid(True, alpha=0.3, axis='y')
 
     # ── Row 1: Lateral — MERGE metrics ───────────────────────────────────────
     if lam_summary['lat']:
@@ -575,10 +637,91 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
         h2, l2 = ax_dr.get_legend_handles_labels()
         ax_d.legend(h1 + h2, l1 + l2, fontsize=7, loc='upper right')
 
-        # [1,2] control effort vs α
-        _plot_effort_col(axes[1, 2], alphas,
-                         [r['u1_rms'] for r in s],
-                         [r['u2_rms'] for r in s])
+        # [1,2] signed mean control during FOLLOWING — reveals tug-of-war
+        # (RMS is uninformative: |u1|≈|u2| by Nash symmetry even at different λ)
+        u1_fol = [r.get('u1_mean_fol', float('nan')) for r in s]
+        u2_fol = [r.get('u2_mean_fol', float('nan')) for r in s]
+        if any(np.isfinite(v) for v in u1_fol):
+            axes[1, 2].plot(alphas, u1_fol, 'o-', color='#1f77b4', linewidth=1.4,
+                            markersize=6, label='u1 mean (system)')
+            axes[1, 2].plot(alphas, u2_fol, 's-', color='#ff7f0e', linewidth=1.4,
+                            markersize=6, label='u2 mean (human)')
+            axes[1, 2].axhline(0, color='k', linewidth=0.8, linestyle='--')
+            axes[1, 2].set(xlabel='α (human tracking weight)',
+                           ylabel='Mean δ FOLLOWING [rad]',
+                           title='Lat FOLLOWING: signed Nash inputs vs α\n'
+                                 'u1<0: system resists, u2>0: human pushes bias')
+            axes[1, 2].legend(fontsize=7)
+            axes[1, 2].grid(True, alpha=0.3)
+        else:
+            _plot_effort_col(axes[1, 2], alphas,
+                             [r['u1_rms'] for r in s],
+                             [r['u2_rms'] for r in s],
+                             u1_stds=[r.get('u1_rms_std', 0.0) for r in s],
+                             u2_stds=[r.get('u2_rms_std', 0.0) for r in s])
+
+        # [1,3] y_rms ± std vs λ for successful merges (merge_duration < 50s)
+        ok_s = [r for r in s if r.get('merge_duration', float('inf')) < 50.0]
+        if ok_s:
+            ok_lams = [r['lambda']              for r in ok_s]
+            ok_yrms = [r['y_rms']               for r in ok_s]
+            ok_stds = [r.get('y_rms_std', 0.0)  for r in ok_s]
+            axes[1, 3].semilogx(ok_lams, ok_yrms, 'o-', color='#9467bd',
+                                 linewidth=1.5, markersize=6, label='y_rms (FOLLOWING)')
+            if any(v > 0 for v in ok_stds):
+                lo = [m - d for m, d in zip(ok_yrms, ok_stds)]
+                hi = [m + d for m, d in zip(ok_yrms, ok_stds)]
+                axes[1, 3].fill_between(ok_lams, lo, hi, color='#9467bd', alpha=0.2,
+                                         label='±1σ GP')
+            axes[1, 3].set(xlabel='λ (log)', ylabel='y error RMS [m]',
+                           title='Lat: y_rms ±σ vs λ\n(successful merges, dur < 50s)')
+            axes[1, 3].legend(fontsize=7)
+            axes[1, 3].grid(True, alpha=0.3)
+        else:
+            axes[1, 3].text(0.5, 0.5, 'No successful merges\n(all dur ≥ 50s)',
+                             ha='center', va='center', fontsize=9, color='#d62728',
+                             transform=axes[1, 3].transAxes)
+            axes[1, 3].set_title('Lat: y_rms vs λ\n(no successful merges)')
+
+    # ── [0,4] & [1,4]: Safety Field λ distribution (dynamic reference) ────────
+    # Shows what the Safety Field actually produces — the ground truth that
+    # the fixed-λ ablation sweep compares against.
+    def _draw_lambda_hist(ax, lam_arr, phase_list, key_label, colour, lam_fixed_vals):
+        """Draw histogram of λ values during FOLLOWING + vertical markers for fixed-λ levels."""
+        mask = np.array([p == 'FOLLOWING' for p in phase_list], dtype=bool)
+        lam_fol = lam_arr[mask & np.isfinite(lam_arr)]
+        if len(lam_fol) == 0:
+            ax.text(0.5, 0.5, 'No FOLLOWING data', ha='center', va='center',
+                    transform=ax.transAxes, fontsize=9, color='gray')
+            ax.set_title(f'{key_label}: λ in FOLLOWING\n(dynamic Safety Field)')
+            return
+        ax.hist(lam_fol, bins=30, color=colour, alpha=0.75, density=True)
+        med = float(np.median(lam_fol))
+        ax.axvline(med, color='k', linewidth=1.2, linestyle='--',
+                   label=f'median = {med:.3f}')
+        # vertical tick for each fixed-λ level tested in the sweep
+        for lv in lam_fixed_vals:
+            ax.axvline(lv, color='#d62728', linewidth=0.7, linestyle=':')
+        ax.set(xlabel=f'λ_{key_label}', ylabel='Density',
+               title=f'{key_label}: Safety Field λ in FOLLOWING\n'
+                     f'(red dotted = fixed-λ ablation levels)')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3, axis='y')
+
+    if dynamic_ref is not None:
+        long_lam = np.asarray(dynamic_ref.get('long_lambda', []), dtype=float)
+        lat_lam  = np.asarray(dynamic_ref.get('lat_lambda',  []), dtype=float)
+        phase    = dynamic_ref.get('phase', [])
+        long_levels = [r['lambda'] for r in lam_summary.get('long', [])]
+        lat_levels  = [r['lambda'] for r in lam_summary.get('lat',  [])]
+        _draw_lambda_hist(axes[0, 4], long_lam, phase, 'long', '#2ca02c', long_levels)
+        _draw_lambda_hist(axes[1, 4], lat_lam,  phase, 'lat',  '#9467bd', lat_levels)
+    else:
+        for ax in (axes[0, 4], axes[1, 4]):
+            ax.text(0.5, 0.5, 'No dynamic reference\n(pass dynamic_ref=)',
+                    ha='center', va='center', transform=ax.transAxes,
+                    fontsize=9, color='gray')
+            ax.set_title('Safety Field λ distribution\n(not available)')
 
     fig.tight_layout()
     _save_fig(fig, 'experiment_lambda_sweep.png', save)
@@ -603,4 +746,5 @@ def plot_all_experiments(mc=None, q_sweep=None, r_sweep=None, lam_sweep=None,
     if r_sweep is not None:
         plot_r_weight_sweep(r_sweep.results, r_sweep.summary, show=show, save=save)
     if lam_sweep is not None:
-        plot_lambda_sweep(lam_sweep.results, lam_sweep.summary, show=show, save=save)
+        plot_lambda_sweep(lam_sweep.results, lam_sweep.summary, show=show, save=save,
+                          dynamic_ref=getattr(lam_sweep, 'dynamic_ref', None))

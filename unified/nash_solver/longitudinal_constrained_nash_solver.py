@@ -758,6 +758,16 @@ DMPC NASH SOLVER (IBR) - CONSTRAINT SUMMARY
             'formulation': 'DMPC IBR (Li et al. 2019)',
         }
 
+    def update_r2(self, new_r2: float) -> None:
+        """Switch Player 2 control-effort weight and rebuild DMPC problems.
+
+        Called at phase transitions (MERGE <-> FOLLOWING) so the solver
+        adapts system/human authority without restarting the simulation.
+        """
+        self.R2_eff = float(new_r2)
+        self.params.R2 = float(new_r2)
+        self._build_dmpc_problems()
+
     def reset(self):
         """Reset solver state."""
         self.u1_prev = 0.0

@@ -38,9 +38,11 @@ sys.path.insert(0, _REPO_ROOT)
 
 from unified.config import (
     LONG_NASH_Q_POS, LONG_NASH_Q_VEL,
-    LONG_NASH_R1, LONG_NASH_R2,
+    LONG_NASH_R1,
+    LONG_NASH_R2_START, LONG_NASH_R2_FOLLOW,
     LAT_NASH_Q_Y, LAT_NASH_Q_PSI,
-    LAT_NASH_R1, LAT_NASH_R2,
+    LAT_NASH_R1,
+    LAT_NASH_R2_START, LAT_NASH_R2_FOLLOW,
     LONG_NASH_LAMBDA_LEVELS, LAT_NASH_LAMBDA_LEVELS,
     RESULTS_DIR,
 )
@@ -84,6 +86,30 @@ def _gap_error_rms(data: dict) -> float:
     return float(np.sqrt(np.mean((gap[mask] - des[mask]) ** 2)))
 
 
+def _vel_error_rms(data: dict) -> float:
+    """RMS of (ego_vx - leader_vx) during FOLLOWING phase only."""
+    vx         = np.asarray(data.get('ego_vx', []), dtype=float)
+    leader_idx = np.asarray(data.get('ego_leader_idx', []), dtype=int)
+    platoon_vx = data.get('platoon_vx', [])
+    phase      = data.get('phase', [])
+    mask = np.array([p == 'FOLLOWING' for p in phase], dtype=bool)
+    if mask.sum() < 2:
+        mask = np.ones(len(vx), dtype=bool)
+    if not platoon_vx:
+        return float('nan')
+    n = len(vx)
+    pvx_arr = [np.asarray(pv) for pv in platoon_vx]
+    leader_v = np.full(n, float('nan'))
+    for t in range(min(n, len(leader_idx))):
+        idx = int(leader_idx[t])
+        if 0 <= idx < len(pvx_arr) and t < len(pvx_arr[idx]):
+            leader_v[t] = pvx_arr[idx][t]
+    mask &= np.isfinite(vx) & np.isfinite(leader_v)
+    if mask.sum() < 2:
+        return float('nan')
+    return float(np.sqrt(np.mean((vx[mask] - leader_v[mask]) ** 2)))
+
+
 def _y_error_rms(data: dict, target_y: float = 0.0) -> float:
     """RMS of lateral position error during FOLLOWING phase only.
 
@@ -109,6 +135,24 @@ def _control_effort_rms(data: dict, key: str) -> float:
     if len(u) < 2:
         return float('nan')
     return float(np.sqrt(np.mean(u ** 2)))
+
+
+def _control_effort_mean_following(data: dict, key: str) -> float:
+    """Mean (signed) of a control signal during FOLLOWING phase only.
+
+    For lateral Nash u1/u2 this reveals the tug-of-war: in steady state
+    u1 (system) is negative (resists human bias) and u2 (human) is positive
+    (pushes toward bias). RMS hides this because |u1| ≈ |u2| by Nash symmetry.
+    """
+    u     = np.asarray(data.get(key, []), dtype=float)
+    phase = data.get('phase', [])
+    mask  = np.array([p == 'FOLLOWING' for p in phase], dtype=bool)
+    if mask.sum() < 2:
+        mask = np.ones(len(u), dtype=bool)
+    mask &= np.isfinite(u)
+    if mask.sum() < 2:
+        return float('nan')
+    return float(np.mean(u[mask]))
 
 
 def _merge_smoothness_rms(data: dict) -> float:
@@ -422,11 +466,15 @@ class QWeightSweepExperiment:
                  merge_scenario:    str   = 'back',
                  T_sim:             float = 120.0,
                  merge_trigger_time: float = 25.0,
-                 noise_mode:        str   = 'deterministic'):
+                 noise_mode:        str   = 'deterministic',
+                 n_avg:             int   = 1,
+                 seed_offset:       int   = 0):
         self.long_Q_pos_values    = long_Q_pos_values
         self.lat_Q_y_values       = lat_Q_y_values
         self.lat_Q_ratio          = lat_Q_ratio
         self.noise_mode           = noise_mode
+        self.n_avg                = n_avg
+        self.seed_offset          = seed_offset
         self.cfg_override = {
             'driver_type':    driver_type,
             'merge_scenario': merge_scenario,
@@ -445,15 +493,21 @@ class QWeightSweepExperiment:
             print(f"\n[QWeightSweep] Longitudinal Q_pos sweep: {self.long_Q_pos_values}")
         for q_pos in self.long_Q_pos_values:
             wo = {'long_Q_pos': float(q_pos), 'long_Q_vel': LONG_NASH_Q_VEL}
-            data = _run_single(self.cfg_override,
-                               noise_mode=self.noise_mode,
-                               weight_overrides=wo)
-            self.results['long'].append({'Q_pos': q_pos, 'data': data})
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          weight_overrides=wo))
+            self.results['long'].append({'Q_pos': q_pos, 'trials': trials})
             done += 1
             if verbose:
-                print(f"  long Q_pos={q_pos:6.0f}  gap_rms={_gap_error_rms(data):.3f}  "
-                      f"u_rms={_control_effort_rms(data, 'u_long'):.3f}  "
-                      f"({done}/{total})")
+                gap_vals = [_gap_error_rms(d) for d in trials]
+                u_vals   = [_control_effort_rms(d, 'u_long') for d in trials]
+                _gm = np.nanmean(gap_vals)
+                _std_s = f"±{np.nanstd(gap_vals):.3f}" if self.n_avg > 1 else ""
+                print(f"  long Q_pos={q_pos:6.0f}  gap_rms={_gm:.3f}{_std_s}  "
+                      f"u_rms={np.nanmean(u_vals):.3f}  ({done}/{total})")
 
         # ── Lateral Q sweep ────────────────────────────────────────────────────
         if verbose:
@@ -462,16 +516,24 @@ class QWeightSweepExperiment:
         for q_y in self.lat_Q_y_values:
             q_psi = q_y * self.lat_Q_ratio
             wo = {'lat_Q_y': float(q_y), 'lat_Q_psi': float(q_psi)}
-            data = _run_single(self.cfg_override,
-                               noise_mode=self.noise_mode,
-                               weight_overrides=wo)
-            self.results['lat'].append({'Q_y': q_y, 'Q_psi': q_psi, 'data': data})
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          weight_overrides=wo))
+            self.results['lat'].append({'Q_y': q_y, 'Q_psi': q_psi, 'trials': trials})
             done += 1
             if verbose:
+                y_vals  = [_y_error_rms(d) for d in trials]
+                u_vals  = [_control_effort_rms(d, 'delta_lat') for d in trials]
+                md_vals = [_merge_smoothness_rms(d) for d in trials]
+                _ym = np.nanmean(y_vals)
+                _std_s = f"±{np.nanstd(y_vals):.4f}" if self.n_avg > 1 else ""
                 print(f"  lat  Q_y={q_y:6.0f}  Q_psi={q_psi:8.0f}  "
-                      f"y_rms={_y_error_rms(data):.4f}  "
-                      f"u_rms={_control_effort_rms(data, 'delta_lat'):.5f}  "
-                      f"merge_δ={_merge_smoothness_rms(data):.5f}  "
+                      f"y_rms={_ym:.4f}{_std_s}  "
+                      f"u_rms={np.nanmean(u_vals):.5f}  "
+                      f"merge_δ={np.nanmean(md_vals):.5f}  "
                       f"({done}/{total})")
 
         self._compute_summary()
@@ -480,19 +542,24 @@ class QWeightSweepExperiment:
     def _compute_summary(self):
         self.summary['long'] = [
             {
-                'Q_pos':       r['Q_pos'],
-                'gap_rms':     _gap_error_rms(r['data']),
-                'u_long_rms':  _control_effort_rms(r['data'], 'u_long'),
+                'Q_pos':            r['Q_pos'],
+                'gap_rms':          float(np.nanmean([_gap_error_rms(d)                 for d in r['trials']])),
+                'gap_rms_std':      float(np.nanstd( [_gap_error_rms(d)                 for d in r['trials']])),
+                'u_long_rms':       float(np.nanmean([_control_effort_rms(d, 'u_long')  for d in r['trials']])),
+                'u_long_rms_std':   float(np.nanstd( [_control_effort_rms(d, 'u_long')  for d in r['trials']])),
             }
             for r in self.results['long']
         ]
         self.summary['lat'] = [
             {
-                'Q_y':             r['Q_y'],
-                'Q_psi':           r['Q_psi'],
-                'y_rms':           _y_error_rms(r['data']),
-                'u_lat_rms':       _control_effort_rms(r['data'], 'delta_lat'),
-                'merge_delta_rms': _merge_smoothness_rms(r['data']),
+                'Q_y':                   r['Q_y'],
+                'Q_psi':                 r['Q_psi'],
+                'y_rms':                 float(np.nanmean([_y_error_rms(d)                       for d in r['trials']])),
+                'y_rms_std':             float(np.nanstd( [_y_error_rms(d)                       for d in r['trials']])),
+                'u_lat_rms':             float(np.nanmean([_control_effort_rms(d, 'delta_lat')   for d in r['trials']])),
+                'u_lat_rms_std':         float(np.nanstd( [_control_effort_rms(d, 'delta_lat')   for d in r['trials']])),
+                'merge_delta_rms':       float(np.nanmean([_merge_smoothness_rms(d)              for d in r['trials']])),
+                'merge_delta_rms_std':   float(np.nanstd( [_merge_smoothness_rms(d)              for d in r['trials']])),
             }
             for r in self.results['lat']
         ]
@@ -504,34 +571,53 @@ class QWeightSweepExperiment:
 
 class RWeightSweepExperiment:
     """
-    Sweep R2/R1 effort weight ratio for both longitudinal and lateral.
+    Sweep R2 effort-weight scale for both longitudinal and lateral.
 
-    Each configuration is a dict with keys 'long_R1', 'long_R2', 'lat_R1', 'lat_R2'.
+    The coordinator uses an adaptive R2 that interpolates between R2_START (far from
+    platoon) and R2_FOLLOW (integrated).  Each configuration scales both endpoints by
+    the same factor k, so the adaptive mechanism still operates but at a different
+    absolute effort level.  k=1.0 reproduces the nominal simulation.
+
+    Each configuration dict keys: 'long_R1', 'long_R2_start', 'long_R2_follow'
+                                   'lat_R1',  'lat_R2_start',  'lat_R2_follow'
 
     Default configurations:
-        Long: R1=7500, R2 ∈ {3750, 7500, 12500, 25000, 50000}  (R2/R1 = 0.5, 1, 1.67, 3.33, 6.67)
-        Lat:  R1=50000, R2 ∈ {25000, 50000, 100000, 200000}
+        Long: R1=75000, k×(R2_START=120000, R2_FOLLOW=80000), k ∈ {0.5,1.0,1.67,3.33,6.67}
+        Lat:  R1=500000, k×(R2_START=500000, R2_FOLLOW=280000), k ∈ {0.5,1.0,1.5,2.0,4.0}
 
     Results structure (self.results):
         {
-          'long': [{'label': ..., 'R1': ..., 'R2': ..., 'data': ...}, ...],
-          'lat':  [{'label': ..., 'R1': ..., 'R2': ..., 'data': ...}, ...],
+          'long': [{'label': ..., 'R1': ..., 'R2_start': ..., 'R2_follow': ..., 'trials': [...]}, ...],
+          'lat':  [{'label': ..., 'R1': ..., 'R2_start': ..., 'R2_follow': ..., 'trials': [...]}, ...],
         }
     """
 
+    # Each config scales both R2_START and R2_FOLLOW by the same factor k, so the
+    # adaptive mechanism still operates but at a different absolute effort level.
+    # k=1.0 reproduces the nominal simulation.  R2_start/R1 at k=1: long≈1.6, lat=1.0.
     _DEFAULT_LONG_CONFIGS = [
-        {'long_R1': LONG_NASH_R1, 'long_R2': LONG_NASH_R1 * 0.5},     # R2/R1=0.5 (system yields)
-        {'long_R1': LONG_NASH_R1, 'long_R2': LONG_NASH_R1 * 1.0},     # R2/R1=1   (balanced)
-        {'long_R1': LONG_NASH_R1, 'long_R2': LONG_NASH_R2},            # R2/R1≈1.67 (default)
-        {'long_R1': LONG_NASH_R1, 'long_R2': LONG_NASH_R1 * 3.33},    # R2/R1=3.33 (human effort penalised)
-        {'long_R1': LONG_NASH_R1, 'long_R2': LONG_NASH_R1 * 6.67},    # R2/R1=6.67 (human strongly penalised)
+        {'long_R1': LONG_NASH_R1,
+         'long_R2_start': LONG_NASH_R2_START * 0.50, 'long_R2_follow': LONG_NASH_R2_FOLLOW * 0.50},
+        {'long_R1': LONG_NASH_R1,
+         'long_R2_start': LONG_NASH_R2_START * 1.00, 'long_R2_follow': LONG_NASH_R2_FOLLOW * 1.00},
+        {'long_R1': LONG_NASH_R1,
+         'long_R2_start': LONG_NASH_R2_START * 1.67, 'long_R2_follow': LONG_NASH_R2_FOLLOW * 1.67},
+        {'long_R1': LONG_NASH_R1,
+         'long_R2_start': LONG_NASH_R2_START * 3.33, 'long_R2_follow': LONG_NASH_R2_FOLLOW * 3.33},
+        {'long_R1': LONG_NASH_R1,
+         'long_R2_start': LONG_NASH_R2_START * 6.67, 'long_R2_follow': LONG_NASH_R2_FOLLOW * 6.67},
     ]
     _DEFAULT_LAT_CONFIGS = [
-        {'lat_R1': LAT_NASH_R1, 'lat_R2': LAT_NASH_R1 * 0.5},
-        {'lat_R1': LAT_NASH_R1, 'lat_R2': LAT_NASH_R1 * 1.0},         # balanced
-        {'lat_R1': LAT_NASH_R1, 'lat_R2': LAT_NASH_R2},                # default (equal)
-        {'lat_R1': LAT_NASH_R1, 'lat_R2': LAT_NASH_R1 * 2.0},
-        {'lat_R1': LAT_NASH_R1, 'lat_R2': LAT_NASH_R1 * 4.0},
+        {'lat_R1': LAT_NASH_R1,
+         'lat_R2_start': LAT_NASH_R2_START * 0.50, 'lat_R2_follow': LAT_NASH_R2_FOLLOW * 0.50},
+        {'lat_R1': LAT_NASH_R1,
+         'lat_R2_start': LAT_NASH_R2_START * 1.00, 'lat_R2_follow': LAT_NASH_R2_FOLLOW * 1.00},
+        {'lat_R1': LAT_NASH_R1,
+         'lat_R2_start': LAT_NASH_R2_START * 1.50, 'lat_R2_follow': LAT_NASH_R2_FOLLOW * 1.50},
+        {'lat_R1': LAT_NASH_R1,
+         'lat_R2_start': LAT_NASH_R2_START * 2.00, 'lat_R2_follow': LAT_NASH_R2_FOLLOW * 2.00},
+        {'lat_R1': LAT_NASH_R1,
+         'lat_R2_start': LAT_NASH_R2_START * 4.00, 'lat_R2_follow': LAT_NASH_R2_FOLLOW * 4.00},
     ]
 
     def __init__(self,
@@ -541,10 +627,14 @@ class RWeightSweepExperiment:
                  merge_scenario: str = 'back',
                  T_sim:        float = 120.0,
                  merge_trigger_time: float = 25.0,
-                 noise_mode:   str = 'deterministic'):
+                 noise_mode:   str = 'deterministic',
+                 n_avg:        int = 1,
+                 seed_offset:  int = 0):
         self.long_configs  = long_configs or self._DEFAULT_LONG_CONFIGS
         self.lat_configs   = lat_configs  or self._DEFAULT_LAT_CONFIGS
         self.noise_mode    = noise_mode
+        self.n_avg         = n_avg
+        self.seed_offset   = seed_offset
         self.cfg_override  = {
             'driver_type':    driver_type,
             'merge_scenario': merge_scenario,
@@ -559,34 +649,56 @@ class RWeightSweepExperiment:
         done  = 0
 
         if verbose:
-            print(f"\n[RWeightSweep] Longitudinal R2/R1 sweep ({len(self.long_configs)} configs)")
+            print(f"\n[RWeightSweep] Longitudinal R2_start/R1 sweep ({len(self.long_configs)} configs)")
         for cfg in self.long_configs:
-            r1, r2 = cfg['long_R1'], cfg['long_R2']
-            label  = f"R2/R1={r2/r1:.2f}"
-            data   = _run_single(self.cfg_override,
-                                 noise_mode=self.noise_mode,
-                                 weight_overrides=cfg)
-            self.results['long'].append({'label': label, 'R1': r1, 'R2': r2, 'data': data})
+            r1        = cfg['long_R1']
+            r2_start  = cfg['long_R2_start']
+            r2_follow = cfg['long_R2_follow']
+            label     = f"R2/R1(start)={r2_start/r1:.2f}"
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          weight_overrides=cfg))
+            self.results['long'].append({'label': label, 'R1': r1,
+                                         'R2_start': r2_start, 'R2_follow': r2_follow,
+                                         'trials': trials})
             done += 1
             if verbose:
-                print(f"  long {label}  gap_rms={_gap_error_rms(data):.3f}  "
-                      f"u1_rms={_control_effort_rms(data, 'u1_long'):.3f}  "
-                      f"u2_rms={_control_effort_rms(data, 'u2_long'):.3f}  ({done}/{total})")
+                gap_vals = [_gap_error_rms(d) for d in trials]
+                _gm = np.nanmean(gap_vals)
+                _std_s = f"±{np.nanstd(gap_vals):.3f}" if self.n_avg > 1 else ""
+                print(f"  long {label}  (R2_follow/R1={r2_follow/r1:.2f})  "
+                      f"gap_rms={_gm:.3f}{_std_s}  "
+                      f"u1_rms={np.nanmean([_control_effort_rms(d, 'u1_long') for d in trials]):.3f}  "
+                      f"u2_rms={np.nanmean([_control_effort_rms(d, 'u2_long') for d in trials]):.3f}  ({done}/{total})")
 
         if verbose:
-            print(f"\n[RWeightSweep] Lateral R2/R1 sweep ({len(self.lat_configs)} configs)")
+            print(f"\n[RWeightSweep] Lateral R2_start/R1 sweep ({len(self.lat_configs)} configs)")
         for cfg in self.lat_configs:
-            r1, r2 = cfg['lat_R1'], cfg['lat_R2']
-            label  = f"R2/R1={r2/r1:.2f}"
-            data   = _run_single(self.cfg_override,
-                                 noise_mode=self.noise_mode,
-                                 weight_overrides=cfg)
-            self.results['lat'].append({'label': label, 'R1': r1, 'R2': r2, 'data': data})
+            r1        = cfg['lat_R1']
+            r2_start  = cfg['lat_R2_start']
+            r2_follow = cfg['lat_R2_follow']
+            label     = f"R2/R1(start)={r2_start/r1:.2f}"
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          weight_overrides=cfg))
+            self.results['lat'].append({'label': label, 'R1': r1,
+                                        'R2_start': r2_start, 'R2_follow': r2_follow,
+                                        'trials': trials})
             done += 1
             if verbose:
-                print(f"  lat  {label}  y_rms={_y_error_rms(data):.4f}  "
-                      f"u1_rms={_control_effort_rms(data, 'u1_lat'):.5f}  "
-                      f"u2_rms={_control_effort_rms(data, 'u2_lat'):.5f}  ({done}/{total})")
+                y_vals = [_y_error_rms(d) for d in trials]
+                _ym = np.nanmean(y_vals)
+                _std_s = f"±{np.nanstd(y_vals):.4f}" if self.n_avg > 1 else ""
+                print(f"  lat  {label}  (R2_follow/R1={r2_follow/r1:.2f})  "
+                      f"y_rms={_ym:.4f}{_std_s}  "
+                      f"u1_rms={np.nanmean([_control_effort_rms(d, 'u1_lat') for d in trials]):.5f}  "
+                      f"u2_rms={np.nanmean([_control_effort_rms(d, 'u2_lat') for d in trials]):.5f}  ({done}/{total})")
 
         self._compute_summary()
         return self.results
@@ -594,21 +706,23 @@ class RWeightSweepExperiment:
     def _compute_summary(self):
         self.summary['long'] = [
             {
-                'label':    r['label'],
-                'R2_R1':    r['R2'] / r['R1'],
-                'gap_rms':  _gap_error_rms(r['data']),
-                'u1_rms':   _control_effort_rms(r['data'], 'u1_long'),
-                'u2_rms':   _control_effort_rms(r['data'], 'u2_long'),
+                'label':       r['label'],
+                'R2_R1':       r['R2_start'] / r['R1'],
+                'gap_rms':     float(np.nanmean([_gap_error_rms(d)                 for d in r['trials']])),
+                'gap_rms_std': float(np.nanstd( [_gap_error_rms(d)                 for d in r['trials']])),
+                'u1_rms':      float(np.nanmean([_control_effort_rms(d, 'u1_long') for d in r['trials']])),
+                'u2_rms':      float(np.nanmean([_control_effort_rms(d, 'u2_long') for d in r['trials']])),
             }
             for r in self.results['long']
         ]
         self.summary['lat'] = [
             {
-                'label':   r['label'],
-                'R2_R1':   r['R2'] / r['R1'],
-                'y_rms':   _y_error_rms(r['data']),
-                'u1_rms':  _control_effort_rms(r['data'], 'u1_lat'),
-                'u2_rms':  _control_effort_rms(r['data'], 'u2_lat'),
+                'label':     r['label'],
+                'R2_R1':     r['R2_start'] / r['R1'],
+                'y_rms':     float(np.nanmean([_y_error_rms(d)                  for d in r['trials']])),
+                'y_rms_std': float(np.nanstd( [_y_error_rms(d)                  for d in r['trials']])),
+                'u1_rms':    float(np.nanmean([_control_effort_rms(d, 'u1_lat') for d in r['trials']])),
+                'u2_rms':    float(np.nanmean([_control_effort_rms(d, 'u2_lat') for d in r['trials']])),
             }
             for r in self.results['lat']
         ]
@@ -638,11 +752,15 @@ class LambdaSweepExperiment:
                  T_sim:        float = 120.0,
                  merge_trigger_time: float = 25.0,
                  noise_mode:   str   = 'deterministic',
-                 lat_human_y_bias: float = 0.75):
+                 lat_human_y_bias: float = 0.75,
+                 n_avg:        int   = 1,
+                 seed_offset:  int   = 0):
         self.long_lambdas      = long_lambdas
         self.lat_lambdas       = lat_lambdas
         self.noise_mode        = noise_mode
         self.lat_human_y_bias  = lat_human_y_bias
+        self.n_avg             = n_avg
+        self.seed_offset       = seed_offset
         self.cfg_override = {
             'driver_type':    driver_type,
             'merge_scenario': merge_scenario,
@@ -651,37 +769,70 @@ class LambdaSweepExperiment:
         }
         self.results: Dict[str, list] = {'long': [], 'lat': []}
         self.summary: Dict[str, list] = {'long': [], 'lat': []}
+        self.dynamic_ref: Optional[dict] = None   # set by run() — Safety Field active, no fixed λ
 
     def run(self, verbose: bool = True) -> Dict[str, list]:
         total = len(self.long_lambdas) + len(self.lat_lambdas)
         done  = 0
 
+        # ── Dynamic reference (Safety Field active, no fixed λ) ───────────────
+        # One run with the same cfg/noise but λ driven by the Safety Field.
+        # Used in plot_lambda_sweep to show the actual λ distribution produced
+        # by the Safety Field in FOLLOWING — i.e. what fixed-λ ablation compares against.
+        if verbose:
+            print(f"\n[LambdaSweep] Running dynamic-λ reference (Safety Field active)…")
+        np.random.seed(self.seed_offset)
+        self.dynamic_ref = _run_single(
+            self.cfg_override,
+            noise_mode=self.noise_mode,
+            weight_overrides={'lat_human_y_bias': self.lat_human_y_bias},
+        )
+        if verbose:
+            dyn_lams = np.asarray(self.dynamic_ref.get('long_lambda', []))
+            dyn_phase = self.dynamic_ref.get('phase', [])
+            fol_mask = np.array([p == 'FOLLOWING' for p in dyn_phase])
+            if fol_mask.sum() > 0:
+                med = float(np.median(dyn_lams[fol_mask]))
+                print(f"  dynamic ref: median λ_long in FOLLOWING = {med:.3f}")
+
         if verbose:
             print(f"\n[LambdaSweep] Longitudinal fixed-λ sweep: {self.long_lambdas}")
         for lam in self.long_lambdas:
             alpha = 1.0 / (1.0 + lam)   # Pustilnik α = 1/(1+λ)
-            data  = _run_single(self.cfg_override,
-                                noise_mode=self.noise_mode,
-                                fixed_lambda_long=float(lam))
-            self.results['long'].append({'lambda': lam, 'alpha': alpha, 'data': data})
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          fixed_lambda_long=float(lam)))
+            self.results['long'].append({'lambda': lam, 'alpha': alpha, 'trials': trials})
             done += 1
             if verbose:
+                gap_vals = [_gap_error_rms(d) for d in trials]
+                _gm = np.nanmean(gap_vals)
+                _std_s = f"±{np.nanstd(gap_vals):.3f}" if self.n_avg > 1 else ""
                 print(f"  long λ={lam:6.2f}  α={alpha:.3f}  "
-                      f"gap_rms={_gap_error_rms(data):.3f}  ({done}/{total})")
+                      f"gap_rms={_gm:.3f}{_std_s}  ({done}/{total})")
 
         if verbose:
             print(f"\n[LambdaSweep] Lateral fixed-λ sweep: {self.lat_lambdas}")
         for lam in self.lat_lambdas:
             alpha = 1.0 / (1.0 + lam)
-            data  = _run_single(self.cfg_override,
-                                noise_mode=self.noise_mode,
-                                fixed_lambda_lat=float(lam),
-                                weight_overrides={'lat_human_y_bias': self.lat_human_y_bias})
-            self.results['lat'].append({'lambda': lam, 'alpha': alpha, 'data': data})
+            trials = []
+            for s in range(self.n_avg):
+                np.random.seed(self.seed_offset + s)
+                trials.append(_run_single(self.cfg_override,
+                                          noise_mode=self.noise_mode,
+                                          fixed_lambda_lat=float(lam),
+                                          weight_overrides={'lat_human_y_bias': self.lat_human_y_bias}))
+            self.results['lat'].append({'lambda': lam, 'alpha': alpha, 'trials': trials})
             done += 1
             if verbose:
+                y_vals = [_y_error_rms(d) for d in trials]
+                _ym = np.nanmean(y_vals)
+                _std_s = f"±{np.nanstd(y_vals):.4f}" if self.n_avg > 1 else ""
                 print(f"  lat  λ={lam:6.2f}  α={alpha:.3f}  "
-                      f"y_rms={_y_error_rms(data):.4f}  ({done}/{total})")
+                      f"y_rms={_ym:.4f}{_std_s}  ({done}/{total})")
 
         self._compute_summary()
         return self.results
@@ -689,11 +840,16 @@ class LambdaSweepExperiment:
     def _compute_summary(self):
         self.summary['long'] = [
             {
-                'lambda':   r['lambda'],
-                'alpha':    r['alpha'],
-                'gap_rms':  _gap_error_rms(r['data']),
-                'u1_rms':   _control_effort_rms(r['data'], 'u1_long'),
-                'u2_rms':   _control_effort_rms(r['data'], 'u2_long'),
+                'lambda':      r['lambda'],
+                'alpha':       r['alpha'],
+                'gap_rms':     float(np.nanmean([_gap_error_rms(d)                 for d in r['trials']])),
+                'gap_rms_std': float(np.nanstd( [_gap_error_rms(d)                 for d in r['trials']])),
+                'vel_rms':     float(np.nanmean([_vel_error_rms(d)                 for d in r['trials']])),
+                'vel_rms_std': float(np.nanstd( [_vel_error_rms(d)                 for d in r['trials']])),
+                'u1_rms':      float(np.nanmean([_control_effort_rms(d, 'u1_long') for d in r['trials']])),
+                'u1_rms_std':  float(np.nanstd( [_control_effort_rms(d, 'u1_long') for d in r['trials']])),
+                'u2_rms':      float(np.nanmean([_control_effort_rms(d, 'u2_long') for d in r['trials']])),
+                'u2_rms_std':  float(np.nanstd( [_control_effort_rms(d, 'u2_long') for d in r['trials']])),
             }
             for r in self.results['long']
         ]
@@ -701,23 +857,32 @@ class LambdaSweepExperiment:
             {
                 'lambda':          r['lambda'],
                 'alpha':           r['alpha'],
-                'y_rms':           _y_error_rms(r['data']),
-                'merge_duration':  _merge_duration(r['data']),
-                'merge_delta_rms': _merge_smoothness_rms(r['data']),
-                'u1_rms':          _control_effort_rms(r['data'], 'u1_lat'),
-                'u2_rms':          _control_effort_rms(r['data'], 'u2_lat'),
+                'y_rms':           float(np.nanmean([_y_error_rms(d)                      for d in r['trials']])),
+                'y_rms_std':       float(np.nanstd( [_y_error_rms(d)                      for d in r['trials']])),
+                'merge_duration':  float(np.nanmean([_merge_duration(d)                   for d in r['trials']])),
+                'merge_delta_rms': float(np.nanmean([_merge_smoothness_rms(d)             for d in r['trials']])),
+                'u1_rms':          float(np.nanmean([_control_effort_rms(d, 'u1_lat')                    for d in r['trials']])),
+                'u1_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u1_lat')                    for d in r['trials']])),
+                'u2_rms':          float(np.nanmean([_control_effort_rms(d, 'u2_lat')                    for d in r['trials']])),
+                'u2_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u2_lat')                    for d in r['trials']])),
+                'u1_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u1_lat')          for d in r['trials']])),
+                'u2_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u2_lat')          for d in r['trials']])),
             }
             for r in self.results['lat']
         ]
 
     def print_summary(self):
+        has_std = self.n_avg > 1
         print(f"\n{'=' * 65}")
-        print("  Lambda Sweep Summary")
+        print("  Lambda Sweep Summary" + (f"  (n_avg={self.n_avg})" if has_std else ""))
         print(f"{'=' * 65}")
         print("  LONGITUDINAL")
-        print(f"  {'λ':>7}  {'α':>6}  {'gap_rms':>9}  {'u1_rms':>9}  {'u2_rms':>9}")
+        hdr = f"  {'λ':>7}  {'α':>6}  {'gap_rms':>14}  {'u1_rms':>9}  {'u2_rms':>9}"
+        print(hdr)
         for r in self.summary['long']:
-            print(f"  {r['lambda']:7.2f}  {r['alpha']:6.3f}  {r['gap_rms']:9.3f}  "
+            std = r.get('gap_rms_std', 0.0)
+            gap_s = f"{r['gap_rms']:6.3f}±{std:.3f}" if has_std else f"{r['gap_rms']:9.3f}"
+            print(f"  {r['lambda']:7.2f}  {r['alpha']:6.3f}  {gap_s:>14}  "
                   f"{r['u1_rms']:9.3f}  {r['u2_rms']:9.3f}")
         print("\n  LATERAL  (α = human tracking weight; small λ → human dominant)")
         print(f"  {'λ':>7}  {'α (hum)':>8}  {'merge_dur[s]':>13}  {'y_rms[m]':>9}  {'δ_rms[rad]':>11}  {'u1_rms':>9}  {'u2_rms':>9}")

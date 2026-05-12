@@ -692,6 +692,16 @@ LATERAL DMPC NASH (IBR) - CONSTRAINT SUMMARY
 """
         return summary
 
+    def update_r2(self, new_r2: float) -> None:
+        """Switch Player 2 control-effort weight and rebuild DMPC problems.
+
+        Mirrors the longitudinal solver's update_r2 — called per-step by the
+        adaptive authority allocator as lane-change progress l_n changes.
+        """
+        self.R2_eff = float(new_r2)
+        self.params.R2 = float(new_r2)
+        self._build_dmpc_problems()
+
     def reset(self):
         """Reset solver state."""
         self.u1_prev = 0.0
