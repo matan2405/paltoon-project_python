@@ -35,7 +35,7 @@ from unified.config import (                                          # noqa: E4
     SIMULATION_DT,
     LONG_NASH_CONTROL_DT, LAT_NASH_CONTROL_DT,
     LONG_NASH_STEP_INTERVAL, LAT_NASH_STEP_INTERVAL,
-    NASH_NP, NASH_NU,
+    LONG_NASH_NP, LONG_NASH_NU, LAT_NASH_NP, LAT_NASH_NU,
     LONG_NASH_Q_POS, LONG_NASH_Q_VEL,
     LONG_NASH_R1, LONG_NASH_R2, LONG_NASH_S1, LONG_NASH_S2,
     LONG_NASH_R2_START, LONG_NASH_R2_FOLLOW,
@@ -287,6 +287,16 @@ class UnifiedCoordinator:
         # ── Phase hold timer (for FOLLOWING transition) ───────────────────────
         self._phase_hold_start: Optional[float] = None
 
+        # ── Simulation time (updated every step, used by settling trajectory) ─
+        self._sim_time: float = 0.0
+        self._following_entry_time: Optional[float] = None
+
+        # ── MERGE entry state (locked at GAP_SEARCH→MERGE transition) ─────────
+        self._merge_entry_time: Optional[float] = None
+        self._merge_entry_y: float = 0.0
+        self._merge_T_lc_sys: Optional[float] = None
+        self._merge_T_lc_hum: Optional[float] = None
+
         # ── GAP_SEARCH phase timer ────────────────────────────────────────────
         self._gap_search_start: Optional[float] = None
 
@@ -334,7 +344,7 @@ class UnifiedCoordinator:
         # ── Long Nash solver ──────────────────────────────────────────────────
         _gamma = NASH_RISK_GAMMA if (MA_IDM_ENABLED and noise_mode == 'gp') else 0.0
         long_params = LongNashParams(
-            Np=NASH_NP, Nu=NASH_NU, dt=LONG_NASH_CONTROL_DT,
+            Np=LONG_NASH_NP, Nu=LONG_NASH_NU, dt=LONG_NASH_CONTROL_DT,
             Q_pos=_wo.get('long_Q_pos', LONG_NASH_Q_POS),
             Q_vel=_wo.get('long_Q_vel', LONG_NASH_Q_VEL),
             Q_pos_terminal=10.0 * _wo.get('long_Q_pos', LONG_NASH_Q_POS),
@@ -357,7 +367,7 @@ class UnifiedCoordinator:
 
         # ── Lat Nash solver ───────────────────────────────────────────────────
         lat_params = LatNashParams(
-            Np=NASH_NP, Nu=NASH_NU, dt=LAT_NASH_CONTROL_DT,
+            Np=LAT_NASH_NP, Nu=LAT_NASH_NU, dt=LAT_NASH_CONTROL_DT,
         )
         # Override weights from unified config (or from weight_overrides)
         _lat_Q_y   = _wo.get('lat_Q_y',  LAT_NASH_Q_Y)
@@ -410,6 +420,8 @@ class UnifiedCoordinator:
         u_long : float  — desired longitudinal acceleration [m/s²]
         delta_lat : float — desired front steering angle [rad]
         """
+        self._sim_time = sim_time
+
         # ── MA-IDM: advance GP residual states every sim step (execution) ──────
         if MA_IDM_ENABLED and self.noise_mode == 'gp':
             self._gp.step()
@@ -528,8 +540,8 @@ class UnifiedCoordinator:
             lam = self._long_authority(force, gap_error=_gap_err, vel_error=_vel_err)
 
         # Reference trajectories
-        R1 = self._long_sys_ref(leader, NASH_NP, LONG_NASH_CONTROL_DT)
-        R2 = self._long_hum_ref(leader, NASH_NP, LONG_NASH_CONTROL_DT)
+        R1 = self._long_sys_ref(leader, LONG_NASH_NP, LONG_NASH_CONTROL_DT)
+        R2 = self._long_hum_ref(leader, LONG_NASH_NP, LONG_NASH_CONTROL_DT)
 
         # Nash solve
         try:
@@ -602,8 +614,8 @@ class UnifiedCoordinator:
             lam = self._lat_authority(force, y_err)
 
         # Reference trajectories
-        R1 = self._lat_sys_ref(target_y, NASH_NP, LAT_NASH_CONTROL_DT)
-        R2 = self._lat_hum_ref(NASH_NP, LAT_NASH_CONTROL_DT)
+        R1 = self._lat_sys_ref(target_y, LAT_NASH_NP, LAT_NASH_CONTROL_DT)
+        R2 = self._lat_hum_ref(LAT_NASH_NP, LAT_NASH_CONTROL_DT)
 
         # Nash solve
         try:
@@ -655,6 +667,11 @@ class UnifiedCoordinator:
                 # Reset neuromuscular IIR to current heading (clean entry into merge)
                 _psi_entry = float(self.ego.state.psi)
                 self._neuro_psi_state[:] = _psi_entry
+                # Lock MERGE entry state for time-based trajectory
+                self._merge_entry_time = sim_time
+                self._merge_entry_y = float(self.ego.state.y)
+                self._merge_T_lc_sys = None
+                self._merge_T_lc_hum = None
                 print(f"[Coordinator] Phase: GAP_SEARCH -> MERGE at t={sim_time:.1f}s")
 
         elif self.phase == MergePhase.MERGE:
@@ -681,6 +698,7 @@ class UnifiedCoordinator:
                     self._phase_hold_start = sim_time
                 elif sim_time - self._phase_hold_start >= PHASE_TRANSITION_HOLD_TIME:
                     self.phase = MergePhase.FOLLOWING
+                    self._following_entry_time = sim_time
                     # R2 is now managed adaptively in _long_authority per-step
                     self._last_delta_lat = 0.0
                     print(f"[Coordinator] Phase: MERGE -> FOLLOWING at t={sim_time:.1f}s")
@@ -1276,16 +1294,75 @@ class UnifiedCoordinator:
 
         # 5th-order polynomial coefficients (boundary: y(0)=y0, y(T)=yf, ẏ=0, ÿ=0 at both ends)
         # y(t) = y0 + dy * (10τ³ - 15τ⁴ + 6τ⁵),  τ = t/T
+        # Returns (Np*2,) flattened [y0,psi0, y1,psi1, ...].
         ref = np.empty(Np * 2)
-        for k in range(Np):
-            t   = (k + 1) * dt
-            tau = min(t / T, 1.0)
-            y   = y0 + dy * (10 * tau**3 - 15 * tau**4 + 6 * tau**5)
-            # ẏ = dy/T * (30τ² - 60τ³ + 30τ⁴)
-            psi = (dy / max(T, 1e-6)) * (30 * tau**2 - 60 * tau**3 + 30 * tau**4)
-            psi = float(np.clip(psi / max(self.ego.state.vx, 0.1), -0.3, 0.3))
-            ref[2 * k]     = y
-            ref[2 * k + 1] = psi
+
+        if self.phase == MergePhase.FOLLOWING and self._following_entry_time is not None:
+            # Settling trajectory (mirrors lateral module _generate_settling_trajectory):
+            # cubic polynomial from current (y, ẏ) → (target_y, 0) over T_remaining.
+            # Receding horizon: t_pred starts at 0 so ref[0] always matches current state.
+            t_in_following = self._sim_time - self._following_entry_time
+            T_settle = float(dp.get('system_settle_time', 20.0))
+            T_remaining = max(T_settle - t_in_following, dt)
+
+            vy0 = float(self.ego.state.vy)
+            if abs(dy) > 1e-6:
+                vy_max = 1.5 * abs(dy) / T_remaining
+                vy0 = float(np.clip(vy0, -vy_max, vy_max))
+            else:
+                vy0 = 0.0
+
+            a0 = y0
+            a1 = vy0 * T_remaining
+            a2 = 3.0 * dy - 2.0 * vy0 * T_remaining
+            a3 = -2.0 * dy + vy0 * T_remaining
+
+            for k in range(Np):
+                t_pred = k * dt  # receding: 0, dt, 2*dt, …
+                tau = min(t_pred / T_remaining, 1.0)
+                if tau < 1.0:
+                    y    = a0 + a1*tau + a2*tau**2 + a3*tau**3
+                    ydot = (a1 + 2.0*a2*tau + 3.0*a3*tau**2) / T_remaining
+                    psi  = float(np.clip(ydot / vx, -0.3, 0.3))
+                else:
+                    y   = target_y
+                    psi = 0.0
+                ref[2 * k]     = y
+                ref[2 * k + 1] = psi
+        elif self.phase == MergePhase.MERGE and self._merge_entry_time is not None:
+            # MERGE: time-based 5th-order polynomial locked to entry state.
+            # tau advances with wall-clock time so the reference shape is fixed
+            # and doesn't collapse as the vehicle approaches the target.
+            y_start   = self._merge_entry_y
+            dy_merge  = target_y - y_start
+            if self._merge_T_lc_sys is None:
+                self._merge_T_lc_sys = (
+                    max(dt, 1.875 * abs(dy_merge) / (vx * np.tan(max_heading_rad)))
+                    if abs(dy_merge) > 1e-4 else dt
+                )
+            T_lc = self._merge_T_lc_sys
+            t_elapsed = self._sim_time - self._merge_entry_time
+            for k in range(Np):
+                t_total = t_elapsed + (k + 1) * dt
+                tau = min(t_total / T_lc, 1.0)
+                y = y_start + dy_merge * (10 * tau**3 - 15 * tau**4 + 6 * tau**5)
+                if tau < 1.0:
+                    ydot = (dy_merge / T_lc) * (30 * tau**2 - 60 * tau**3 + 30 * tau**4)
+                    psi  = float(np.clip(ydot / vx, -0.3, 0.3))
+                else:
+                    psi = 0.0
+                ref[2 * k]     = y
+                ref[2 * k + 1] = psi
+        else:
+            # APPROACH / GAP_SEARCH: position-based 5th-order polynomial
+            for k in range(Np):
+                t    = (k + 1) * dt
+                tau  = min(t / T, 1.0)
+                y    = y0 + dy * (10 * tau**3 - 15 * tau**4 + 6 * tau**5)
+                ydot = (dy / max(T, 1e-6)) * (30 * tau**2 - 60 * tau**3 + 30 * tau**4)
+                psi  = float(np.clip(ydot / max(vx, 0.1), -0.3, 0.3))
+                ref[2 * k]     = y
+                ref[2 * k + 1] = psi
         return ref
 
     def _lat_hum_ref(self, Np: int, dt: float) -> np.ndarray:
@@ -1326,44 +1403,73 @@ class UnifiedCoordinator:
         _psi_km1 = self._neuro_psi_state[0]
         _psi_km2 = self._neuro_psi_state[1]
 
-        if self.phase in (MergePhase.MERGE, MergePhase.FOLLOWING):
-            # Layer 1: T scales with geometry
-            delta_y = target_y - y0
-            T = max(dt, 1.5 * abs(delta_y) / (vx * np.tan(max_heading_rad))) if abs(delta_y) > 1e-4 else dt
+        if self.phase == MergePhase.FOLLOWING and self._following_entry_time is not None:
+            # FOLLOWING: settling trajectory — cubic polynomial from current (y, ẏ) → (target_y, 0).
+            # IIR filters psi_des → psi_exec to model neuromuscular lag during settling.
+            delta_y_f = target_y - y0
+            t_in_following = self._sim_time - self._following_entry_time
+            T_settle_h = float(dp.get('human_settle_time', 20.0))
+            T_remaining_h = max(T_settle_h - t_in_following, dt)
 
-            if abs(delta_y) > 1e-6:
-                y_dot_max = 1.5 * abs(delta_y) / T
-                y_dot_0   = float(np.clip(vy0, -y_dot_max, y_dot_max))
+            if abs(delta_y_f) > 1e-6:
+                vy_max_h = 1.5 * abs(delta_y_f) / T_remaining_h
+                vy0_h = float(np.clip(vy0, -vy_max_h, vy_max_h))
             else:
-                y_dot_0 = 0.0
+                vy0_h = 0.0
 
-            a0 = y0
-            a1 = y_dot_0 * T
-            a2 = 3.0 * delta_y - 2.0 * y_dot_0 * T
-            a3 = -2.0 * delta_y + y_dot_0 * T
+            a0_h = y0
+            a1_h = vy0_h * T_remaining_h
+            a2_h = 3.0 * delta_y_f - 2.0 * vy0_h * T_remaining_h
+            a3_h = -2.0 * delta_y_f + vy0_h * T_remaining_h
 
             for k in range(Np):
-                t   = (k + 1) * dt
-                tau = min(t / T, 1.0)
+                t_pred = k * dt
+                tau_h = min(t_pred / T_remaining_h, 1.0)
+                if tau_h < 1.0:
+                    y_ref  = a0_h + a1_h*tau_h + a2_h*tau_h**2 + a3_h*tau_h**3
+                    ydot_h = (a1_h + 2.0*a2_h*tau_h + 3.0*a3_h*tau_h**2) / T_remaining_h
+                    psi_des = float(np.clip(ydot_h / vx, -0.3, 0.3))
+                else:
+                    y_ref   = target_y
+                    psi_des = 0.0
+                psi_exec = _na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2
+                _psi_km2 = _psi_km1
+                _psi_km1 = psi_exec
+                ref[2 * k]     = y_ref
+                ref[2 * k + 1] = psi_exec
+
+        elif self.phase == MergePhase.MERGE and self._merge_entry_time is not None:
+            # MERGE: time-based cubic polynomial + Layer 2 IIR.
+            # Locked to entry state — tau advances with wall-clock time.
+            delta_y = target_y - self._merge_entry_y
+            if self._merge_T_lc_hum is None:
+                self._merge_T_lc_hum = (
+                    max(dt, 1.5 * abs(delta_y) / (vx * np.tan(max_heading_rad)))
+                    if abs(delta_y) > 1e-4 else dt
+                )
+            T_lc_h  = self._merge_T_lc_hum
+            t_elapsed = self._sim_time - self._merge_entry_time
+
+            for k in range(Np):
+                t_total = t_elapsed + (k + 1) * dt
+                tau = min(t_total / T_lc_h, 1.0)
                 if tau < 1.0:
-                    y_ref     = a0 + a1 * tau + a2 * tau ** 2 + a3 * tau ** 3
-                    y_dot_ref = (a1 + 2.0 * a2 * tau + 3.0 * a3 * tau ** 2) / T
+                    y_ref     = self._merge_entry_y + delta_y * (3 * tau**2 - 2 * tau**3)
+                    y_dot_ref = delta_y * (6 * tau - 6 * tau**2) / T_lc_h
                     psi_des   = y_dot_ref / vx
                 else:
                     y_ref   = target_y
                     psi_des = 0.0
-                # Layer 2: neuromuscular IIR
-                psi_exec = _na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2
+                psi_exec = (_na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2) if tau < 1.0 else 0.0
                 _psi_km2 = _psi_km1
                 _psi_km1 = psi_exec
-                ref[2 * k]     = y_ref    # polynomial y unchanged (Option B)
+                ref[2 * k]     = y_ref
                 ref[2 * k + 1] = psi_exec
         else:
             # APPROACH / GAP_SEARCH: human holds current lane, psi decays with T_lc
             for k in range(Np):
                 t       = (k + 1) * dt
                 psi_des = psi0 * np.exp(-t / max(T_lc, 1e-3))
-                # Layer 2: neuromuscular IIR
                 psi_exec = _na0 * psi_des + _na1 * _psi_km1 + _na2 * _psi_km2
                 _psi_km2 = _psi_km1
                 _psi_km1 = psi_exec
@@ -1409,6 +1515,11 @@ class UnifiedCoordinator:
         self._last_delta_lat    = 0.0
         self._phase_hold_start  = None
         self._gap_search_start  = None
+        self._following_entry_time = None
+        self._merge_entry_time  = None
+        self._merge_entry_y     = 0.0
+        self._merge_T_lc_sys    = None
+        self._merge_T_lc_hum    = None
         self._long_lambda       = LONG_AUTHORITY_LAMBDA_MIN
         self._lat_lambda        = LAT_AUTHORITY_LAMBDA_MIN
         self._long_force_filt   = 0.0

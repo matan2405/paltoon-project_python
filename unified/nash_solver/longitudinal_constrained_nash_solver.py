@@ -82,7 +82,8 @@ import time
 from unified.config import (
     LONG_NASH_CONTROL_DT     as NASH_CONTROL_DT,
     NASH_RISK_GAMMA,
-    NASH_NP, NASH_NU,
+    LONG_NASH_NP             as NASH_NP,
+    LONG_NASH_NU             as NASH_NU,
     LONG_NASH_Q_POS          as NASH_Q_POS,
     LONG_NASH_Q_VEL          as NASH_Q_VEL,
     LONG_NASH_R1             as NASH_R1,

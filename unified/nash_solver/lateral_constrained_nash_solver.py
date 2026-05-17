@@ -87,7 +87,8 @@ from dataclasses import dataclass
 from unified.config import (
     LAT_NASH_CONTROL_DT              as NASH_CONTROL_DT,
     NASH_RISK_GAMMA,
-    NASH_NP, NASH_NU,
+    LAT_NASH_NP                      as NASH_NP,
+    LAT_NASH_NU                      as NASH_NU,
     LAT_NASH_Q_Y                     as NASH_Q_Y,
     LAT_NASH_Q_PSI                   as NASH_Q_PSI,
     LAT_NASH_Q_Y_TERMINAL_FAC        as NASH_Q_Y_TERMINAL_FACTOR,
@@ -278,7 +279,7 @@ class ConstrainedLateralNashSolver:
         p = self.params
         self.A, self.B, self.C = self.vehicle.get_state_space_matrices(p.dt)
         self.nx = self.A.shape[0]
-        self.nz = self.C.shape[0]
+        self.nz = self.C.shape[0]          # = 2: output z = [y, psi]
         print(f"   Using vehicle's state-space matrices (dt={p.dt}s)")
 
     def _build_prediction_matrices(self):

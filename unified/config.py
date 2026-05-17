@@ -58,8 +58,10 @@ setup_results_directory()
 # SIMULATION TIMING (same in both modules)
 # =============================================================================
 SIMULATION_DT = 0.01          # 100 Hz — dynamics integration step [s]
-NASH_NP       = 20            # Prediction horizon [steps]
-NASH_NU       = 10            # Control horizon [steps]
+LONG_NASH_NP  = 20            # Longitudinal prediction horizon [steps]
+LONG_NASH_NU  = 10            # Longitudinal control horizon [steps]
+LAT_NASH_NP   = 20            # Lateral prediction horizon [steps]
+LAT_NASH_NU   = 10            # Lateral control horizon [steps]
 DEFAULT_SIMULATION_TIME = 120.0  # [s]
 NOMINAL_VELOCITY        = 120.0 / 3.6   # m/s (~120 km/h) — matches lateral reference
 
@@ -108,7 +110,7 @@ ROAD_FRICTION_MU     = 1.0                         # tire-road friction [-]
 MAX_ACCELERATION     = _vp.max_acceleration        # [m/s²]
 MAX_DECELERATION     = _vp.max_deceleration        # [m/s²] (negative)
 MAX_STEERING_ANGLE   = np.radians(25.0)            # [rad]  ~25°
-MAX_STEERING_RATE    = np.radians(15.0)            # [rad/s] ~15°/s
+MAX_STEERING_RATE    = np.radians(5.0)            # [rad/s] ~15°/s
 
 # =============================================================================
 # LANE CONFIGURATION
@@ -148,11 +150,11 @@ LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
 LAT_NASH_Q_Y               =    800.0
 LAT_NASH_Q_PSI             =  10000.0
 LAT_NASH_Q_Y_TERMINAL_FAC  =     10.0
-LAT_NASH_Q_PSI_TERMINAL_FAC=      4.0
-LAT_NASH_R1                =  500000.0
-LAT_NASH_R2                =  500000.0  # initial value (= R2_START); overridden per-step by adaptive authority
-LAT_NASH_R2_START          =  500000.0  # R2 when far from target lane — R2/R1=1.0, matched effort
-LAT_NASH_R2_FOLLOW         =  280000.0  # R2 when lane-centred — R2/R1=0.56, human leads with bounded δ
+LAT_NASH_Q_PSI_TERMINAL_FAC=      50.0
+LAT_NASH_R1                =   50000.0
+LAT_NASH_R2                =   50000.0  # initial value (= R2_START); overridden per-step by adaptive authority
+LAT_NASH_R2_START          =   50000.0  # R2 when far from target lane — R2/R1=1.0, matched effort
+LAT_NASH_R2_FOLLOW         =   28000.0  # R2 when lane-centred — R2/R1=0.56, human leads with bounded δ
 LAT_NASH_S1                = 200000.0
 LAT_NASH_S2                = 200000.0
 LAT_NASH_DELTA_MIN         = -MAX_STEERING_ANGLE   # [rad]
@@ -160,14 +162,13 @@ LAT_NASH_DELTA_MAX         =  MAX_STEERING_ANGLE
 LAT_NASH_Y_MAX             =  5.0     # [m]
 LAT_NASH_PSI_MAX           =  0.5     # [rad]
 LAT_NASH_LAMBDA_LEVELS     = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
-
 # Shared OSQP settings
 NASH_SOLVER_BACKEND  = 'OSQP'
 NASH_WARM_START      = True
 NASH_VERBOSE         = False
-NASH_POLISH          = True
+NASH_POLISH          = False
 NASH_REGULARIZATION  = 1e-5
-NASH_RISK_GAMMA      = 0.1   # γ in E[J]+γ·Var[J]; risk sensitivity for SE-kernel GP uncertainty
+NASH_RISK_GAMMA      = 0.0   # γ in E[J]+γ·Var[J]; risk sensitivity for SE-kernel GP uncertainty
 LONG_NASH_MAX_ITER   = 1000
 LONG_NASH_EPS_ABS    = 1e-4
 LONG_NASH_EPS_REL    = 1e-4
@@ -245,14 +246,14 @@ PLATOON_VEHICLE_LENGTH      = _vp.length  # [m]
 #   Rebuild when velocity prediction error over horizon exceeds ε_v = 0.2 m/s:
 #   Δvx_thr = ε_v / (Cd_aero · dt_long · Np · V_MAX)
 _Cd_aero = VEHICLE_AIR_DENSITY * VEHICLE_CD * VEHICLE_FRONTAL_AREA / VEHICLE_M_EFF
-LONG_NASH_REBUILD_DVX = 0.2 / (_Cd_aero * LONG_NASH_CONTROL_DT * NASH_NP * max(LONG_NASH_V_MAX, 1.0))
+LONG_NASH_REBUILD_DVX = 0.2 / (_Cd_aero * LONG_NASH_CONTROL_DT * LONG_NASH_NP * max(LONG_NASH_V_MAX, 1.0))
 
 # Lateral: dominant changing term is Coriolis → A_c[1,3] ≈ -vx → dA_c/dvx ≈ -1
 #   Rebuild when lateral velocity prediction error exceeds ε_vy = 0.20 m/s:
 #   ψ̇_max ≈ μ·g / V_target (max yaw rate at cruise)
 #   Δvx_thr = ε_vy / (dt_lat · Np · ψ̇_max)
 _psi_dot_max = _vp.tire_friction_coeff * _vp.gravity / max(PLATOON_TARGET_VELOCITY, 1.0)
-LAT_NASH_REBUILD_DVX = 0.20 / (LAT_NASH_CONTROL_DT * NASH_NP * max(_psi_dot_max, 0.01))
+LAT_NASH_REBUILD_DVX = 0.20 / (LAT_NASH_CONTROL_DT * LAT_NASH_NP * max(_psi_dot_max, 0.01))
 
 # Platoon control dynamics
 JERK_LIMIT       = 2.0   # Maximum da/dt [m/s³]
@@ -327,6 +328,8 @@ DRIVER_PARAMS = {
         'tlc':                    6.0,   # lane-change duration [s]
         'max_heading_deg':        3.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    20.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     20.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.8,
         'mobil_a_th':             0.2,
         'plan_time_headway':      2.5,   # IDM planning time gap [s] — cautious keeps more distance
@@ -342,6 +345,8 @@ DRIVER_PARAMS = {
         'tlc':                    4.5,
         'max_heading_deg':        4.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    20.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     20.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.5,
         'mobil_a_th':             0.1,
         'plan_time_headway':      1.5,   # IDM planning time gap [s] — aligned with RAJAMANI_H to eliminate tug-of-war
@@ -357,6 +362,8 @@ DRIVER_PARAMS = {
         'tlc':                    3.0,
         'max_heading_deg':        6.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    15.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     15.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.2,
         'mobil_a_th':             0.05,
         'plan_time_headway':      1.3,   # IDM planning time gap [s] — aggressive follows closely
