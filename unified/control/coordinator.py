@@ -1090,8 +1090,10 @@ class UnifiedCoordinator:
 
         # --- 3. Adaptive EMA ---
         e_abs = abs(y_error)
-        if   e_abs > LAT_AUTHORITY_ALPHA_FAST_THR:  alpha = LAT_AUTHORITY_ALPHA_FAST
-        elif e_abs < LAT_AUTHORITY_ALPHA_BASE_THR:  alpha = LAT_AUTHORITY_ALPHA_BASE
+        if e_abs > LAT_AUTHORITY_ALPHA_FAST_THR:
+            alpha = LAT_AUTHORITY_ALPHA_FAST
+        elif e_abs < LAT_AUTHORITY_ALPHA_BASE_THR:
+            alpha = LAT_AUTHORITY_ALPHA_BASE
         else:
             blend = (e_abs - LAT_AUTHORITY_ALPHA_BASE_THR) / (
                 LAT_AUTHORITY_ALPHA_FAST_THR - LAT_AUTHORITY_ALPHA_BASE_THR)

@@ -25,6 +25,7 @@ from scipy.linalg import expm
 from typing import Tuple
 
 from unified.vehicle.components import VehicleParameters
+from unified.control.lower_level_controller import LowerLevelController
 
 
 # =============================================================================
@@ -131,6 +132,10 @@ class Vehicle6D:
 
         # Compute initial Jacobians
         self._update_jacobians(u_long=0.0, delta=0.0)
+
+        # ── Lower-level controller ────────────────────────────────────────────
+        self.llc = LowerLevelController(self)
+        self.llc._sync_engine_to_velocity()
 
         # ── Proxy objects (passed to Nash solvers at construction) ────────────
         self.long_proxy = LongVehicleProxy(self)
@@ -292,10 +297,14 @@ class Vehicle6D:
         self.state.delta       = delta_actual
         self.state.delta_f     = delta_actual   # longitudinal compat
 
-        # 2. Feedforward: u_long [m/s²] → Fxf [N] (stores result in state.Fxf)
-        Fxf = self._compute_Fxf(u_long)
+        # 2. Feedforward: u_long [m/s²] → Fxf [N] (tire saturation)
+        Fxf_desired = self._compute_Fxf(u_long)
 
-        # 3. RK4 over full 6D state
+        # 3. Lower-level controller: engine map → actual throttle/brake + Ackermann
+        self.llc.compute_control(Fxf_desired, delta_actual)
+        Fxf = self.llc.compute_drive_force()   # engine-limited drive force
+
+        # 4. RK4 over full 6D state
         s = np.array([self.state.x, self.state.vx,
                       self.state.y, self.state.vy,
                       self.state.psi, self.state.psi_dot])
@@ -329,7 +338,18 @@ class Vehicle6D:
         self.x_lateral        = np.array([self.state.y, self.state.vy,
                                        self.state.psi, self.state.psi_dot])
 
-        # 6. Update Jacobians
+        # 6. Update engine RPM and transmission
+        vx_new = self.state.vx
+        if abs(vx_new) > 0.1:
+            wheel_rpm         = (vx_new * 60) / (2 * np.pi * p.wheel_radius)
+            target_engine_rpm = wheel_rpm * self.llc.transmission.get_effective_ratio()
+            target_engine_rpm = max(target_engine_rpm, self.llc.engine.idle_rpm)
+            self.llc.engine.update_rpm(target_engine_rpm, dt)
+        else:
+            self.llc.engine.update_rpm(self.llc.engine.idle_rpm, dt)
+        self.llc.transmission.update(self.llc.engine.rpm, vx_new, dt)
+
+        # 7. Update Jacobians
         self._update_jacobians(u_long, delta_actual)
 
         # 7. World-frame update (Rajamani Eq. 2.10-2.11)

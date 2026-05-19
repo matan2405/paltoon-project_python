@@ -346,11 +346,16 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         axes[0, 0].legend(fontsize=7)
         axes[0, 0].grid(True, alpha=0.3)
 
+        # Current operating point: Q_pos=5000 → index 3 in default sweep (500,1000,2500,5000,10000)
+        _long_cur = next((i for i, s in enumerate(long_s) if s['Q_pos'] == 5000), None)
+        _long_ec  = ['red' if i == _long_cur else 'k' for i in range(n)]
+        _long_lw  = [2.5  if i == _long_cur else 0.5  for i in range(n)]
+
         gap_stds = [s.get('gap_rms_std', 0.0) for s in long_s]
         u_stds   = [s.get('u_long_rms_std', 0.0) for s in long_s]
         axes[0, 1].bar(range(n), gap_vals,
                        yerr=gap_stds if any(v > 0 for v in gap_stds) else None,
-                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
+                       color=colors, edgecolor=_long_ec, linewidth=_long_lw, capsize=4)
         axes[0, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_pos', ylabel='Gap error RMS [m]',
                        title='Long: gap RMS vs Q_pos')
@@ -358,7 +363,7 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
 
         axes[0, 2].bar(range(n), u_vals,
                        yerr=u_stds if any(v > 0 for v in u_stds) else None,
-                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
+                       color=colors, edgecolor=_long_ec, linewidth=_long_lw, capsize=4)
         axes[0, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_pos', ylabel='u_long RMS [m/s²]',
                        title='Long: u_long RMS vs Q_pos')
@@ -385,12 +390,17 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         axes[1, 0].legend(fontsize=7)
         axes[1, 0].grid(True, alpha=0.3)
 
+        # Current operating point: Q_y=800 → index 2 in default sweep (200,400,800,1600,3200)
+        _lat_cur = next((i for i, s in enumerate(lat_s) if s['Q_y'] == 800), None)
+        _lat_ec  = ['red' if i == _lat_cur else 'k' for i in range(n)]
+        _lat_lw  = [2.5  if i == _lat_cur else 0.5  for i in range(n)]
+
         # [1,1] FOLLOWING y_rms bar — flat (≈0) for all Q_y
         y_stds = [s.get('y_rms_std', 0.0) for s in lat_s]
         m_stds = [s.get('merge_delta_rms_std', 0.0) for s in lat_s]
         axes[1, 1].bar(range(n), y_vals,
                        yerr=y_stds if any(v > 0 for v in y_stds) else None,
-                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
+                       color=colors, edgecolor=_lat_ec, linewidth=_lat_lw, capsize=4)
         axes[1, 1].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_y', ylabel='y error RMS [m]',
                        title='Lat FOLLOWING: y RMS vs Q_y')
@@ -401,7 +411,7 @@ def plot_q_weight_sweep(q_results: Dict[str, list],
         m_stds_plot = [m_stds[i] if np.isfinite(m_vals[i]) else 0.0 for i in range(n)]
         axes[1, 2].bar(range(n), m_plot,
                        yerr=m_stds_plot if any(v > 0 for v in m_stds_plot) else None,
-                       color=colors, edgecolor='k', linewidth=0.5, capsize=4)
+                       color=colors, edgecolor=_lat_ec, linewidth=_lat_lw, capsize=4)
         axes[1, 2].set(xticks=range(n), xticklabels=[f"{q:.0f}" for q in q_vals],
                        xlabel='Q_y', ylabel='MERGE δ RMS [rad]',
                        title='Lat MERGE: δ_rms vs Q_y\n(lane-change effort)')
@@ -472,15 +482,26 @@ def plot_r_weight_sweep(r_results: Dict[str, list],
         _stacked_bar(axes[0, 0], long_s, 'u1_rms', 'u2_rms', 'R2_R1', 'gap_rms', 'gap RMS')
         axes[0, 0].set(title='Long: control effort decomposition')
         _metric_line(axes[0, 1], long_s, 'R2_R1', 'gap_rms',
-                     'R2/R1 ratio', 'Gap error RMS [m]')
+                     'R2/R1 ratio', 'Gap error RMS [m]', base_idx=1)
         axes[0, 1].set_title('Long: gap error vs R2/R1')
 
     if lat_s:
         _stacked_bar(axes[1, 0], lat_s, 'u1_rms', 'u2_rms', 'R2_R1', 'y_rms', 'y RMS')
         axes[1, 0].set(title='Lat: control effort decomposition')
         _metric_line(axes[1, 1], lat_s, 'R2_R1', 'y_rms',
-                     'R2/R1 ratio', 'y error RMS [m]')
+                     'R2/R1 ratio', 'y error RMS [m]', base_idx=1)
         axes[1, 1].set_title('Lat: y error vs R2/R1')
+
+        # Annotate when lateral panel is flat (range < 5% of mean) — the flatness IS the finding
+        y_vals_r = [s['y_rms'] for s in lat_s]
+        y_mean_r = float(np.nanmean(y_vals_r)) if y_vals_r else 1.0
+        y_range_r = max(y_vals_r) - min(y_vals_r) if y_vals_r else 0.0
+        if y_mean_r > 1e-9 and (y_range_r / y_mean_r) < 0.05:
+            axes[1, 1].annotate('Lateral tracking\ninsensitive to R ratio\nin tested range',
+                                 xy=(0.5, 0.5), xycoords='axes fraction',
+                                 ha='center', va='center', fontsize=8, color='gray',
+                                 bbox=dict(boxstyle='round', fc='lightyellow',
+                                           ec='gray', alpha=0.7))
 
     fig.tight_layout()
     _save_fig(fig, 'experiment_r_sweep.png', save)
@@ -629,6 +650,10 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
         ax_d.set(xlabel='λ (log)', ylabel='Merge duration [s]',
                  title='Lat MERGE: duration & steering effort vs λ\n'
                        'λ<1 (human dominant) → merge fails (94.5s); λ≥1 → success')
+        ax_d.annotate(
+            'λ<1: merge fails —\nhuman target y=0.75m\n> completion thresh 0.3m',
+            xy=(0.03, 0.97), xycoords='axes fraction', va='top', fontsize=6.5,
+            bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', ec='gray', alpha=0.8))
         ax_dr.set_ylabel('MERGE δ RMS [rad]', color='#d62728')
         ax_dr.tick_params(axis='y', labelcolor='#d62728')
         ax_d.grid(True, alpha=0.3)
@@ -660,12 +685,15 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
                              u1_stds=[r.get('u1_rms_std', 0.0) for r in s],
                              u2_stds=[r.get('u2_rms_std', 0.0) for r in s])
 
-        # [1,3] y_rms ± std vs λ for successful merges (merge_duration < 50s)
+        # [1,3] y_rms ± std vs λ for successful merges (merge_duration < 50s).
+        # n_successful annotated on each point so the selection bias is explicit:
+        # at low λ very few merges succeed, so y_rms reflects only the luckiest runs.
         ok_s = [r for r in s if r.get('merge_duration', float('inf')) < 50.0]
         if ok_s:
-            ok_lams = [r['lambda']              for r in ok_s]
-            ok_yrms = [r['y_rms']               for r in ok_s]
-            ok_stds = [r.get('y_rms_std', 0.0)  for r in ok_s]
+            ok_lams = [r['lambda']                    for r in ok_s]
+            ok_yrms = [r['y_rms']                     for r in ok_s]
+            ok_stds = [r.get('y_rms_std', 0.0)        for r in ok_s]
+            ok_ns   = [r.get('n_successful', '?')     for r in ok_s]
             axes[1, 3].semilogx(ok_lams, ok_yrms, 'o-', color='#9467bd',
                                  linewidth=1.5, markersize=6, label='y_rms (FOLLOWING)')
             if any(v > 0 for v in ok_stds):
@@ -673,8 +701,13 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
                 hi = [m + d for m, d in zip(ok_yrms, ok_stds)]
                 axes[1, 3].fill_between(ok_lams, lo, hi, color='#9467bd', alpha=0.2,
                                          label='±1σ GP')
+            for lam, yrms, n_ok in zip(ok_lams, ok_yrms, ok_ns):
+                axes[1, 3].annotate(f'n={n_ok}', xy=(lam, yrms), xytext=(0, 7),
+                                     textcoords='offset points', ha='center', fontsize=6.5,
+                                     color='#555555')
             axes[1, 3].set(xlabel='λ (log)', ylabel='y error RMS [m]',
-                           title='Lat: y_rms ±σ vs λ\n(successful merges, dur < 50s)')
+                           title='Lat: y_rms vs λ  (human_y_bias=0.75 m)\n'
+                                 'y_rms→0: system wins tug-of-war  (n annotated)')
             axes[1, 3].legend(fontsize=7)
             axes[1, 3].grid(True, alpha=0.3)
         else:
@@ -695,7 +728,15 @@ def plot_lambda_sweep(lam_results: Dict[str, list],
                     transform=ax.transAxes, fontsize=9, color='gray')
             ax.set_title(f'{key_label}: λ in FOLLOWING\n(dynamic Safety Field)')
             return
-        ax.hist(lam_fol, bins=30, color=colour, alpha=0.75, density=True)
+        # λ spans orders of magnitude → log-spaced bins reveal the full distribution
+        _lmin = max(lam_fol.min(), 1e-3)
+        _lmax = lam_fol.max()
+        if _lmin < _lmax:
+            log_bins = np.logspace(np.log10(_lmin), np.log10(_lmax), 30)
+        else:
+            log_bins = 30
+        ax.hist(lam_fol, bins=log_bins, color=colour, alpha=0.75, density=True)
+        ax.set_xscale('log')
         med = float(np.median(lam_fol))
         ax.axvline(med, color='k', linewidth=1.2, linestyle='--',
                    label=f'median = {med:.3f}')

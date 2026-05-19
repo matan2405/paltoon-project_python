@@ -861,12 +861,16 @@ class LambdaSweepExperiment:
                 'y_rms_std':       float(np.nanstd( [_y_error_rms(d)                      for d in r['trials']])),
                 'merge_duration':  float(np.nanmean([_merge_duration(d)                   for d in r['trials']])),
                 'merge_delta_rms': float(np.nanmean([_merge_smoothness_rms(d)             for d in r['trials']])),
-                'u1_rms':          float(np.nanmean([_control_effort_rms(d, 'u1_lat')                    for d in r['trials']])),
-                'u1_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u1_lat')                    for d in r['trials']])),
-                'u2_rms':          float(np.nanmean([_control_effort_rms(d, 'u2_lat')                    for d in r['trials']])),
-                'u2_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u2_lat')                    for d in r['trials']])),
-                'u1_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u1_lat')          for d in r['trials']])),
-                'u2_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u2_lat')          for d in r['trials']])),
+                'u1_rms':          float(np.nanmean([_control_effort_rms(d, 'u1_lat')     for d in r['trials']])),
+                'u1_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u1_lat')     for d in r['trials']])),
+                'u2_rms':          float(np.nanmean([_control_effort_rms(d, 'u2_lat')     for d in r['trials']])),
+                'u2_rms_std':      float(np.nanstd( [_control_effort_rms(d, 'u2_lat')     for d in r['trials']])),
+                'u1_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u1_lat') for d in r['trials']])),
+                'u2_mean_fol':     float(np.nanmean([_control_effort_mean_following(d, 'u2_lat') for d in r['trials']])),
+                # Number of trials where merge completed (duration < 50s).
+                # Used to annotate y_rms panels so the selection bias from
+                # reporting only successful merges is explicitly visible.
+                'n_successful':    sum(1 for d in r['trials'] if _merge_duration(d) < 50.0),
             }
             for r in self.results['lat']
         ]

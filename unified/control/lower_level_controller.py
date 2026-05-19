@@ -339,20 +339,44 @@ class LowerLevelController:
     def compute_max_brake_force(self) -> float:
         return self.params.mass * self.params.gravity * self.params.tire_friction_coeff
 
+    def compute_throttle_from_Fxf(self, Fxf: float) -> float:
+        """Inverse engine map: throttle ∈ [0,1] that causes Unity Powertrain to produce Fxf [N].
+
+        Round-trip guarantee (unsaturated):
+            engine_force(throttle) = engineTorque(rpm) * ratio * throttle / r_wheel = Fxf
+
+        When Fxf exceeds max engine capability at current RPM/gear, returns 1.0 (saturated).
+        Uses get_effective_ratio() so gear shifts are handled smoothly.
+        """
+        if Fxf <= 0.0:
+            return 0.0
+        effective_ratio = self.transmission.get_effective_ratio()
+        T_wheel_needed  = Fxf * self.params.wheel_radius
+        T_engine_needed = T_wheel_needed / max(effective_ratio, 1e-3)
+        T_engine_max    = self.engine.get_torque(self.engine.rpm)
+        if T_engine_max <= 0.0:
+            return 1.0   # engine stalled / below idle — saturate
+        return float(np.clip(T_engine_needed / T_engine_max, 0.0, 1.0))
+
+    def compute_brake_from_Fxf(self, Fxf: float) -> float:
+        """Inverse brake map: brake pedal ∈ [0,1] that produces braking force |Fxf| [N]."""
+        if Fxf >= 0.0:
+            return 0.0
+        return float(np.clip(abs(Fxf) / max(self.compute_max_brake_force(), 1.0), 0.0, 1.0))
+
     def calculate_forces(self):
-        """Compute net longitudinal force.  Returns (Fx_total, 0.0)."""
+        """Compute net longitudinal force via engine model.  Returns (Fx_total, 0.0).
+
+        Rg (grade resistance) is subtracted here, matching the feedforward term in
+        _compute_Fxf — so ax = Fx_total / m_eff == u_accel (round-trip guarantee).
+        """
         v = self.vehicle.state.vx
         F_aero = (0.5 * self.air_density * self.params.drag_coefficient *
                   self.params.frontal_area * v * abs(v))
         f_v = (np.tanh(10 * abs(v) - 8) + 1) / 2
         rolling_resistance = f_v * self.rolling_coeff * self.params.mass * self.params.gravity
+        Rg = self.params.mass * self.params.gravity * np.sin(self.params.road_grade)
 
-        if self.vehicle.autonomous_mode:
-            Rg          = self.params.mass * self.params.gravity * np.sin(self.params.road_grade)
-            total_force = self.vehicle.direct_force - F_aero - rolling_resistance - Rg
-            return total_force, 0.0
-
-        # Human-driven: engine torque map + brake
         if self.actual_throttle > 0.001:
             engine_torque     = self.engine.get_torque(self.engine.rpm)
             effective_ratio   = self.transmission.get_effective_ratio()
@@ -370,7 +394,7 @@ class LowerLevelController:
 
         brake_force = (self.compute_max_brake_force() * self.actual_brake
                        if self.actual_brake > 0.001 else 0.0)
-        Fx_total = engine_force - brake_force - F_aero - rolling_resistance
+        Fx_total = engine_force - brake_force - F_aero - rolling_resistance - Rg
         return Fx_total, 0.0
 
     def get_dynamic_max_acceleration(self) -> float:
@@ -385,24 +409,54 @@ class LowerLevelController:
     # HIERARCHICAL CONTROL LAW
     # =========================================================================
 
-    def compute_control(self, Fxf: float) -> None:
-        """Accept front axle drive force (FWD feedforward) and set display actuators.
+    def compute_drive_force(self) -> float:
+        """Engine/brake force [N] before subtracting resistances.
 
-        direct_force = Fxf is passed to calculate_forces() when autonomous_mode=True.
-        Display throttle/brake are normalized — no physics role.
+        This is the correct Fxf to pass to _derivatives_6d / Belousov EOM,
+        where Ra, Rg, Rr are subtracted internally.
         """
-        self.vehicle.direct_force = Fxf
-        F_req_max = self.params.mass * self.params.max_acceleration
-        F_req_min = -(self.params.mass * abs(self.params.max_deceleration))
+        v = self.vehicle.state.vx
+        if self.actual_throttle > 0.001:
+            engine_torque     = self.engine.get_torque(self.engine.rpm)
+            effective_ratio   = self.transmission.get_effective_ratio()
+            torque_multiplier = self.transmission.get_torque_multiplier()
+            wheel_torque      = engine_torque * effective_ratio * torque_multiplier
+            return (wheel_torque / self.params.wheel_radius) * self.actual_throttle
+        elif self.actual_brake > 0.001:
+            return -self.compute_max_brake_force() * self.actual_brake
+        else:
+            if abs(v) > 1.0:
+                braking_torque = ENGINE_BRAKING_BASE_TORQUE * (self.engine.rpm / 2000.0)
+                braking_torque = min(braking_torque, ENGINE_BRAKING_MAX_TORQUE)
+                total_ratio    = self.transmission.get_total_ratio()
+                return -(braking_torque * total_ratio / self.params.wheel_radius)
+            return 0.0
+
+    def compute_control(self, Fxf: float, delta: float = 0.0) -> None:
+        """Accept front axle drive force and convert to physical pedal commands.
+
+        Uses the proper inverse torque map so that the engine model in
+        calculate_forces() reproduces exactly Fxf [N] at the current RPM/gear
+        (round-trip guarantee when engine is not saturated).
+
+        delta : bicycle-model steering angle [rad] — used for Ackermann computation.
+                Pass 0.0 for straight-line platoon vehicles (default).
+        """
         if Fxf >= 0:
-            self.actual_throttle = np.clip(Fxf / max(F_req_max, 1.0), 0.0, 1.0)
+            self.actual_throttle = self.compute_throttle_from_Fxf(Fxf)
             self.actual_brake    = 0.0
         else:
             self.actual_throttle = 0.0
-            self.actual_brake    = np.clip(abs(Fxf) / max(abs(F_req_min), 1.0), 0.0, 1.0)
-        self.throttle_input       = self.actual_throttle
-        self.brake_input          = self.actual_brake
-        self.vehicle.steering_input = 0.0
+            self.actual_brake    = self.compute_brake_from_Fxf(Fxf)
+        self.throttle_input = self.actual_throttle
+        self.brake_input    = self.actual_brake
+
+        self.delta_left, self.delta_right = ackermann_wheel_angles(
+            delta, self.params.wheelbase, self.params.track_width
+        )
+        if hasattr(self.vehicle, 'delta_left'):
+            self.vehicle.delta_left  = self.delta_left
+            self.vehicle.delta_right = self.delta_right
 
     # =========================================================================
     # COMPLEX DYNAMICS UPDATE  (+ Ackermann geometry)

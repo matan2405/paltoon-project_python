@@ -13,6 +13,7 @@ import numpy as np
 from scipy.linalg import expm
 from typing import Tuple
 from unified.vehicle.components import VehicleParameters, VehicleState
+from unified.vehicle.vehicle_6d import Vehicle6D
 from unified.config import (
     SIMULATION_DT,
     LOWER_CTRL_ACCEL_FILTER_ALPHA,
@@ -208,16 +209,45 @@ class Vehicle:
     # =========================================================================
 
     def update_dynamics_hierarchical(self, dt: float):
-        a_desired = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
+        a_desired      = self.a_desired if hasattr(self, 'a_desired') else self.target_acceleration
+        steering_angle = self.steering_input * self.params.max_steering_angle
 
-        llc = self.lower_level_controller
-        Fxf = self._compute_Fxf(a_desired)
-        llc.compute_control(Fxf)
+        llc            = self.lower_level_controller
+        Fxf            = self._compute_Fxf(a_desired)
+        llc.compute_control(Fxf, steering_angle)
+        Fxf_achievable = llc.compute_drive_force()
 
-        was_autonomous = self.autonomous_mode
-        self.autonomous_mode = True
-        llc.update_dynamics_complex(dt)
-        self.autonomous_mode = was_autonomous
+        # RK4 6D — reuse Vehicle6D._derivatives_6d (same attributes via duck typing)
+        s  = np.array([self.state.x,   self.state.vx,
+                       self.state.y,   self.state.vy,
+                       self.state.psi, self.state.psi_dot])
+        fd = lambda st, Fx, d: Vehicle6D._derivatives_6d(self, st, Fx, d)
+        k1 = fd(s,                   Fxf_achievable, steering_angle)
+        k2 = fd(s + 0.5 * dt * k1,  Fxf_achievable, steering_angle)
+        k3 = fd(s + 0.5 * dt * k2,  Fxf_achievable, steering_angle)
+        k4 = fd(s + dt * k3,         Fxf_achievable, steering_angle)
+        s_new = s + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+        self.state.x       = float(s_new[0])
+        self.state.vx      = float(np.clip(s_new[1], 0.0, self.params.max_velocity))
+        self.state.y       = float(s_new[2])
+        self.state.vy      = float(s_new[3])
+        self.state.psi     = float(s_new[4])
+        self.state.psi_dot = float(s_new[5])
+        self.state.ax      = float(k1[1])
+        self.v             = self.state.vx
+        self.a             = self.state.ax
+
+        # Engine RPM + transmission update
+        vx_new = self.state.vx
+        if abs(vx_new) > 0.1:
+            wheel_rpm  = (vx_new * 60) / (2 * np.pi * self.params.wheel_radius)
+            target_rpm = wheel_rpm * llc.transmission.get_effective_ratio()
+            target_rpm = max(target_rpm, llc.engine.idle_rpm)
+            llc.engine.update_rpm(target_rpm, dt)
+        else:
+            llc.engine.update_rpm(llc.engine.idle_rpm, dt)
+        llc.transmission.update(llc.engine.rpm, vx_new, dt)
 
         a_raw = self.a
         if not self._a_filter_initialized:
@@ -227,7 +257,7 @@ class Vehicle:
             self._a_filtered = (LOWER_CTRL_ACCEL_FILTER_ALPHA * a_raw
                                 + (1.0 - LOWER_CTRL_ACCEL_FILTER_ALPHA) * self._a_filtered)
 
-        self.a = self._a_filtered
+        self.a        = self._a_filtered
         self.state.ax = self._a_filtered
 
         self.x_long = np.array([self.state.x, self.state.vx])
