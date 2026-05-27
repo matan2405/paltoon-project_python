@@ -1,0 +1,36 @@
+using UnityEngine;
+
+[CreateAssetMenu(menuName = "NashPlatoon/ReferenceGenerator")]
+public class ReferenceGeneratorConfig : ScriptableObject {
+
+    // ── Rajamani Ch. 6.7 Transitional (System long reference) ───────────────
+    [Header("Rajamani Transitional — System longitudinal reference")]
+    public float RajamaniH         = 1.5f;    // RAJAMANI_H  desired time headway [s]
+    public float AComfort          = 1.5f;    // comfortable deceleration [m/s²]
+    public float KV                = 0.4f;    // velocity tracking gain [1/s]
+    public float K1Ctg             = 0.05f;   // CTG position feedback gain
+    public float K2Ctg             = 0.4f;    // CTG velocity feedback gain
+    public float DetectionRange    = 300.0f;  // free-road cruise threshold [m]
+    public float TtcThreshold      = 1.2f;    // TTC below this → collision avoidance [s]
+    public float MinCritGapOffset  = 2.0f;    // min critical gap = offset + L/2 [m]
+    public float MaxEmergDecel     = -5.0f;   // emergency deceleration cap [m/s²]
+    public float CatchupMultiplier = 1.05f;   // cruise target = V_platoon × this
+    public float FreeDelta         = 4.0f;    // IDM exponent for free-road acceleration
+
+    // ── IDM — Human longitudinal reference ───────────────────────────────────
+    [Header("IDM — Human longitudinal reference")]
+    public float IdmAMax           = 1.5f;    // MOBIL_IDM_A_MAX max acceleration [m/s²]
+    public float IdmS0             = 2.0f;    // MOBIL_IDM_S0    minimum spacing [m]
+    public float IdmDelta          = 4.0f;    // MOBIL_IDM_DELTA free-road exponent
+    public float IdmPlanT          = 2.0f;    // planning time headway (more tolerant) [s]
+    public float IdmPlanB          = 4.0f;    // planning deceleration [m/s²]
+
+    // ── Driver profile (normal) — Lateral reference ───────────────────────────
+    // For HITL use, these are measured from the real driver.
+    // These defaults correspond to the 'normal' profile in unified/config.py.
+    [Header("Driver profile — Lateral reference")]
+    public float VelocityOffset    = 0.0f;    // desired speed relative to platoon [m/s]
+    public float HumanTlc          = 4.5f;    // human lane-change duration [s]
+    public float MaxHeadingDeg     = 4.0f;    // max heading angle for sys trajectory shaping [deg]
+    public float SysTlcMultiplier  = 1.5f;    // sys T_lc = human TLC × this
+}
