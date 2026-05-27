@@ -66,9 +66,16 @@ from unified.config import (                                          # noqa: E4
     LONG_SAFETY_BASE_RADIUS, LONG_SAFETY_OBSTACLE_MASS, LONG_SAFETY_INFLUENCE_FACTOR,
     LONG_SAFETY_DRIVER_RISK, LONG_SAFETY_EPSILON, LONG_SAFETY_DISTANCE_DECAY,
     LONG_SAFETY_FOLLOWING_SOFT_FACTOR,
+    LONG_SAFETY_LEADER_POSITION_MULT, LONG_SAFETY_MIDDLE_POSITION_MULT,
+    LONG_SAFETY_FOLLOWER_POSITION_MULT, LONG_SAFETY_VELOCITY_REFERENCE,
+    LONG_SAFETY_VELOCITY_SCALING, LONG_SAFETY_PLATOON_COHERENCE,
+    LONG_SAFETY_FOLLOWER_WEIGHT,
     LAT_DSF_TS, LAT_DSF_TAU, LAT_DSF_A_MIN, LAT_DSF_G,
     LAT_DSF_K1, LAT_DSF_K2, LAT_DSF_DR,
     LAT_SAFETY_MAX_FORCE, LAT_SAFETY_FILTER_ALPHA,
+    LAT_SAFETY_ROAD_HALF_WIDTH, LAT_SAFETY_BOUNDARY_FORCE_GAIN,
+    LAT_SAFETY_BOUNDARY_FORCE_SCALE, LAT_SAFETY_BOUNDARY_PROXIMITY,
+    LAT_SAFETY_BOUNDARY_EPSILON, LAT_SAFETY_DIRECTION_SMOOTH_SIGMA,
     PLATOON_TIME_GAP, PLATOON_STANDSTILL_DISTANCE, PLATOON_TARGET_VELOCITY,
     PLATOON_VEHICLE_LENGTH,
     RAJAMANI_H, RAJAMANI_K1, RAJAMANI_K2, RAJAMANI_K3, RAJAMANI_K4, RAJAMANI_K5,
@@ -319,6 +326,15 @@ class UnifiedCoordinator:
         self._long_force_filt = 0.0
         self._lat_force_filt  = 0.0
 
+        # ── Longitudinal DSF parameter filter state (EllipseLongitudinalSafetyField) ─
+        # Mirrors split module: _s_filtered, _Mo_filtered, _Ri_filtered, _DRi_filtered.
+        # Note: split module never updates these after init, so they act as fixed-blend
+        # anchors (alpha*dynamic + (1-alpha)*base_value).
+        self._long_s_filt  = LONG_SAFETY_BASE_RADIUS
+        self._long_Mo_filt = LONG_SAFETY_OBSTACLE_MASS
+        self._long_Ri_filt = LONG_SAFETY_INFLUENCE_FACTOR
+        self._long_DR_filt = LONG_SAFETY_DRIVER_RISK
+
         # ── MA-IDM SE-kernel GP residual states (Zhang & Sun 2024, Eq. 9) ───────
         _ma     = MA_IDM_PARAMS.get(driver_type, MA_IDM_PARAMS['normal'])
         _ma_lat = MA_IDM_LAT_PARAMS.get(driver_type, MA_IDM_LAT_PARAMS['normal'])
@@ -499,16 +515,25 @@ class UnifiedCoordinator:
         leader   = self._find_leader(platoon_vehicles)
         follower = self.locked_follower if self._merge_locked else None
 
+        # Compute dynamic DSF parameters (position mult, velocity scaling, EMA blend)
+        # mirrors EllipseLongitudinalSafetyField._compute_dynamic_* methods
+        _s, _Mo, _Ri, _DR = self._long_dsf_params(
+            float(ego.state.vx),
+            has_leader=(leader is not None),
+            has_follower=(follower is not None),
+        )
+
         # Pre-compute raw components for logging (unfiltered)
-        f_leader_raw   = self._long_leader_force_raw(leader)   if leader   is not None else 0.0
-        f_follower_raw = self._long_follower_force_raw(follower) if follower is not None else 0.0
+        f_leader_raw   = self._long_leader_force_raw(leader,   _s, _Mo, _Ri, _DR) if leader   is not None else 0.0
+        f_follower_raw = self._long_follower_force_raw(follower, _s, _Mo, _Ri, _DR) if follower is not None else 0.0
         rear_gap = (ego.state.x - follower.state.x - VEHICLE_LENGTH
                     ) if follower is not None else float('nan')
 
         if leader is None:
             # 'front' scenario or free road: no forward obstacle.
             # Mirrors split-module: F_leader=0, F_total=F_follower (line 401).
-            force = self._long_safety_force(leader=None, follower=follower)
+            force = self._long_safety_force(leader=None, follower=follower,
+                                            s=_s, Mo=_Mo, Ri=_Ri, DR=_DR)
             # F_follower > 0 when follower is too close → ego accelerates forward
             u_ff = float(np.clip(
                 0.3 * (PLATOON_TARGET_VELOCITY - ego.state.vx)
@@ -525,7 +550,7 @@ class UnifiedCoordinator:
             return
 
         # Safety field force: F_total = F_leader + F_follower (split-module line 401)
-        force = self._long_safety_force(leader, follower=follower)
+        force = self._long_safety_force(leader, follower=follower, s=_s, Mo=_Mo, Ri=_Ri, DR=_DR)
 
         # Compute gap_error and velocity_error for authority computation
         _gap_err = self._long_gap_error(leader)   # positive = too close
@@ -777,7 +802,8 @@ class UnifiedCoordinator:
               f"scenario={self.merge_scenario}")
 
     # =========================================================================
-    # Longitudinal safety field  (Wang et al. 2015/2016, simplified)
+    # Longitudinal safety field  (Li et al. 2019, Wang et al. 2015/2016)
+    # Mirrors EllipseLongitudinalSafetyField in longitudinal_safety_field.py
     # =========================================================================
 
     def _long_gap_error(self, leader) -> float:
@@ -787,23 +813,81 @@ class UnifiedCoordinator:
         des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
         return des_gap - gap
 
-    def _long_leader_force_raw(self, leader) -> float:
-        """Raw repulsive/attractive force from the leader [N].
+    def _long_position_mult(self, has_leader: bool, has_follower: bool) -> float:
+        """Position-based multiplier on s and Mo (mirrors _get_position_multiplier).
 
-        Force > 0 ↔ leader too close (repulsive, Li et al. 2019 elliptic DSF).
-        Force < 0 ↔ gap too large (attractive, linear — not in split module but
-                     needed to pull ego toward the platoon when falling behind).
+        LEADER_MULT  → ego has no leader (platoon head)
+        MIDDLE_MULT  → ego has both leader and follower (middle position)
+        FOLLOWER_MULT→ ego has leader but no follower (tail)
+        """
+        if not has_leader:
+            return LONG_SAFETY_LEADER_POSITION_MULT
+        elif has_follower:
+            return LONG_SAFETY_MIDDLE_POSITION_MULT
+        else:
+            return LONG_SAFETY_FOLLOWER_POSITION_MULT
+
+    def _long_dsf_params(self, ego_vx: float,
+                          has_leader: bool, has_follower: bool):
+        """Compute dynamic DSF parameters (s, Mo, Ri, DR).
+
+        Mirrors EllipseLongitudinalSafetyField._compute_dynamic_* methods:
+          s  = base_radius × pos_mult × vel_factor  (EMA-blended with base)
+          Mo = base_mass   × pos_mult               (EMA-blended with base)
+          Ri = base_Ri × coherence_factor_if_middle  (EMA-blended with base)
+          DR = base_DR                               (EMA-blended; constant in practice)
+
+        Note: the split module never updates the filter state after __init__, so
+        the EMA is effectively a fixed blend: alpha*dynamic + (1-alpha)*base.
+        """
+        pos_mult = self._long_position_mult(has_leader, has_follower)
+
+        # s: velocity-scaled safety radius (mirrors _compute_dynamic_safety_radius)
+        s_target     = LONG_SAFETY_BASE_RADIUS * pos_mult
+        vel_factor   = 1.0 + LONG_SAFETY_VELOCITY_SCALING * (
+            ego_vx / LONG_SAFETY_VELOCITY_REFERENCE - 1.0)
+        s_target    *= max(0.5, min(2.0, vel_factor))
+        s = (LONG_SAFETY_FILTER_ALPHA * s_target
+             + (1.0 - LONG_SAFETY_FILTER_ALPHA) * self._long_s_filt)
+
+        # Mo: position-weighted obstacle mass (mirrors _compute_dynamic_obstacle_mass)
+        Mo_target = LONG_SAFETY_OBSTACLE_MASS * pos_mult
+        Mo = (LONG_SAFETY_FILTER_ALPHA * Mo_target
+              + (1.0 - LONG_SAFETY_FILTER_ALPHA) * self._long_Mo_filt)
+
+        # Ri: platoon coherence factor in middle position (mirrors _compute_dynamic_influence_factor)
+        # road_condition always 'dry' → road_factor=1.0; high_risk_situation always False
+        Ri_target = LONG_SAFETY_INFLUENCE_FACTOR
+        if has_leader and has_follower:
+            Ri_target *= LONG_SAFETY_PLATOON_COHERENCE
+        Ri = (LONG_SAFETY_FILTER_ALPHA * Ri_target
+              + (1.0 - LONG_SAFETY_FILTER_ALPHA) * self._long_Ri_filt)
+
+        # DR: base driver risk (mirrors _compute_dynamic_driving_risk)
+        DR = (LONG_SAFETY_FILTER_ALPHA * LONG_SAFETY_DRIVER_RISK
+              + (1.0 - LONG_SAFETY_FILTER_ALPHA) * self._long_DR_filt)
+
+        return s, Mo, Ri, DR
+
+    def _long_leader_force_raw(self, leader, s: float, Mo: float,
+                                Ri: float, DR: float) -> float:
+        """Raw force from the leader [N] using Li et al. (2019) elliptic DSF.
+
+        Force > 0: leader too close (repulsive).
+        Force < 0: gap too large (attractive pull — not in split module but needed
+                   to pull ego toward platoon when falling behind).
+        Uses dynamic parameters (s, Mo, Ri, DR) pre-computed by _long_dsf_params.
         """
         ego     = self.ego
         gap     = leader.state.x - ego.state.x - VEHICLE_LENGTH
         des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
 
-        # Hard safety zones — linear cap (same as split module apply_hard_constraint)
-        if gap < LONG_SAFETY_EMERGENCY_BRAKE_DIST:
+        # Hard safety zones — MIN_SAFE is tighter (inner), EMERGENCY_BRAKE is outer
+        if gap < LONG_SAFETY_MIN_SAFE_DISTANCE:
             return LONG_SAFETY_MAX_REPULSIVE_FORCE
-        elif gap < LONG_SAFETY_MIN_SAFE_DISTANCE:
-            t = 1.0 - (gap - LONG_SAFETY_EMERGENCY_BRAKE_DIST) / max(
-                LONG_SAFETY_MIN_SAFE_DISTANCE - LONG_SAFETY_EMERGENCY_BRAKE_DIST, 1e-3)
+        elif gap < LONG_SAFETY_EMERGENCY_BRAKE_DIST:
+            t = 1.0 - (gap - LONG_SAFETY_MIN_SAFE_DISTANCE) / max(
+                LONG_SAFETY_EMERGENCY_BRAKE_DIST - LONG_SAFETY_MIN_SAFE_DISTANCE, 1e-3)
             return t * LONG_SAFETY_MAX_REPULSIVE_FORCE
 
         gap_error = des_gap - gap          # >0 → too close, <0 → too far
@@ -817,29 +901,30 @@ class UnifiedCoordinator:
                 0.0,
             ))
         # Gap < desired: Li et al. (2019) elliptic DSF repulsive force
-        r_ell     = gap_error / (LONG_SAFETY_BASE_RADIUS + LONG_SAFETY_EPSILON)
-        potential = (LONG_SAFETY_OBSTACLE_MASS * LONG_SAFETY_INFLUENCE_FACTOR) / (r_ell + LONG_SAFETY_EPSILON) ** 2
+        r_ell     = gap_error / (s + LONG_SAFETY_EPSILON)
+        potential = (Mo * Ri) / (r_ell + LONG_SAFETY_EPSILON) ** 2
         w_dist    = np.exp(-gap_error / LONG_SAFETY_DISTANCE_DECAY)
         w_vel     = np.exp(max(0.0, v_rel) / 5.0)
-        w_risk    = 1.0 + LONG_SAFETY_DRIVER_RISK
+        w_risk    = 1.0 + DR
         return float(min(potential * w_dist * w_vel * w_risk, LONG_SAFETY_MAX_REPULSIVE_FORCE))
 
-    def _long_follower_force_raw(self, follower) -> float:
+    def _long_follower_force_raw(self, follower, s: float, Mo: float,
+                                  Ri: float, DR: float) -> float:
         """Raw repulsive force from the follower [N].
 
         Force >= 0: follower too close → ego must accelerate (push-forward risk).
-        No attractive component — mirrors split-module _compute_force_to_vehicle(is_leader=False).
-        Uses Li et al. (2019) elliptic DSF formula for the normal zone.
+        No attractive component — mirrors _compute_force_to_vehicle(is_leader=False).
+        Uses dynamic parameters (s, Mo, Ri, DR) pre-computed by _long_dsf_params.
         """
         ego      = self.ego
         gap_rear = ego.state.x - follower.state.x - VEHICLE_LENGTH
         des_gap  = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
 
-        if gap_rear < LONG_SAFETY_EMERGENCY_BRAKE_DIST:
+        if gap_rear < LONG_SAFETY_MIN_SAFE_DISTANCE:
             return LONG_SAFETY_MAX_REPULSIVE_FORCE
-        elif gap_rear < LONG_SAFETY_MIN_SAFE_DISTANCE:
-            t = 1.0 - (gap_rear - LONG_SAFETY_EMERGENCY_BRAKE_DIST) / max(
-                LONG_SAFETY_MIN_SAFE_DISTANCE - LONG_SAFETY_EMERGENCY_BRAKE_DIST, 1e-3)
+        elif gap_rear < LONG_SAFETY_EMERGENCY_BRAKE_DIST:
+            t = 1.0 - (gap_rear - LONG_SAFETY_MIN_SAFE_DISTANCE) / max(
+                LONG_SAFETY_EMERGENCY_BRAKE_DIST - LONG_SAFETY_MIN_SAFE_DISTANCE, 1e-3)
             return t * LONG_SAFETY_MAX_REPULSIVE_FORCE
 
         gap_error = des_gap - gap_rear   # >0 when follower too close
@@ -847,41 +932,63 @@ class UnifiedCoordinator:
             return 0.0  # follower is safe distance away — no repulsive force
 
         v_rel     = follower.state.vx - ego.state.vx  # >0 when follower closing
-        r_ell     = gap_error / (LONG_SAFETY_BASE_RADIUS + LONG_SAFETY_EPSILON)
-        potential = (LONG_SAFETY_OBSTACLE_MASS * LONG_SAFETY_INFLUENCE_FACTOR) / (r_ell + LONG_SAFETY_EPSILON) ** 2
+        r_ell     = gap_error / (s + LONG_SAFETY_EPSILON)
+        potential = (Mo * Ri) / (r_ell + LONG_SAFETY_EPSILON) ** 2
         w_dist    = np.exp(-gap_error / LONG_SAFETY_DISTANCE_DECAY)
         w_vel     = np.exp(max(0.0, v_rel) / 5.0)
-        w_risk    = 1.0 + LONG_SAFETY_DRIVER_RISK
+        w_risk    = 1.0 + DR
         return float(min(potential * w_dist * w_vel * w_risk, LONG_SAFETY_MAX_REPULSIVE_FORCE))
 
-    def _long_safety_force(self, leader, follower=None) -> float:
+    def _long_safety_force(self, leader, follower=None,
+                            s: float = None, Mo: float = None,
+                            Ri: float = None, DR: float = None) -> float:
         """Compute total longitudinal safety field force [N].
 
-        Matches the split-module EllipseLongitudinalSafetyField architecture
-        (longitudinal_safety_field.py line 368–402):
-          F_total = F_leader + F_follower
-
-        F_leader > 0 ↔ leader too close (brake); < 0 ↔ gap too large (attract).
-        F_follower ≥ 0 ↔ follower too close (accelerate).
-        In FOLLOWING phase, force is scaled quadratically for small gap errors
-        (mirrors split-module _apply_soft_transition, line 293–314).
-        Combined force is EMA low-pass filtered to reduce noise.
+        Mirrors EllipseLongitudinalSafetyField.compute_risk_force_from_platoon
+        (longitudinal_safety_field.py lines 368–418):
+          F_leader  = _compute_force_to_vehicle(is_leader=True)
+          F_follower = follower_weight × _compute_force_to_vehicle(is_leader=False)
+          In FOLLOWING phase: apply _apply_soft_transition SEPARATELY to each
+            using their own gap errors and FOLLOWING_GAP_ERROR_FACTOR threshold.
+          F_total = F_leader + F_follower  (then EMA low-pass filtered)
         """
-        F_leader   = self._long_leader_force_raw(leader)   if leader   is not None else 0.0
-        F_follower = self._long_follower_force_raw(follower) if follower is not None else 0.0
+        # Fall back to base values if params not provided (should not happen in practice)
+        if s is None:
+            s = LONG_SAFETY_BASE_RADIUS
+        if Mo is None:
+            Mo = LONG_SAFETY_OBSTACLE_MASS
+        if Ri is None:
+            Ri = LONG_SAFETY_INFLUENCE_FACTOR
+        if DR is None:
+            DR = LONG_SAFETY_DRIVER_RISK
+
+        ego     = self.ego
+        des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * ego.state.vx
+
+        F_leader = self._long_leader_force_raw(leader, s, Mo, Ri, DR) if leader is not None else 0.0
+        F_follower_raw = (self._long_follower_force_raw(follower, s, Mo, Ri, DR)
+                          if follower is not None else 0.0)
+        # Apply follower weight (mirrors _get_follower_weight; always FOLLOWER_WEIGHT
+        # since follower_is_joining and follower_decelerating default to False in split module)
+        F_follower = LONG_SAFETY_FOLLOWER_WEIGHT * F_follower_raw
+
+        # Quadratic soft transition in FOLLOWING phase (mirrors _apply_soft_transition).
+        # Applied SEPARATELY to leader and follower using their own gap errors,
+        # with threshold = FOLLOWING_GAP_ERROR_FACTOR × desired_gap (matches split module).
+        if self.phase == MergePhase.FOLLOWING:
+            threshold = FOLLOWING_GAP_ERROR_FACTOR * max(des_gap, 1.0)
+            if threshold > 0 and leader is not None:
+                gap      = leader.state.x - ego.state.x - VEHICLE_LENGTH
+                gap_err  = abs(des_gap - gap)
+                F_leader *= min(1.0, (gap_err / threshold) ** 2)
+            if threshold > 0 and follower is not None:
+                gap_rear     = ego.state.x - follower.state.x - VEHICLE_LENGTH
+                gap_err_rear = abs(des_gap - gap_rear)
+                F_follower  *= min(1.0, (gap_err_rear / threshold) ** 2)
+
         raw = F_leader + F_follower
-
-        # Quadratic soft transition in FOLLOWING — prevents force saturation at small errors
-        if self.phase == MergePhase.FOLLOWING and leader is not None:
-            gap     = leader.state.x - self.ego.state.x - VEHICLE_LENGTH
-            des_gap = PLATOON_STANDSTILL_DISTANCE + PLATOON_TIME_GAP * self.ego.state.vx
-            threshold = LONG_SAFETY_FOLLOWING_SOFT_FACTOR * max(des_gap, 1.0)
-            gap_err   = abs(des_gap - gap)
-            scale     = min(1.0, (gap_err / threshold) ** 2) if threshold > 0 else 1.0
-            raw *= scale
-
         self._long_force_filt = (LONG_SAFETY_FILTER_ALPHA * raw
-                                 + (1 - LONG_SAFETY_FILTER_ALPHA) * self._long_force_filt)
+                                 + (1.0 - LONG_SAFETY_FILTER_ALPHA) * self._long_force_filt)
         return self._long_force_filt
 
     # =========================================================================
@@ -1018,26 +1125,21 @@ class UnifiedCoordinator:
             Fr = E * M_ego * np.exp(-LAT_DSF_K2 * abs(ego_vx) * cos_theta_i) * (1.0 + LAT_DSF_DR)
 
             # Lateral direction: smooth tanh repulsion (push ego away from obstacle)
-            _sigma = 0.5   # direction smoothing width [m]
-            lateral_direction = np.tanh(dy / _sigma)
+            lateral_direction = np.tanh(dy / LAT_SAFETY_DIRECTION_SMOOTH_SIGMA)
             total_force += Fr * lateral_direction
 
-        # Road boundary forces
-        road_half_width = 7.0    # half road width [m]
-        boundary_gain   = 150.0  # [N]
-        boundary_scale  = 2.0
-        boundary_prox   = 3.0    # activate within this distance [m]
-        _eps = 0.1
+        # Road boundary forces (mirrors lateral/config.py SAFETY_* constants)
+        dist_right = LAT_SAFETY_ROAD_HALF_WIDTH - ego_y
+        if 0 < dist_right < LAT_SAFETY_BOUNDARY_PROXIMITY:
+            potential = 1.0 / max(dist_right, LAT_SAFETY_BOUNDARY_EPSILON)
+            total_force -= LAT_SAFETY_BOUNDARY_FORCE_GAIN * np.tanh(
+                potential / LAT_SAFETY_BOUNDARY_FORCE_SCALE)
 
-        dist_right = road_half_width - ego_y
-        if 0 < dist_right < boundary_prox:
-            potential = 1.0 / max(dist_right, _eps)
-            total_force -= boundary_gain * np.tanh(potential / boundary_scale)
-
-        dist_left = road_half_width + ego_y
-        if 0 < dist_left < boundary_prox:
-            potential = 1.0 / max(dist_left, _eps)
-            total_force += boundary_gain * np.tanh(potential / boundary_scale)
+        dist_left = LAT_SAFETY_ROAD_HALF_WIDTH + ego_y
+        if 0 < dist_left < LAT_SAFETY_BOUNDARY_PROXIMITY:
+            potential = 1.0 / max(dist_left, LAT_SAFETY_BOUNDARY_EPSILON)
+            total_force += LAT_SAFETY_BOUNDARY_FORCE_GAIN * np.tanh(
+                potential / LAT_SAFETY_BOUNDARY_FORCE_SCALE)
 
         total_force = float(np.clip(total_force, -LAT_SAFETY_MAX_FORCE, LAT_SAFETY_MAX_FORCE))
         self._lat_force_filt = (LAT_SAFETY_FILTER_ALPHA * total_force

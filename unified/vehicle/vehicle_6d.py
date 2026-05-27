@@ -231,6 +231,7 @@ class Vehicle6D:
         p = self.params
 
         vx_safe = max(abs(vx), 0.1)
+        # Low-speed blending (Fernández Eq. 4.4)
         f_vx    = (np.tanh(10.0 * abs(vx) - 8.0) + 1.0) / 2.0
 
         # ── Resistive forces (Belousov Eq. 3.5–3.7) ──────────────────────────

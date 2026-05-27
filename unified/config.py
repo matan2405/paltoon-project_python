@@ -141,7 +141,7 @@ LONG_NASH_DU2_MAX         =  2.0
 LONG_NASH_V_MIN           =  0.0
 LONG_NASH_V_MAX           = 50.0
 LONG_NASH_GAP_MIN         =  7.0    # [m]
-LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
+LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 40.0, 50.0)
 
 # =============================================================================
 # LATERAL NASH SOLVER PARAMETERS
@@ -193,6 +193,17 @@ LONG_SAFETY_DISTANCE_DECAY          = 15.0   # distance decay factor [m]
 # Quadratic soft-transition threshold in FOLLOWING phase (mirrors split module)
 # Force scaled by (|gap_err| / threshold)² when |gap_err| < threshold
 LONG_SAFETY_FOLLOWING_SOFT_FACTOR   =  0.35  # fraction of desired_gap (enlarged quiet zone → force fades faster)
+# Position multipliers (mirrors Longitudinal/config.py SAFETY_*_POSITION_MULTIPLIER)
+LONG_SAFETY_LEADER_POSITION_MULT   = 0.8
+LONG_SAFETY_MIDDLE_POSITION_MULT   = 1.2
+LONG_SAFETY_FOLLOWER_POSITION_MULT = 1.0
+# Velocity scaling for safety radius (mirrors SAFETY_VELOCITY_REFERENCE/SCALING_FACTOR)
+LONG_SAFETY_VELOCITY_REFERENCE     = 120.0  # reference speed [same units as split module]
+LONG_SAFETY_VELOCITY_SCALING       = 0.8
+# Platoon coherence factor on Ri when ego is in middle (mirrors SAFETY_PLATOON_COHERENCE_FACTOR)
+LONG_SAFETY_PLATOON_COHERENCE      = 1.5
+# Follower force weight (mirrors SAFETY_FOLLOWER_WEIGHT)
+LONG_SAFETY_FOLLOWER_WEIGHT        = 0.5
 
 # =============================================================================
 # LATERAL SAFETY FIELD / DSF (Li 2019, Wang 2015/2016)
@@ -206,6 +217,13 @@ LAT_DSF_K2           = 0.005
 LAT_DSF_DR           = 0.5     # Driver risk factor
 LAT_SAFETY_MAX_FORCE = 2000.0  # [N]
 LAT_SAFETY_FILTER_ALPHA = 0.3
+# Road boundary force parameters (mirrors lateral/config.py SAFETY_*)
+LAT_SAFETY_ROAD_HALF_WIDTH      =   7.0   # half road width [m]
+LAT_SAFETY_BOUNDARY_FORCE_GAIN  = 150.0   # boundary repulsion gain [N]
+LAT_SAFETY_BOUNDARY_FORCE_SCALE =   2.0   # boundary tanh scale
+LAT_SAFETY_BOUNDARY_PROXIMITY   =   3.0   # activation distance from boundary [m]
+LAT_SAFETY_BOUNDARY_EPSILON     =   0.1   # numerical safety [m]
+LAT_SAFETY_DIRECTION_SMOOTH_SIGMA =  0.5  # tanh direction-smoothing width [m]
 
 # =============================================================================
 # AUTHORITY ALLOCATOR — LONGITUDINAL (sigmoid on risk force)

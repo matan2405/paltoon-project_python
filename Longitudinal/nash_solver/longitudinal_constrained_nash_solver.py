@@ -773,7 +773,7 @@ if __name__ == "__main__":
     solver.reset()
     results = []
 
-    for lam in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0]:
+    for lam in [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 40.0, 50.0]:
         solver.u1_prev = 0.0
         solver.u2_prev = 0.0
         u1, u2 = solver.solve_nash_equilibrium(x0, R1_ref, R2_ref, lam)
