@@ -1,0 +1,43 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 345f4e5f76494cf40988cce343cbeb50, type: 3}
+  m_Name: NashWeightsConfig
+  m_EditorClassIdentifier: Assembly-CSharp::NashWeightsConfig
+  Q_pos: 5000
+  Q_vel: 1500
+  Q_pos_terminal: 50000
+  Q_vel_terminal: 6000
+  R1_long: 75000
+  R2_long: 120000
+  U1Min: -8
+  U1Max: 5
+  U2Min: -5
+  U2Max: 4
+  Du1Max: 1.5
+  Du2Max: 2
+  VMin: 0
+  VMax: 50
+  GapMin: 7
+  Q_y: 800
+  Q_psi: 10000
+  Q_y_terminal: 8000
+  Q_psi_terminal: 40000
+  R1_lat: 50000
+  R2_lat: 50000
+  DeltaMin: -0.436
+  DeltaMax: 0.436
+  DDeltaMax: 0.013
+  IbrMaxIter: 15
+  IbrTol: 0.0001
+  SigmaK: 1
+  Ell: 2
+  GammaRisk: 0.5

@@ -1,0 +1,224 @@
+// LongitudinalSafetyField — Li et al. (2019) elliptic Driving Safety Field.
+//
+// Mirrors coordinator.py:
+//   _long_dsf_params()       — dynamic s, Mo, Ri, DR with EMA and position/velocity scaling
+//   _long_leader_force_raw() — repulsive/attractive leader force
+//   _long_follower_force_raw()— repulsive-only follower force
+//   _long_safety_force()     — combined force with soft transition in FOLLOWING
+//
+// Sign convention:
+//   F > 0  repulsive (too close — slow down / brake)
+//   F < 0  attractive (too far  — speed up / catch-up)
+using UnityEngine;
+
+public class LongitudinalSafetyField
+{
+    readonly SafetyFieldConfig _c;
+
+    // EMA filter state (mirrors coordinator._long_*_filt)
+    float _sFilt;
+    float _moFilt;
+    float _riFilt;
+    float _drFilt;
+    float _forceFilt;
+
+    public float LastRaw      { get; private set; }  // raw force before EMA (for diagnostics)
+    public float LastGap      { get; private set; }  // bumper-to-bumper gap to leader [m]
+    public float LastTTC      { get; private set; }  // time-to-collision [s], 999 when safe
+
+    public LongitudinalSafetyField(SafetyFieldConfig cfg)
+    {
+        _c      = cfg;
+        _sFilt  = cfg.LongBaseRadius;
+        _moFilt = cfg.LongObstacleMass;
+        _riFilt = cfg.LongInfluenceFactor;
+        _drFilt = cfg.LongDriverRisk;
+    }
+
+    // ── Public entry point ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Compute total EMA-filtered longitudinal safety force [N].
+    /// follower == null when ego is at the platoon tail or has no rear vehicle.
+    /// </summary>
+    public float Compute(
+        AdvancedBicycleModel ego,
+        AdvancedBicycleModel leader,
+        AdvancedBicycleModel follower,
+        MergePhase phase)
+    {
+        bool hasLeader   = leader   != null;
+        bool hasFollower = follower != null;
+
+        var (s, mo, ri, dr) = DsfParams(ego.GetVx(), hasLeader, hasFollower);
+
+        float desGap = _c.StandstillDist + _c.PlatoonTimeGap * ego.GetVx();
+
+        float fLeader = hasLeader
+            ? LeaderForceRaw(ego, leader, s, mo, ri, dr, desGap)
+            : 0f;
+
+        float fFollowerRaw = hasFollower
+            ? FollowerForceRaw(ego, follower, s, mo, ri, dr, desGap)
+            : 0f;
+
+        float fFollower = _c.LongFollowerWeight * fFollowerRaw;
+
+        // Quadratic soft transition in FOLLOWING (mirrors _apply_soft_transition,
+        // applied SEPARATELY to leader and follower with their own gap errors).
+        if (phase == MergePhase.Following)
+        {
+            float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
+            if (thr > 0f && hasLeader)
+            {
+                float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+                float gapErr = Mathf.Abs(desGap - gap);
+                fLeader   *= Mathf.Min(1f, (gapErr / thr) * (gapErr / thr));
+            }
+            if (thr > 0f && hasFollower)
+            {
+                float gapR    = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength();
+                float gapErrR = Mathf.Abs(desGap - gapR);
+                fFollower *= Mathf.Min(1f, (gapErrR / thr) * (gapErrR / thr));
+            }
+        }
+
+        float raw = fLeader + fFollower;
+        LastRaw = raw;
+
+        // Update gap/TTC diagnostics from leader
+        if (hasLeader)
+        {
+            float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+            float vRel = ego.GetVx() - leader.GetVx();
+            LastGap = gap;
+            LastTTC = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+
+            // Bypass EMA in emergency zone — filter lag causes the authority allocator
+            // to see an attenuated force (0.2×Max on the first step), giving the Nash
+            // insufficient authority to brake hard before impact.
+            if (gap < _c.LongEmergencyDist)
+            {
+                _forceFilt = raw;
+                return _forceFilt;
+            }
+        }
+        else
+        {
+            LastGap = 999f;
+            LastTTC = 999f;
+        }
+
+        _forceFilt = _c.LongEmaAlpha * raw + (1f - _c.LongEmaAlpha) * _forceFilt;
+        return _forceFilt;
+    }
+
+    // ── Dynamic DSF params ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Compute position- and velocity-scaled DSF parameters with EMA blending.
+    /// Mirrors coordinator._long_dsf_params().
+    /// </summary>
+    (float s, float mo, float ri, float dr) DsfParams(float vx, bool hasLeader, bool hasFollower)
+    {
+        float alpha = _c.LongEmaAlpha;
+
+        // Position multiplier
+        float posMult = PositionMult(hasLeader, hasFollower);
+
+        // s: velocity-scaled safety radius
+        float velFactor = 1f + _c.LongVelocityScaling * (vx / _c.LongVelocityReference - 1f);
+        velFactor = Mathf.Clamp(velFactor, 0.5f, 2f);
+        float sTarget = _c.LongBaseRadius * posMult * velFactor;
+        _sFilt = alpha * sTarget + (1f - alpha) * _sFilt;
+
+        // Mo: position-weighted obstacle mass
+        float moTarget = _c.LongObstacleMass * posMult;
+        _moFilt = alpha * moTarget + (1f - alpha) * _moFilt;
+
+        // Ri: platoon coherence in middle position
+        float riTarget = _c.LongInfluenceFactor;
+        if (hasLeader && hasFollower) riTarget *= _c.LongPlatoonCoherence;
+        _riFilt = alpha * riTarget + (1f - alpha) * _riFilt;
+
+        // DR: base driver risk (constant in practice)
+        _drFilt = alpha * _c.LongDriverRisk + (1f - alpha) * _drFilt;
+
+        return (_sFilt, _moFilt, _riFilt, _drFilt);
+    }
+
+    float PositionMult(bool hasLeader, bool hasFollower)
+    {
+        if (!hasLeader)   return _c.LongLeaderPosMult;
+        if (hasFollower)  return _c.LongMiddlePosMult;
+        return _c.LongFollowerPosMult;
+    }
+
+    // ── Force computations ────────────────────────────────────────────────────
+
+    float LeaderForceRaw(
+        AdvancedBicycleModel ego, AdvancedBicycleModel leader,
+        float s, float mo, float ri, float dr, float desGap)
+    {
+        float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+
+        // Hard safety zones (inner = MIN_SAFE, outer = EMERGENCY_BRAKE)
+        if (gap < _c.LongMinSafeDist)
+            return _c.LongMaxForce;
+        if (gap < _c.LongEmergencyDist)
+        {
+            float t = 1f - (gap - _c.LongMinSafeDist) /
+                      Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            return t * _c.LongMaxForce;
+        }
+
+        float gapErr = desGap - gap;       // >0 too close, <0 too far
+        float vRel   = ego.GetVx() - leader.GetVx();  // >0 closing
+
+        if (gapErr <= 0f)
+        {
+            // Gap >= desired: linear attractive pull (bidirectional, capped)
+            return Mathf.Clamp(
+                gapErr / Mathf.Max(desGap, 1f) * _c.LongMaxForce,
+                -0.25f * _c.LongMaxForce, 0f);
+        }
+
+        float rEll     = gapErr / (s + _c.LongEpsilon);
+        float potential = (mo * ri) / ((rEll + _c.LongEpsilon) * (rEll + _c.LongEpsilon));
+        float wDist    = Mathf.Exp(-gapErr / _c.LongDistanceDecay);
+        float wVel     = Mathf.Exp(Mathf.Max(0f, vRel) / 5f);
+        float wRisk    = 1f + dr;
+        return Mathf.Min(potential * wDist * wVel * wRisk, _c.LongMaxForce);
+    }
+
+    float FollowerForceRaw(
+        AdvancedBicycleModel ego, AdvancedBicycleModel follower,
+        float s, float mo, float ri, float dr, float desGap)
+    {
+        float gapR = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength();
+
+        // Locked follower overtook ego (fast platoon passed stationary ego).
+        // gapR < 0 means the vehicle is now ahead of ego — no follower force applies.
+        if (gapR < 0f) return 0f;
+
+        if (gapR < _c.LongMinSafeDist)
+            return _c.LongMaxForce;
+        if (gapR < _c.LongEmergencyDist)
+        {
+            float t = 1f - (gapR - _c.LongMinSafeDist) /
+                      Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            return t * _c.LongMaxForce;
+        }
+
+        float gapErr = desGap - gapR;   // >0 follower too close
+        if (gapErr <= 0f) return 0f;    // follower is safe distance away
+
+        float vRel     = follower.GetVx() - ego.GetVx();  // >0 follower closing
+        float rEll     = gapErr / (s + _c.LongEpsilon);
+        float potential = (mo * ri) / ((rEll + _c.LongEpsilon) * (rEll + _c.LongEpsilon));
+        float wDist    = Mathf.Exp(-gapErr / _c.LongDistanceDecay);
+        float wVel     = Mathf.Exp(Mathf.Max(0f, vRel) / 5f);
+        float wRisk    = 1f + dr;
+        return Mathf.Min(potential * wDist * wVel * wRisk, _c.LongMaxForce);
+    }
+}

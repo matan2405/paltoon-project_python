@@ -1,0 +1,25 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 23f08177df2ef8e4fa3491fd16217505, type: 3}
+  m_Name: SafetyFieldConfig
+  m_EditorClassIdentifier: Assembly-CSharp::SafetyFieldConfig
+  GapWeight: 2
+  GapDecay: 10
+  TtcWeight: 1.5
+  TtcDecay: 3
+  VelWeight: 0.8
+  MaxForceLong: 800
+  EmaAlphaLong: 0.2
+  LatObstacleWeight: 3
+  LatBoundaryWeight: 2
+  MaxForceLat: 2000
+  EmaAlphaLat: 0.3

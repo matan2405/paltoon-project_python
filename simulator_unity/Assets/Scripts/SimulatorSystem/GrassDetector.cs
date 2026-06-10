@@ -38,7 +38,7 @@ public class OutMerge_or_Finish_Message : MonoBehaviour
         if (messageText != null)
         {
             messageText.text = message;
-            StartCoroutine(QuitAfterDelay());
+            //StartCoroutine(QuitAfterDelay());
             gameEnded = true;
         }
         else

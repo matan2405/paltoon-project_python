@@ -331,7 +331,7 @@ public class Powertrain
         EngineRpm = Mathf.Clamp(EngineRpm, idleRPM, redlineRPM);
     }
     /// Calculate maximum possible force at current speed
-    private float CalculateMaxForceAtCurrentSpeed(float vx)
+    public float CalculateMaxForceAtCurrentSpeed(float vx)
     {
         // Calculate maximum force in current gear
         float maxTorque = 370f; // Maximum engine torque
@@ -341,6 +341,12 @@ public class Powertrain
         
         return maxForce;
     }
+    // Engine braking force at a given speed, without side effects (read-only)
+    public float GetEngineBrakingForce(float vx) {
+        float rpm = transmission.CalculateRequiredEngineRPM(vx);
+        return CalculateEngineBrakingForce(rpm, vx);
+    }
+
     // ✅ MINIMAL: Natural deceleration since engine braking does most work
     public float CalculateNaturalDeceleration(float vx, float engineRpm)
     {

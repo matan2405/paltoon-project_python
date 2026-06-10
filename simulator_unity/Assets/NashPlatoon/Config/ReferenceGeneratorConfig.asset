@@ -1,0 +1,38 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: b77d82c5277322f4cb96ef0ecf46cd76, type: 3}
+  m_Name: ReferenceGeneratorConfig
+  m_EditorClassIdentifier: Assembly-CSharp::ReferenceGeneratorConfig
+  RajamaniH: 1.5
+  AComfort: 1.5
+  KV: 0.4
+  K1Ctg: 0.05
+  K2Ctg: 0.4
+  DetectionRange: 300
+  TtcThreshold: 1.2
+  MinCritGapOffset: 2
+  MaxEmergDecel: -5
+  CatchupMultiplier: 1.05
+  FreeDelta: 4
+  IdmAMax: 1.5
+  IdmS0: 3.416
+  IdmDelta: 4
+  IdmPlanT: 2.585
+  IdmPlanB: 1.649
+  VelocityOffset: 0
+  HumanTlc: 4.5
+  MaxHeadingDeg: 4
+  SysTlcMultiplier: 1.5
+  R2MaxHeadingDeg: 2.6
+  NeuroJ: 0.0037
+  NeuroB: 0.1363
+  NeuroK: 1.1742

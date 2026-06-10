@@ -1,0 +1,19 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 8f1960b1f79d121479cf2609aaead582, type: 3}
+  m_Name: NashPlatoonSettings
+  m_EditorClassIdentifier: Assembly-CSharp::NashPlatoonSettings
+  Timing: {fileID: 11400000, guid: 1b23d9c670b72824482af7eec7d028db, type: 2}
+  Nash: {fileID: 11400000, guid: 2777fbc38c3aba84c877c99a200b4009, type: 2}
+  SafetyField: {fileID: 11400000, guid: f153ba6f5c2588742b0439f0134bdb70, type: 2}
+  Authority: {fileID: 11400000, guid: dc0a5d59bd033b94e8feaf38b5b3507a, type: 2}
+  RefGen: {fileID: 11400000, guid: a6117ffb754be3b4db49f415311dd745, type: 2}

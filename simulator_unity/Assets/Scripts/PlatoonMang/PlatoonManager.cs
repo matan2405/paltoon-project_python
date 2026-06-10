@@ -1,160 +1,3 @@
-// using System.Collections.Generic;
-// using UnityEngine;
-// using UnityEngine.SocialPlatforms.Impl;
-
-// public class PlatoonManager : MonoBehaviour
-// {
-//     [Header("Platoon Vehicles")]
-//     // This array holds the vehicles that are part of the platoon.
-//     public AdvancedBicycleModel[] platoonVehicles;
-//     public AdvancedBicycleModel[] GetPlatoonVehicles() => platoonVehicles;
-
-//     [Header("Platoon Parameters")]
-//     // These parameters define the behavior of the platoon.
-//     public float platoonMaxVelocity = 250 / 3.6f;
-//     public float platoonTargetVelocity = 120 / 3.6f; // Default target speed for the platoon in m/s (120 km/h)                                                     // This is the speed that the platoon will try to maintain
-//     public float MaxAcceleration = 2.0f; // Maximum acceleration for the platoon vehicles in m/s²
-
-//     [Header("Control Parameters")]
-//     public float headway = 1.5f;    // desired time headway [s]
-//     public float aMax = 1.4f; // maximum acceleration [m/s²]
-//     public float k1 = -0.12f; // k1 < -tau/h
-//     public float k5 = 0.1f;   // k5 > 0
-
-
-//     private float[] ThrottleInput = new float[] { 0, 0, 0 };
-//     private float[] SteeringInput = new float[] { 0, 0, 0 };
-//     private float[] BrakeInput = new float[] { 0, 0, 0 };
-
-//     private List<float>[] gap;
-//     private List<float>[] des_gap;
-//     public void AddVehicleToPlatoon(AdvancedBicycleModel vehicle)
-//     {
-//         if (platoonVehicles == null)
-//         {
-//             platoonVehicles = new AdvancedBicycleModel[] { vehicle };
-//         }
-//         else
-//         {
-//             var tempList = new System.Collections.Generic.List<AdvancedBicycleModel>(platoonVehicles);
-//             tempList.Add(vehicle);
-//             platoonVehicles = tempList.ToArray();
-//         }
-//     }
-//     public (float a_des, float s_des) CalculateRajamaniAcceleration(AdvancedBicycleModel Car_1, AdvancedBicycleModel Car_2)
-//     {
-//         float h = 1.5f;   // [s] desired time headway
-//         //float tau = 0.1f; // [s] time lag
-
-//         float k1 = -0.12f, k5 = 0.1f; // k1 < -tau/h, k5 > 0
-//         float k2 = -k1 - h * k1 * k5;
-//         float k3 = 1f / h - k1 * k5;
-//         float k4 = k5 / h;
-
-//         // הנחות: x = מיקום לאורך הדרך, v = מהירות, a = תאוצה, L = אורך הרכב
-//         float e = Car_2.GetPosition().z - Car_1.GetPosition().z + Car_1.GetVehicleParameters().length + 2f; // [m] actual gap
-//         float e_dot = Car_2.GetVx() - Car_1.GetVx();                    // [m/s] relative velocity
-
-//         float s_des = Car_1.GetVehicleParameters().length + 2f + h * Car_2.GetVx();       // [m] desired gap
-//         float a_des = -k1 * Car_1.GetAx()
-//                       - k2 * Car_2.GetAx()
-//                       - k3 * e_dot
-//                       - k4 * e
-//                       - k5 * Car_2.GetVx();
-
-//         return (a_des, s_des);
-//     }
-//     public static float FreeRoadAcceleration(float v, float v_target, float a_max)
-//     {
-//         float delta = 4f; // exponent
-
-//         float dv_dt;
-//         if (v_target >= v)
-//         {
-//             dv_dt = a_max * (1f - Mathf.Pow(v / v_target, delta));
-//         }
-//         else
-//         {
-//             dv_dt = -a_max * (1f - Mathf.Pow(v_target / v, delta));
-//         }
-//         return dv_dt;
-//     }
-//     void Start()
-//     {
-//         int N = platoonVehicles.Length;
-//         gap = new List<float>[N - 1];
-//         des_gap = new List<float>[N - 1];
-//         for (int i = 0; i < N - 1; i++)
-//         {
-//             gap[i] = new List<float>();
-//             des_gap[i] = new List<float>();
-//         }
-//     }
-
-//     // Update is called once per frame
-//     void FixedUpdate()
-//     {
-//         // Sort vehicles by position (front to back) - assuming they're aligned on Z axis
-//         System.Array.Sort(platoonVehicles, (a, b) => b.GetPosition().z.CompareTo(a.GetPosition().z));
-//         // Calculate the acceleration for the leader vehicle 
-//         AdvancedBicycleModel LeaderVehicle = platoonVehicles[0];
-//         float acc_leader = FreeRoadAcceleration(LeaderVehicle.GetVx(), platoonTargetVelocity, MaxAcceleration);
-//         float vx_leader = Mathf.Clamp(LeaderVehicle.GetVx() + acc_leader * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
-//         Debug.Log($"Car {1} - Actual Velocity: {vx_leader}, Desired Velocity: {platoonTargetVelocity}, Acc Leader: {acc_leader}");
-//         LeaderVehicle.SetVx(vx_leader);
-//         LeaderVehicle.SetAx(acc_leader);
-//         // if (acc_leader > 0f)
-//         // {
-//         //     ThrottleInput[0] = Mathf.Clamp(acc_leader / MaxAcceleration, 0f, 1f);
-//         // }
-//         // else
-//         // {
-//         //     ThrottleInput[0] = 0f;
-//         // }
-//         for (int car_num = 1; car_num < platoonVehicles.Length; car_num++)
-//         {
-//             // For each vehicle in the platoon, calculate the desired acceleration and spacing
-//             AdvancedBicycleModel Car_ahead = platoonVehicles[car_num - 1];// Get the preceding vehicle in the platoon
-//             AdvancedBicycleModel Car = platoonVehicles[car_num];// Get the current vehicle in the platoon
-
-//             // Calculate the gap between the two vehicles
-//             float actual_gap = Car_ahead.GetPosition().z - Car.GetPosition().z;
-//             gap[car_num - 1].Add(actual_gap);
-
-//             // Calculate desired acceleration and spacing using Rajamani model
-//             (float a_des, float s_des) = CalculateRajamaniAcceleration(Car_ahead, Car);
-//             des_gap[car_num - 1].Add(s_des);
-//             Debug.Log($"Car {car_num + 1} - Actual Gap: {actual_gap}, Desired Gap: {s_des}, Desired Acceleration: {a_des}");
-//             Debug.Log($"Car {car_num + 1} - Actual Velocity: {Car.GetVx()}, Desired Velocity: {platoonTargetVelocity}");
-//             // Calculate the actual acceleration based on the desired acceleration
-//             float acc = Mathf.Clamp(a_des, -MaxAcceleration, MaxAcceleration);
-
-//             float vx = Mathf.Clamp(Car.GetVx() + acc * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
-
-//             // // Update throttle input based on acceleration
-//             // if (acc > 0f)
-//             // {
-//             //     ThrottleInput[car_num] = Mathf.Clamp(acc / MaxAcceleration, 0f, 1f);
-//             // }
-//             // else
-//             // {
-//             //     ThrottleInput[car_num] = 0f;
-//             // }
-
-//             // Update vehicle state
-//             Car.SetVx(vx);
-//             Car.SetAx(acc);
-//         }
-
-
-
-//     }
-    
-//     public float GetThrottleInput_Pl(int car_num) => ThrottleInput[car_num];
-//     public float GetBrakeInput_Pl(int car_num) => BrakeInput[car_num];
-//     public float GetSteeringInput_Pl(int car_num) => SteeringInput[car_num];
-
-// }
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -187,19 +30,41 @@ public class PlatoonManager : MonoBehaviour
     public bool startFromZeroSpeed = true; // Start all vehicles from zero speed
     private float[] acc;
     private float[] vx;
+    private float[] _prevAcc;
+    private const float JerkMax = 2.0f; // ISO 15622 [m/s³]
+
+    [Header("Ego Vehicle (Join Trigger)")]
+    public AdvancedBicycleModel egoVehicle;   // Assign in Inspector — starts outside platoon
+    public KeyCode joinKey  = KeyCode.J;      // Press to join platoon at current position
+    public KeyCode leaveKey = KeyCode.L;      // Press to leave platoon (returns to manual)
+    public bool _egoInPlatoon = false;        // public so NashCoordinator/HUD can read it
+
+    [Header("Nash")]
+    public NashCoordinator nashCoordinator;   // Assign in Inspector — activated on J
+
     void Start()
     {
         SetupPlatoon();
         InitializeDataLogging();
         InitializeVehicleStates();
     }
+
+    void Update()
+    {
+        if (egoVehicle == null) return;
+        if (!_egoInPlatoon && Input.GetKeyDown(joinKey))
+            JoinPlatoon();
+        else if (_egoInPlatoon && Input.GetKeyDown(leaveKey))
+            LeavePlatoon();
+    }
     
     void SetupPlatoon()
     {
-        // Auto-find vehicles if array is empty
+        // Auto-find vehicles if array is empty, excluding the ego vehicle
         if (autoFindVehicles && (platoonVehicles == null || platoonVehicles.Length == 0))
         {
-            AdvancedBicycleModel[] foundVehicles = FindObjectsByType<AdvancedBicycleModel>(FindObjectsSortMode.None);
+            AdvancedBicycleModel[] foundVehicles = FindObjectsByType<AdvancedBicycleModel>(FindObjectsSortMode.None)
+                .Where(v => v != egoVehicle).ToArray();
             platoonVehicles = foundVehicles;
             Debug.Log($"Auto-found {foundVehicles.Length} vehicles in scene");
         }
@@ -220,6 +85,7 @@ public class PlatoonManager : MonoBehaviour
         BrakeInput = new float[numVehicles];
         acc = new float[numVehicles];
         vx = new float[numVehicles];
+        _prevAcc = new float[numVehicles];
 
         // Configure vehicles for platoon control
         for (int i = 0; i < platoonVehicles.Length; i++)
@@ -320,87 +186,133 @@ public class PlatoonManager : MonoBehaviour
         return dv_dt;
     }
     
-    void ConvertAccelerationToInputs(float acceleration, int vehicleIndex)
+    float JerkLimit(int idx, float aDes) {
+        float dt    = Time.fixedDeltaTime;
+        float maxDA = JerkMax * dt;
+        float limited = Mathf.Clamp(aDes, _prevAcc[idx] - maxDA, _prevAcc[idx] + maxDA);
+        _prevAcc[idx] = limited;
+        return limited;
+    }
+
+    void JoinPlatoon()
     {
-        // Reset inputs
-        ThrottleInput[vehicleIndex] = 0f;
-        BrakeInput[vehicleIndex] = 0f;
-        SteeringInput[vehicleIndex] = 0f; // Straight line driving
-        
-        if (acceleration > 0.1f)
+        // Save current _prevAcc so existing vehicles don't get a jerk spike on re-init
+        float[] savedPrevAcc = _prevAcc != null ? (float[])_prevAcc.Clone() : null;
+
+        // Find insertion index: platoon is sorted front-to-back (descending Z).
+        // Insert ego at the first position where ego is ahead of the existing vehicle.
+        int insertIdx = platoonVehicles.Length; // default: append at back
+        for (int i = 0; i < platoonVehicles.Length; i++)
         {
-            // Accelerate
-            float throttleGain = 0.5f;
-            ThrottleInput[vehicleIndex] = Mathf.Clamp01(acceleration / MaxAcceleration * throttleGain);
-        }
-        else if (acceleration < -0.1f)
-        {
-            // Decelerate
-            float brakeGain = 0.4f;
-            BrakeInput[vehicleIndex] = Mathf.Clamp01(-acceleration / MaxAcceleration * brakeGain);
-        }
-        else
-        {
-            // Maintain speed - gentle throttle if moving slowly
-            if (platoonVehicles[vehicleIndex].GetVx() < 2f)
+            if (egoVehicle.GetPosition().z > platoonVehicles[i].GetPosition().z)
             {
-                ThrottleInput[vehicleIndex] = 0.1f;
+                insertIdx = i;
+                break;
             }
         }
+
+        var list = new List<AdvancedBicycleModel>(platoonVehicles);
+        list.Insert(insertIdx, egoVehicle);
+        platoonVehicles = list.ToArray();
+
+        // Re-init platoon state (sorts, rebuilds arrays, sets AutoMode=true for all)
+        SetupPlatoon();
+        InitializeDataLogging();
+
+        // Restore _prevAcc for vehicles that were already in the platoon
+        if (savedPrevAcc != null)
+        {
+            for (int newIdx = 0; newIdx < platoonVehicles.Length; newIdx++)
+            {
+                if (newIdx < insertIdx)
+                    _prevAcc[newIdx] = savedPrevAcc[newIdx];
+                else if (newIdx == insertIdx)
+                    _prevAcc[newIdx] = egoVehicle.GetAx(); // start jerk limiter from current ego accel
+                else
+                    _prevAcc[newIdx] = savedPrevAcc[newIdx - 1];
+            }
+        }
+
+        nashCoordinator?.EnableNash();
+        _egoInPlatoon = true;
+        Debug.Log($"Ego joined platoon at index {insertIdx} " +
+                  $"(Z={egoVehicle.GetPosition().z:F1}m), platoon size={platoonVehicles.Length}");
+    }
+
+    void LeavePlatoon()
+    {
+        nashCoordinator?.DisableNash();
+
+        // Find ego's current index BEFORE removing (needed for _prevAcc mapping)
+        int egoIdx = System.Array.IndexOf(platoonVehicles, egoVehicle);
+        float[] savedPrevAcc = _prevAcc != null ? (float[])_prevAcc.Clone() : null;
+
+        var list = new List<AdvancedBicycleModel>(platoonVehicles);
+        list.Remove(egoVehicle);
+        platoonVehicles = list.ToArray();
+
+        SetupPlatoon();
+        InitializeDataLogging();
+
+        // Restore _prevAcc: skip the ego's old slot
+        if (savedPrevAcc != null && egoIdx >= 0)
+        {
+            for (int newIdx = 0; newIdx < platoonVehicles.Length; newIdx++)
+            {
+                int oldIdx = newIdx < egoIdx ? newIdx : newIdx + 1;
+                if (oldIdx < savedPrevAcc.Length)
+                    _prevAcc[newIdx] = savedPrevAcc[oldIdx];
+            }
+        }
+
+        // Return ego to manual control
+        egoVehicle.AutoMode       = false;
+        egoVehicle.NashModeActive = false;
+
+        _egoInPlatoon = false;
+        Debug.Log($"Ego left platoon. Remaining platoon size={platoonVehicles.Length}");
     }
 
     void FixedUpdate()
     {
         if (platoonVehicles == null || platoonVehicles.Length == 0) return;
 
-        // Lead vehicle control using Free Road Acceleration
+        // Leader: free-road acceleration
         AdvancedBicycleModel LeaderVehicle = platoonVehicles[0];
         float acc_leader = FreeRoadAcceleration(LeaderVehicle.GetVx(), platoonTargetVelocity, MaxAcceleration);
-        float vx_leader = Mathf.Clamp(LeaderVehicle.GetVx() + acc_leader * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
-
-        //Debug.Log($"Car {1} - Actual Velocity: {vx_leader * 3.6f:F1} km/h, Target Velocity: {platoonTargetVelocity * 3.6f:F1} km/h, Acc Leader: {acc_leader:F2} m/s²");
-        // Update leader vehicle state
+        acc_leader = JerkLimit(0, Mathf.Clamp(acc_leader, -MaxAcceleration, MaxAcceleration));
         acc[0] = acc_leader;
-        vx[0] = vx_leader;
-        //LeaderVehicle.SetVx(vx_leader);
-        //LeaderVehicle.SetAx(acc_leader);
+        vx[0] = Mathf.Clamp(LeaderVehicle.GetVx() + acc_leader * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
+        if (!LeaderVehicle.NashModeActive) {
+            var (lt, lb) = LeaderVehicle.AccelerationToInputs(acc_leader);
+            LeaderVehicle.NashThrottle = lt;
+            LeaderVehicle.NashBrake    = lb;
+        }
 
-        // Convert leader acceleration to inputs
-        //ConvertAccelerationToInputs(acc_leader, 0);
-
-        // Following vehicles control using Rajamani
+        // Followers: Rajamani
         for (int car_num = 1; car_num < platoonVehicles.Length; car_num++)
         {
-            // For each vehicle in the platoon, calculate the desired acceleration and spacing
-            AdvancedBicycleModel Car_ahead = platoonVehicles[car_num - 1]; // Get the preceding vehicle in the platoon
-            AdvancedBicycleModel Car = platoonVehicles[car_num]; // Get the current vehicle in the platoon
+            AdvancedBicycleModel Car_ahead = platoonVehicles[car_num - 1];
+            AdvancedBicycleModel Car       = platoonVehicles[car_num];
 
-            // Calculate the gap between the two vehicles
-            Debug.Log($"Car {car_num + 1} - Position: {Car.GetPosition().z:F4}m, Ahead Position: {Car_ahead.GetPosition().z:F4}m");
             float actual_gap = Car_ahead.GetPosition().z - Car.GetPosition().z;
             gap[car_num - 1].Add(actual_gap);
 
-            // Calculate desired acceleration and spacing using Rajamani model
             (float a_des, float s_des) = CalculateRajamaniAcceleration(Car_ahead, Car);
             des_gap[car_num - 1].Add(s_des);
 
-            //Debug.Log($"Car {car_num + 1} - Actual Gap: {actual_gap:F1}m, Desired Gap: {s_des:F1}m, Desired Acceleration: {a_des:F2} m/s²");
-            //Debug.Log($"Car {car_num + 1} - Actual Velocity: {Car.GetVx() * 3.6f:F1} km/h, Target Velocity: {platoonTargetVelocity * 3.6f:F1} km/h");
-
-            // Calculate the actual acceleration based on the desired acceleration
-            float acc_ = Mathf.Clamp(a_des, -MaxAcceleration, MaxAcceleration);
-            float vx_ = Mathf.Clamp(Car.GetVx() + acc_ * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
-
-            // Convert acceleration to inputs
-            //ConvertAccelerationToInputs(acc, car_num);
-
-            // Update vehicle state
+            float acc_ = JerkLimit(car_num, Mathf.Clamp(a_des, -MaxAcceleration, MaxAcceleration));
             acc[car_num] = acc_;
-            vx[car_num] = vx_;
-            //Car.SetVx(vx_);
-            //Car.SetAx(acc_);
+            vx[car_num]  = Mathf.Clamp(Car.GetVx() + acc_ * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
+
+            // Inject into NashThrottle/NashBrake only if NashCoordinator isn't controlling this vehicle
+            if (!Car.NashModeActive) {
+                var (t, b) = Car.AccelerationToInputs(acc_);
+                Car.NashThrottle = t;
+                Car.NashBrake    = b;
+            }
         }
-        LogPlatoonStatus();
+        if (Time.fixedTime % 2f < Time.fixedDeltaTime) LogPlatoonStatus();
         //Debug.Log($"des_gap1: {des_gap[1 - 1].Last()} , actual_gap1: {gap[1 - 1].Last()} recorded.");
         //Debug.Log($"des_gap1_Get: {GetDesiredGap(1)} , actual_gap2: {GetActualGap(1)} recorded.");
         //Debug.Log($"des_gap2: {des_gap[2-1].Last()} , actual_gap2: {gap[2-1].Last()} recorded.");

@@ -35,4 +35,25 @@ public class BrakeSystem
         // Total brake force
         return actualFrontBrakeForce + actualRearBrakeForce;
     }
+
+    // Returns (front, rear) brake forces separately.
+    // Used by Derivatives6D to correctly assign Fxf/Fxr per Belousov Eq. 3.11b/c:
+    // only the front contact-patch force enters the sinδ terms.
+    public (float front, float rear) CalculateBrakeForceSplit(float brakeInput, float vx)
+    {
+        float staticWeight    = vehicleParams.mass * vehicleParams.gravity;
+        float deceleration    = brakeInput * vehicleParams.gravity * 1.25f;
+        float weightTransfer  = (vehicleParams.mass * deceleration * vehicleParams.height * 0.5f)
+                              / vehicleParams.wheelbase;
+
+        float frontNormalForce = (staticWeight * vehicleParams.lr / vehicleParams.wheelbase) + weightTransfer;
+        float rearNormalForce  = (staticWeight * vehicleParams.lf / vehicleParams.wheelbase) - weightTransfer;
+
+        float front = frontNormalForce * vehicleParams.tireFrictionCoefficient
+                    * vehicleParams.brakeBalance * brakeInput;
+        float rear  = rearNormalForce  * vehicleParams.tireFrictionCoefficient
+                    * (1f - vehicleParams.brakeBalance) * brakeInput;
+
+        return (front, rear);
+    }
 }

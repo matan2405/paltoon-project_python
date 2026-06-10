@@ -1,0 +1,21 @@
+# Place the following DLLs here (see README below):
+#   osqp.dll        — native Windows x64   (from osqp-dotnet NuGet)
+#   qdldl.dll       — native Windows x64   (from osqp-dotnet NuGet)
+#   OsqpDotnet.dll  — managed .NET binding (from osqp-dotnet NuGet)
+#
+# Download steps:
+#   1. Download NuGet package: osqp-dotnet 0.6.x
+#      https://www.nuget.org/packages/OsqpDotnet
+#   2. Rename .nupkg → .zip, extract
+#   3. Copy from runtimes/win-x64/native/:  osqp.dll, qdldl.dll
+#   4. Copy from lib/netstandard2.0/:       OsqpDotnet.dll
+#   5. In Unity Inspector for each native DLL (osqp.dll, qdldl.dll):
+#      - Platform: Windows
+#      - CPU: x86_64
+#      - Editor: checked, x64
+#   6. For OsqpDotnet.dll:
+#      - Any Platform: checked
+#      - Don't process: unchecked
+#   7. Add scripting define: OSQP_AVAILABLE
+#      (Player Settings → Other Settings → Scripting Define Symbols)
+#   8. Enter Play mode → check Console for "[OsqpSmokeTest] PASS"
