@@ -40,6 +40,13 @@ from unified.visualization.ieee_figures import (
     plot_longitudinal_dsf,
     plot_gne_pareto,
 )
+from unified.simulation.experiments import (
+    MonteCarloExperiment,
+    QWeightSweepExperiment,
+    RWeightSweepExperiment,
+    LambdaSweepExperiment,
+)
+from unified.visualization.experiment_plots import plot_all_experiments
 
 
 # ---------------------------------------------------------------------------
@@ -157,12 +164,78 @@ def run_scenario(cfg: dict, animate: bool = True):
     return sim, data
 
 
+# ---------------------------------------------------------------------------
+# Experiment runners
+# ---------------------------------------------------------------------------
+
+def run_experiment_mc(n_trials: int = 20, driver_type: str = 'normal',
+                      show: bool = True):
+    """Proposal A: Monte Carlo — deterministic vs B-IDM vs MA-IDM."""
+    print(f"\n{'=' * 65}")
+    print(f"  Experiment A: Monte Carlo (N={n_trials}, driver={driver_type})")
+    print(f"{'=' * 65}")
+    mc = MonteCarloExperiment(n_trials=n_trials, driver_type=driver_type)
+    mc.run(verbose=True)
+    plot_all_experiments(mc=mc, show=show, save=True)
+    return mc
+
+
+def run_experiment_q_sweep(driver_type: str = 'normal',
+                           noise_mode: str = 'gp', n_avg: int = 5,
+                           show: bool = True):
+    """Proposal B1: Q-weight sweep (both longitudinal and lateral)."""
+    print(f"\n{'=' * 65}")
+    print(f"  Experiment B1: Q-Weight Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
+    print(f"{'=' * 65}")
+    exp = QWeightSweepExperiment(driver_type=driver_type,
+                                 noise_mode=noise_mode,
+                                 n_avg=n_avg, seed_offset=100)
+    exp.run(verbose=True)
+    plot_all_experiments(q_sweep=exp, show=show, save=True)
+    return exp
+
+
+def run_experiment_r_sweep(driver_type: str = 'normal',
+                           noise_mode: str = 'gp', n_avg: int = 5,
+                           show: bool = True):
+    """Proposal B2: R-weight (effort) sweep (both longitudinal and lateral)."""
+    print(f"\n{'=' * 65}")
+    print(f"  Experiment B2: R-Weight Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
+    print(f"{'=' * 65}")
+    exp = RWeightSweepExperiment(driver_type=driver_type,
+                                 noise_mode=noise_mode,
+                                 n_avg=n_avg, seed_offset=200)
+    exp.run(verbose=True)
+    plot_all_experiments(r_sweep=exp, show=show, save=True)
+    return exp
+
+
+def run_experiment_lambda_sweep(driver_type: str = 'normal',
+                                noise_mode: str = 'gp', n_avg: int = 5,
+                                show: bool = True):
+    """Proposal B3: Fixed-λ authority sweep (both longitudinal and lateral)."""
+    print(f"\n{'=' * 65}")
+    print(f"  Experiment B3: Fixed-λ Sweep (driver={driver_type}, "
+          f"noise={noise_mode}, n_avg={n_avg})")
+    print(f"{'=' * 65}")
+    exp = LambdaSweepExperiment(driver_type=driver_type,
+                                noise_mode=noise_mode,
+                                n_avg=n_avg, seed_offset=300)
+    exp.run(verbose=True)
+    exp.print_summary()
+    plot_all_experiments(lam_sweep=exp, show=show, save=True)
+    return exp
+
+
 def main():
     print("\n" + "=" * 65)
     print("  UNIFIED LONGITUDINAL + LATERAL PLATOON MERGE SIMULATION")
     print("  Nash GNE Shared Control (Li 2019 / Pustilnik & Borrelli 2025)")
     print("=" * 65)
-    print("\nSelect a scenario:\n")
+    print("\nSelect a scenario or experiment:\n")
+    print("  --- Base Scenarios ---")
     print("  --- Join from BACK ---")
     for k in (1, 2, 3):
         print(f"  {k}. {SCENARIOS[k]['name']}")
@@ -173,9 +246,15 @@ def main():
     for k in (7, 8, 9):
         print(f"  {k}. {SCENARIOS[k]['name']}")
     print("  0. Run all 9 scenarios")
+    print("\n  --- Experiments ---")
+    print(" 10. [A]  Monte Carlo: deterministic vs B-IDM vs MA-IDM (N=20)")
+    print(" 11. [B1] Q-weight sweep: tracking precision trade-off")
+    print(" 12. [B2] R-weight sweep: control effort decomposition")
+    print(" 13. [B3] Fixed-λ sweep: authority allocation effect")
+    print(" 14.      Run all 4 experiments (slow — ~hours)")
 
     try:
-        choice = int(input("\nEnter choice [0-9]: ").strip())
+        choice = int(input("\nEnter choice [0-14]: ").strip())
     except (ValueError, EOFError):
         choice = 2   # default: join back, normal driver
 
@@ -184,6 +263,19 @@ def main():
             run_scenario(cfg, animate=True)
     elif choice in SCENARIOS:
         run_scenario(SCENARIOS[choice], animate=True)
+    elif choice == 10:
+        run_experiment_mc()
+    elif choice == 11:
+        run_experiment_q_sweep()
+    elif choice == 12:
+        run_experiment_r_sweep()
+    elif choice == 13:
+        run_experiment_lambda_sweep()
+    elif choice == 14:
+        run_experiment_mc(show=False)
+        run_experiment_q_sweep(show=False)
+        run_experiment_r_sweep(show=False)
+        run_experiment_lambda_sweep(show=False)
     else:
         print(f"Invalid choice '{choice}', running scenario 2.")
         run_scenario(SCENARIOS[2], animate=True)

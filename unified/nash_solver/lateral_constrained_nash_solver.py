@@ -86,7 +86,9 @@ from dataclasses import dataclass
 
 from unified.config import (
     LAT_NASH_CONTROL_DT              as NASH_CONTROL_DT,
-    NASH_NP, NASH_NU,
+    NASH_RISK_GAMMA,
+    LAT_NASH_NP                      as NASH_NP,
+    LAT_NASH_NU                      as NASH_NU,
     LAT_NASH_Q_Y                     as NASH_Q_Y,
     LAT_NASH_Q_PSI                   as NASH_Q_PSI,
     LAT_NASH_Q_Y_TERMINAL_FAC        as NASH_Q_Y_TERMINAL_FACTOR,
@@ -191,6 +193,14 @@ class ConstrainedLateralNashParams:
     # Derived from bicycle model Coriolis sensitivity — see unified/config.py.
     rebuild_dvx: float = LAT_NASH_REBUILD_DVX
 
+    # ── Risk-aware planning: E[J] + γ·Var[J] (MA-IDM, Zhang & Sun 2024) ─────
+    # SE-kernel GP hyperparameters for the human player's lateral residual.
+    # sigma_k: stationary std [rad];  ell: lengthscale [s]  (MA_IDM_LAT_PARAMS)
+    # gamma_risk: risk sensitivity γ;  0 = disabled.
+    sigma_k:    float = 0.0
+    ell:        float = 1.0
+    gamma_risk: float = 0.0
+
 
 class ConstrainedLateralNashSolver:
     """
@@ -269,7 +279,7 @@ class ConstrainedLateralNashSolver:
         p = self.params
         self.A, self.B, self.C = self.vehicle.get_state_space_matrices(p.dt)
         self.nx = self.A.shape[0]
-        self.nz = self.C.shape[0]
+        self.nz = self.C.shape[0]          # = 2: output z = [y, psi]
         print(f"   Using vehicle's state-space matrices (dt={p.dt}s)")
 
     def _build_prediction_matrices(self):
@@ -312,6 +322,27 @@ class ConstrainedLateralNashSolver:
         self.HQ1H = self.H.T @ self.Q1_full @ self.H
         self.HQ1H += self.params.regularization * np.eye(self.params.Nu)
 
+        # ── Risk-aware Hessian: HQ1H_risk = (I + 4γ̃·HQ1H·Σ_ε) @ HQ1H ─────────
+        # Σ_ε[i,j] = σ_k² · exp(−(i−j)²·dt² / (2ℓ²))  — SE kernel (Eq. 9)
+        #
+        # Dimensional normalisation: γ̃ = γ / trace(HQ1H) so that γ=0.1 means
+        # "add 10% risk weight relative to the nominal cost scale."
+        Nu = self.params.Nu
+        if self.params.gamma_risk > 0.0 and self.params.sigma_k > 0.0:
+            idx = np.arange(Nu)
+            dt_mat    = np.abs(idx[:, None] - idx[None, :]) * self.params.dt
+            Sigma_eps = self.params.sigma_k ** 2 * np.exp(
+                -dt_mat ** 2 / (2.0 * self.params.ell ** 2)
+            )
+            norm_factor       = max(float(np.trace(self.HQ1H)), 1.0)
+            gamma_scaled      = self.params.gamma_risk / norm_factor
+            M_risk            = 4.0 * gamma_scaled * self.HQ1H @ Sigma_eps
+            self.I_plus_Mrisk = np.eye(Nu) + M_risk
+            self.HQ1H_risk    = self.I_plus_Mrisk @ self.HQ1H
+        else:
+            self.I_plus_Mrisk = np.eye(Nu)
+            self.HQ1H_risk    = self.HQ1H.copy()
+
     def _pustilnik_alpha(self, lambda_k: float) -> float:
         """
         Map authority ratio lambda to Pustilnik scaling factor alpha.
@@ -338,7 +369,7 @@ class ConstrainedLateralNashSolver:
         ddelta_lim = p.ddelta_max * p.dt
 
         # ---- Player 1: lambda-independent ----
-        P1 = self.HQ1H + p.R1 * np.eye(Nu)
+        P1 = self.HQ1H_risk + p.R1 * np.eye(Nu)
         P1 = 0.5 * (P1 + P1.T)
 
         u1_var = cp.Variable(Nu, name='u1')
@@ -374,7 +405,7 @@ class ConstrainedLateralNashSolver:
 
         for lam in self.lambda_levels:
             alpha = self._pustilnik_alpha(lam)
-            P2 = alpha * self.HQ1H + self.R2_eff * np.eye(Nu)
+            P2 = alpha * self.HQ1H_risk + self.R2_eff * np.eye(Nu)
             P2 = 0.5 * (P2 + P2.T)
 
             u2_var = cp.Variable(Nu, name=f'u2_lam{lam}')
@@ -486,9 +517,10 @@ class ConstrainedLateralNashSolver:
         z_free = self.U @ x0
 
         # Pre-compute constant parts of q terms
-        HQ1_r1 = self.H.T @ self.Q1_full @ (r1 - z_free)
-        HQ1_r2 = self.H.T @ self.Q1_full @ (r2 - z_free)
-        HQ1H = self.HQ1H
+        # Apply risk modification: HQ1_r_risk = (I + 4γ·HQ1H·Σ_ε) @ HQ1_r
+        HQ1_r1 = self.I_plus_Mrisk @ (self.H.T @ self.Q1_full @ (r1 - z_free))
+        HQ1_r2 = self.I_plus_Mrisk @ (self.H.T @ self.Q1_full @ (r2 - z_free))
+        HQ1H = self.HQ1H_risk  # risk-aware Hessian used in IBR linear terms
 
         prob1 = self.prob1
         prob2 = self.prob2[lambda_used]
@@ -660,6 +692,16 @@ LATERAL DMPC NASH (IBR) - CONSTRAINT SUMMARY
     delta2 rate active: {stats['u2_rate_active']:>6} times
 """
         return summary
+
+    def update_r2(self, new_r2: float) -> None:
+        """Switch Player 2 control-effort weight and rebuild DMPC problems.
+
+        Mirrors the longitudinal solver's update_r2 — called per-step by the
+        adaptive authority allocator as lane-change progress l_n changes.
+        """
+        self.R2_eff = float(new_r2)
+        self.params.R2 = float(new_r2)
+        self._build_dmpc_problems()
 
     def reset(self):
         """Reset solver state."""

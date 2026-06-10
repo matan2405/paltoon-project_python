@@ -58,8 +58,10 @@ setup_results_directory()
 # SIMULATION TIMING (same in both modules)
 # =============================================================================
 SIMULATION_DT = 0.01          # 100 Hz — dynamics integration step [s]
-NASH_NP       = 20            # Prediction horizon [steps]
-NASH_NU       = 10            # Control horizon [steps]
+LONG_NASH_NP  = 20            # Longitudinal prediction horizon [steps]
+LONG_NASH_NU  = 10            # Longitudinal control horizon [steps]
+LAT_NASH_NP   = 20            # Lateral prediction horizon [steps]
+LAT_NASH_NU   = 10            # Lateral control horizon [steps]
 DEFAULT_SIMULATION_TIME = 120.0  # [s]
 NOMINAL_VELOCITY        = 120.0 / 3.6   # m/s (~120 km/h) — matches lateral reference
 
@@ -108,7 +110,7 @@ ROAD_FRICTION_MU     = 1.0                         # tire-road friction [-]
 MAX_ACCELERATION     = _vp.max_acceleration        # [m/s²]
 MAX_DECELERATION     = _vp.max_deceleration        # [m/s²] (negative)
 MAX_STEERING_ANGLE   = np.radians(25.0)            # [rad]  ~25°
-MAX_STEERING_RATE    = np.radians(15.0)            # [rad/s] ~15°/s
+MAX_STEERING_RATE    = np.radians(5.0)            # [rad/s] ~15°/s
 
 # =============================================================================
 # LANE CONFIGURATION
@@ -116,17 +118,20 @@ MAX_STEERING_RATE    = np.radians(15.0)            # [rad/s] ~15°/s
 LANE_WIDTH          = 3.5     # [m]
 PLATOON_LANE_Y      = 0.0     # Platoon centre lane y-position [m]
 HUMAN_INITIAL_LANE_Y = LANE_WIDTH  # Human starts in adjacent lane [m]
+LAT_HUMAN_Y_BIAS     = 0.0         # Human steady-state y offset from PLATOON_LANE_Y [m] (0 = no bias)
 
 # =============================================================================
 # LONGITUDINAL NASH SOLVER PARAMETERS
 # (used to configure ConstrainedLongitudinalNashSolver in the coordinator)
 # =============================================================================
-LONG_NASH_Q_POS           = 2500.0
+LONG_NASH_Q_POS           = 5000.0   # was 2500.0 — B1 Pareto optimum before GP-noise rebound
 LONG_NASH_Q_VEL           = 1500.0
-LONG_NASH_R1              = 7500.0   # 30000 * 0.25
-LONG_NASH_R2              = 12500.0  # 50000 * 0.25
-LONG_NASH_S1              = 10000.0
-LONG_NASH_S2              = 10000.0
+LONG_NASH_R1              = 75000.0
+LONG_NASH_R2              = 120000.0  # initial value (= R2_START); overridden per-step by adaptive authority
+LONG_NASH_R2_START        = 120000.0  # R2 when far from platoon (large gap/vel errors) — R2/R1≈1.6
+LONG_NASH_R2_FOLLOW       =  80000.0  # R2 when fully integrated — R2/R1≈1.07; human leads, bounded u2
+LONG_NASH_S1              = 100000.0
+LONG_NASH_S2              = 100000.0
 LONG_NASH_U1_MIN          = MAX_DECELERATION    # [m/s²]
 LONG_NASH_U1_MAX          = MAX_ACCELERATION    # [m/s²]
 LONG_NASH_U2_MIN          = -4.0
@@ -136,7 +141,7 @@ LONG_NASH_DU2_MAX         =  2.0
 LONG_NASH_V_MIN           =  0.0
 LONG_NASH_V_MAX           = 50.0
 LONG_NASH_GAP_MIN         =  7.0    # [m]
-LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
+LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 40.0, 50.0)
 
 # =============================================================================
 # LATERAL NASH SOLVER PARAMETERS
@@ -145,9 +150,11 @@ LONG_NASH_LAMBDA_LEVELS   = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 50.0)
 LAT_NASH_Q_Y               =    800.0
 LAT_NASH_Q_PSI             =  10000.0
 LAT_NASH_Q_Y_TERMINAL_FAC  =     10.0
-LAT_NASH_Q_PSI_TERMINAL_FAC=      4.0
-LAT_NASH_R1                =  50000.0
-LAT_NASH_R2                =  50000.0
+LAT_NASH_Q_PSI_TERMINAL_FAC=      50.0
+LAT_NASH_R1                =   50000.0
+LAT_NASH_R2                =   50000.0  # initial value (= R2_START); overridden per-step by adaptive authority
+LAT_NASH_R2_START          =   50000.0  # R2 when far from target lane — R2/R1=1.0, matched effort
+LAT_NASH_R2_FOLLOW         =   28000.0  # R2 when lane-centred — R2/R1=0.56, human leads with bounded δ
 LAT_NASH_S1                = 200000.0
 LAT_NASH_S2                = 200000.0
 LAT_NASH_DELTA_MIN         = -MAX_STEERING_ANGLE   # [rad]
@@ -155,17 +162,17 @@ LAT_NASH_DELTA_MAX         =  MAX_STEERING_ANGLE
 LAT_NASH_Y_MAX             =  5.0     # [m]
 LAT_NASH_PSI_MAX           =  0.5     # [rad]
 LAT_NASH_LAMBDA_LEVELS     = (0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0)
-
 # Shared OSQP settings
 NASH_SOLVER_BACKEND  = 'OSQP'
 NASH_WARM_START      = True
 NASH_VERBOSE         = False
 NASH_POLISH          = False
 NASH_REGULARIZATION  = 1e-5
+NASH_RISK_GAMMA      = 0.0   # γ in E[J]+γ·Var[J]; risk sensitivity for SE-kernel GP uncertainty
 LONG_NASH_MAX_ITER   = 1000
 LONG_NASH_EPS_ABS    = 1e-4
 LONG_NASH_EPS_REL    = 1e-4
-LAT_NASH_MAX_ITER    = 200
+LAT_NASH_MAX_ITER    = 600
 LAT_NASH_EPS_ABS     = 1e-3
 LAT_NASH_EPS_REL     = 1e-3
 
@@ -176,6 +183,27 @@ LONG_SAFETY_MIN_SAFE_DISTANCE       =  7.0    # [m]
 LONG_SAFETY_EMERGENCY_BRAKE_DIST    =  8.0    # [m]
 LONG_SAFETY_MAX_REPULSIVE_FORCE     = 800.0   # [N]
 LONG_SAFETY_FILTER_ALPHA            =  0.2
+# Li et al. (2019) elliptic DSF parameters (mirrors Longitudinal/config.py)
+LONG_SAFETY_BASE_RADIUS             = 10.0   # safety radius s [m]
+LONG_SAFETY_OBSTACLE_MASS           = 400.0  # virtual obstacle mass Mo [kg]
+LONG_SAFETY_INFLUENCE_FACTOR        =  1.0   # influence factor Ri
+LONG_SAFETY_DRIVER_RISK             =  0.5   # base driver risk DRi
+LONG_SAFETY_EPSILON                 =  0.1   # regularisation [m]
+LONG_SAFETY_DISTANCE_DECAY          = 15.0   # distance decay factor [m]
+# Quadratic soft-transition threshold in FOLLOWING phase (mirrors split module)
+# Force scaled by (|gap_err| / threshold)² when |gap_err| < threshold
+LONG_SAFETY_FOLLOWING_SOFT_FACTOR   =  0.35  # fraction of desired_gap (enlarged quiet zone → force fades faster)
+# Position multipliers (mirrors Longitudinal/config.py SAFETY_*_POSITION_MULTIPLIER)
+LONG_SAFETY_LEADER_POSITION_MULT   = 0.8
+LONG_SAFETY_MIDDLE_POSITION_MULT   = 1.2
+LONG_SAFETY_FOLLOWER_POSITION_MULT = 1.0
+# Velocity scaling for safety radius (mirrors SAFETY_VELOCITY_REFERENCE/SCALING_FACTOR)
+LONG_SAFETY_VELOCITY_REFERENCE     = 120.0  # reference speed [same units as split module]
+LONG_SAFETY_VELOCITY_SCALING       = 0.8
+# Platoon coherence factor on Ri when ego is in middle (mirrors SAFETY_PLATOON_COHERENCE_FACTOR)
+LONG_SAFETY_PLATOON_COHERENCE      = 1.5
+# Follower force weight (mirrors SAFETY_FOLLOWER_WEIGHT)
+LONG_SAFETY_FOLLOWER_WEIGHT        = 0.5
 
 # =============================================================================
 # LATERAL SAFETY FIELD / DSF (Li 2019, Wang 2015/2016)
@@ -189,6 +217,13 @@ LAT_DSF_K2           = 0.005
 LAT_DSF_DR           = 0.5     # Driver risk factor
 LAT_SAFETY_MAX_FORCE = 2000.0  # [N]
 LAT_SAFETY_FILTER_ALPHA = 0.3
+# Road boundary force parameters (mirrors lateral/config.py SAFETY_*)
+LAT_SAFETY_ROAD_HALF_WIDTH      =   7.0   # half road width [m]
+LAT_SAFETY_BOUNDARY_FORCE_GAIN  = 150.0   # boundary repulsion gain [N]
+LAT_SAFETY_BOUNDARY_FORCE_SCALE =   2.0   # boundary tanh scale
+LAT_SAFETY_BOUNDARY_PROXIMITY   =   3.0   # activation distance from boundary [m]
+LAT_SAFETY_BOUNDARY_EPSILON     =   0.1   # numerical safety [m]
+LAT_SAFETY_DIRECTION_SMOOTH_SIGMA =  0.5  # tanh direction-smoothing width [m]
 
 # =============================================================================
 # AUTHORITY ALLOCATOR — LONGITUDINAL (sigmoid on risk force)
@@ -199,6 +234,8 @@ LONG_AUTHORITY_FORCE_MIDPOINT  = 400.0   # Sigmoid centre [N]
 LONG_AUTHORITY_K_STEEPNESS     =   0.015
 LONG_AUTHORITY_ALPHA_BASE      =   0.05  # Slow smoothing
 LONG_AUTHORITY_ALPHA_FAST      =   0.12  # Fast smoothing
+LONG_AUTHORITY_LAMBDA_MAX_FOLLOWING = 5.0   # λ cap in FOLLOWING: α_min=1/(1+5)=0.167, human always ≥17%
+LONG_AUTHORITY_ALPHA_FOLLOWING      = 0.05  # Faster EMA in FOLLOWING (~3s time constant)
 
 # =============================================================================
 # AUTHORITY ALLOCATOR — LATERAL (Swain & Rath 2023, Eq. 15)
@@ -218,7 +255,7 @@ LAT_AUTHORITY_SIGMOID_M2      =  0.5   # Centre shift
 # PLATOON CONTROL
 # =============================================================================
 PLATOON_TIME_GAP            = 1.5    # Desired time headway [s]
-PLATOON_STANDSTILL_DISTANCE = _vp.length    # Minimum gap at standstill [m]
+PLATOON_STANDSTILL_DISTANCE = 2.0           # Minimum gap at standstill [m] — matches IDM s0
 PLATOON_TARGET_VELOCITY     = NOMINAL_VELOCITY
 PLATOON_VEHICLE_LENGTH      = _vp.length  # [m]
 
@@ -227,14 +264,14 @@ PLATOON_VEHICLE_LENGTH      = _vp.length  # [m]
 #   Rebuild when velocity prediction error over horizon exceeds ε_v = 0.2 m/s:
 #   Δvx_thr = ε_v / (Cd_aero · dt_long · Np · V_MAX)
 _Cd_aero = VEHICLE_AIR_DENSITY * VEHICLE_CD * VEHICLE_FRONTAL_AREA / VEHICLE_M_EFF
-LONG_NASH_REBUILD_DVX = 0.2 / (_Cd_aero * LONG_NASH_CONTROL_DT * NASH_NP * max(LONG_NASH_V_MAX, 1.0))
+LONG_NASH_REBUILD_DVX = 0.2 / (_Cd_aero * LONG_NASH_CONTROL_DT * LONG_NASH_NP * max(LONG_NASH_V_MAX, 1.0))
 
 # Lateral: dominant changing term is Coriolis → A_c[1,3] ≈ -vx → dA_c/dvx ≈ -1
-#   Rebuild when lateral velocity prediction error exceeds ε_vy = 0.05 m/s:
+#   Rebuild when lateral velocity prediction error exceeds ε_vy = 0.20 m/s:
 #   ψ̇_max ≈ μ·g / V_target (max yaw rate at cruise)
 #   Δvx_thr = ε_vy / (dt_lat · Np · ψ̇_max)
 _psi_dot_max = _vp.tire_friction_coeff * _vp.gravity / max(PLATOON_TARGET_VELOCITY, 1.0)
-LAT_NASH_REBUILD_DVX = 0.05 / (LAT_NASH_CONTROL_DT * NASH_NP * max(_psi_dot_max, 0.01))
+LAT_NASH_REBUILD_DVX = 0.20 / (LAT_NASH_CONTROL_DT * LAT_NASH_NP * max(_psi_dot_max, 0.01))
 
 # Platoon control dynamics
 JERK_LIMIT       = 2.0   # Maximum da/dt [m/s³]
@@ -309,8 +346,16 @@ DRIVER_PARAMS = {
         'tlc':                    6.0,   # lane-change duration [s]
         'max_heading_deg':        3.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    20.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     20.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.8,
         'mobil_a_th':             0.2,
+        'plan_time_headway':      2.5,   # IDM planning time gap [s] — cautious keeps more distance
+        'plan_decel':             3.0,   # IDM comfortable decel [m/s²] — softer braking
+        # Swain & Rath (2023) neuromuscular IIR — slow, highly damped
+        'neuro_J':                0.0050,   # arm inertia [kg*m^2]
+        'neuro_B':                0.2200,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.0500,   # spring stiffness [N*m/rad]
     },
     'normal': {
         'velocity_offset':        0.0,
@@ -318,8 +363,16 @@ DRIVER_PARAMS = {
         'tlc':                    4.5,
         'max_heading_deg':        4.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    20.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     20.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.5,
         'mobil_a_th':             0.1,
+        'plan_time_headway':      1.5,   # IDM planning time gap [s] — aligned with RAJAMANI_H to eliminate tug-of-war
+        'plan_decel':             4.0,   # IDM comfortable decel [m/s²]
+        # Swain & Rath (2023) D1 baseline
+        'neuro_J':                0.0037,   # arm inertia [kg*m^2]
+        'neuro_B':                0.1363,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.1742,   # spring stiffness [N*m/rad]
     },
     'aggressive': {
         'velocity_offset':        5.0,
@@ -327,10 +380,47 @@ DRIVER_PARAMS = {
         'tlc':                    3.0,
         'max_heading_deg':        6.0,
         'system_tlc_multiplier':  1.5,
+        'system_settle_time':    15.0,   # FOLLOWING settling duration [s] — system ref
+        'human_settle_time':     15.0,   # FOLLOWING settling duration [s] — human ref
         'mobil_p':                0.2,
         'mobil_a_th':             0.05,
+        'plan_time_headway':      1.3,   # IDM planning time gap [s] — aggressive follows closely
+        'plan_decel':             6.0,   # IDM comfortable decel [m/s²] — accepts harder braking
+        # Swain & Rath (2023) neuromuscular IIR — fast, low damping
+        'neuro_J':                0.0020,   # arm inertia [kg*m^2]
+        'neuro_B':                0.0800,   # viscous damping [N*m*s/rad]
+        'neuro_K':                1.3000,   # spring stiffness [N*m/rad]
     },
 }
+
+# =============================================================================
+# MA-IDM (Memory-Augmented IDM, Zhang & Sun 2024)
+# =============================================================================
+MA_IDM_ENABLED = True          # Toggle GP noise on/off globally
+
+# Longitudinal GP hyperparameters per driver type — from Table I, hierarchical MA-IDM
+# σ_k: noise std [m/s²], ell: memory lengthscale [s]
+MA_IDM_PARAMS = {
+    'cautious':   {'sigma_k': 0.172, 'ell': 1.55},
+    'normal':     {'sigma_k': 0.202, 'ell': 1.435},
+    'aggressive': {'sigma_k': 0.240, 'ell': 1.30},
+}
+
+# Lateral GP hyperparameters per driver type
+# σ_k: steering noise std [rad], ell: memory lengthscale [s]
+# (shorter than longitudinal — steering reacts faster)
+MA_IDM_LAT_PARAMS = {
+    'cautious':   {'sigma_k': 0.012, 'ell': 0.80},
+    'normal':     {'sigma_k': 0.018, 'ell': 0.65},
+    'aggressive': {'sigma_k': 0.025, 'ell': 0.50},
+}
+
+# Future full-GP upgrade hooks (unused by AR(1)):
+MA_IDM_WINDOW_SIZE   = 50    # history window = 5s @ 10Hz
+MA_IDM_OBS_NOISE     = 0.01  # GP observation noise σ_obs² [(m/s²)²] — longitudinal
+MA_IDM_LAT_OBS_NOISE = 1e-5  # GP observation noise σ_obs² [rad²]    — lateral
+# Note: lateral sigma_k² ≈ 1.4e-4..6.3e-4 rad²; obs_noise=1e-5 → SNR=14..63
+# Previous value (0.01) had SNR<1 → GP sampled i.i.d. at 100 Hz → steering oscillations
 
 # =============================================================================
 # LOWER-LEVEL CONTROLLER  (Longitudinal/control/lower_level_controller.py)
