@@ -27,11 +27,12 @@ CLAUDE.md
 skills-lock.json
 
 #--article-Markdown--
-/Notes/
-
-
+Notes/
+**/Notes/**
 
 # --- Unity Specific (Relative to simulator_unity/) ---
+**/.plastic/
+simulator_unity/VehicleData/*.csv
 **/[Ll]ibrary/
 **/[Tt]emp/
 **/[Oo]bj/
