@@ -33,6 +33,8 @@ Notes/
 # --- Unity Specific (Relative to simulator_unity/) ---
 **/.plastic/
 simulator_unity/VehicleData/*.csv
+simulator_unity/Assets/_Recovery/
+simulator_unity/Assets/_Recovery.meta
 **/[Ll]ibrary/
 **/[Tt]emp/
 **/[Oo]bj/
