@@ -1,3 +1,9 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system"
+    "python-envs.defaultEnvManager": "ms-python.python:system",
+    "dotnet.preferCSharpExtension": true,
+    "dotnet.defaultSolution": "disable",
+    "csharp.solution": "disable",
+    "files.exclude": {
+        "simulator_unity/**/*.csproj": true
+    }
 }
