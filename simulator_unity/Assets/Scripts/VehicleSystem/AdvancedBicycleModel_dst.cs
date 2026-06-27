@@ -198,7 +198,7 @@ public class AdvancedBicycleModel : MonoBehaviour
             powertrain.UpdateRpmForAutonomousMode(engineForce, vx);
         }
 
-        UpdateDynamics6D(Fx_tot, Fxf_contact, angles.average, dt);
+        UpdateDynamics6D(Fxf_contact, Fxr_contact, Faero, Rxf + Rxr, slopeForce + naturalDeceleration, angles.average, dt);
 
         Totaldistance += math.sqrt(math.pow(vx * dt, 2) + math.pow(yDot * dt, 2));
 
@@ -250,12 +250,15 @@ public class AdvancedBicycleModel : MonoBehaviour
     public float GetSteeringWheelAngle() => angles.steeringWheelAngle;
 
     // ── Belousov RK4 6D dynamics ──────────────────────────────────────────
-    // Fx_tot     : net longitudinal force on body [N] — enters Eq. 3.11a
-    // Fxf_contact: front axle contact-patch force [N] — enters Eq. 3.11b/c sinδ terms
-    void UpdateDynamics6D(float Fx_tot, float Fxf_contact, float delta, float dt) {
+    // Fxf_contact: front axle contact-patch force [N] — enters Eq. 3.11a (with cosδ), 3.11b/c sinδ terms
+    // Fxr_contact: rear axle contact-patch force [N]  — enters Eq. 3.11a directly (no cosδ)
+    // Faero      : aerodynamic drag [N]               — enters Eq. 3.11a directly
+    // Frr        : rolling resistance total [N]        — enters Eq. 3.11a directly
+    // Fslope     : slope + natural decel [N]           — enters Eq. 3.11a directly
+    void UpdateDynamics6D(float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta, float dt) {
         float deltaRL = RateLimitDelta(delta, dt);
         float[] s    = GetState6DArray();
-        float[] sNew = RK4Step(s, Fx_tot, Fxf_contact, deltaRL, dt);
+        float[] sNew = RK4Step(s, Fxf_contact, Fxr_contact, Faero, Frr, Fslope, deltaRL, dt);
 
                 sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f);
         sNew[3] = Mathf.Clamp(sNew[3], -2f, 2f);
@@ -279,19 +282,20 @@ public class AdvancedBicycleModel : MonoBehaviour
         y    = _x0 - position.x;  // exact world-frame lateral tracking
     }
 
-    float[] RK4Step(float[] s, float Fx_tot, float Fxf_contact, float delta, float dt) {
-        float[] k1 = Derivatives6D(s, Fx_tot, Fxf_contact, delta);
-        float[] k2 = Derivatives6D(Add6(s, Scale6(k1, dt / 2f)), Fx_tot, Fxf_contact, delta);
-        float[] k3 = Derivatives6D(Add6(s, Scale6(k2, dt / 2f)), Fx_tot, Fxf_contact, delta);
-        float[] k4 = Derivatives6D(Add6(s, Scale6(k3, dt)),       Fx_tot, Fxf_contact, delta);
+    float[] RK4Step(float[] s, float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta, float dt) {
+        float[] k1 = Derivatives6D(s, Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
+        float[] k2 = Derivatives6D(Add6(s, Scale6(k1, dt / 2f)), Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
+        float[] k3 = Derivatives6D(Add6(s, Scale6(k2, dt / 2f)), Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
+        float[] k4 = Derivatives6D(Add6(s, Scale6(k3, dt)),       Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
         float[] wsum = Add6(Add6(k1, Scale6(k2, 2f)), Add6(Scale6(k3, 2f), k4));
         return Add6(s, Scale6(wsum, dt / 6f));
     }
 
     // Belousov Eq. 3.11a/b/c:
-    //   Fx_tot      → 3.11a only (net body force incl. drag, rolling, grade)
-    //   Fxf_contact → 3.11b/c sinδ terms (front axle contact-patch force only)
-    float[] Derivatives6D(float[] s, float Fx_tot, float Fxf_contact, float delta) {
+    //   Fxf_contact → 3.11a with cosδ; 3.11b/c sinδ terms
+    //   Fxr_contact → 3.11a directly (no cosδ, rear wheels point straight)
+    //   Faero, Frr, Fslope → 3.11a directly (body-level resistances, no cosδ)
+    float[] Derivatives6D(float[] s, float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta) {
         float vxS    = s[1], vyS = s[3], psiS = s[4], psiDotS = s[5];
         float vxSafe = Mathf.Max(Mathf.Abs(vxS), 1.0f);
 
@@ -310,8 +314,9 @@ public class AdvancedBicycleModel : MonoBehaviour
         float zDot = vxS * cosP - vyS * sinP;
         float xDot = vxS * sinP + vyS * cosP;
 
-        // Eq. 3.11a: full net body force drives longitudinal acceleration
-        float vxDot = vyS * psiDotS + (Fx_tot * cosD - Fyf * sinD) / m;
+        // Eq. 3.11a: only Fxf_contact gets cosδ (front wheels are steered);
+        // Fxr_contact, Faero, Frr, Fslope act along the body axis — no cosδ.
+        float vxDot = vyS * psiDotS + (Fxf_contact * cosD + Fxr_contact - Fyf * sinD - Faero - Frr - Fslope) / m;
 
         float k_vy  = vehicleParams.tireFrictionCoefficient * vehicleParams.gravity / 0.5f;
         float k_psi = vehicleParams.tireFrictionCoefficient * vehicleParams.mass
