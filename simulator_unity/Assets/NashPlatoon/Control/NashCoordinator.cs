@@ -206,8 +206,10 @@ public class NashCoordinator : MonoBehaviour
             _longTimer = 0f;
         }
 
-        // Lat Nash @ NashDtLat — GAP_SEARCH, MERGE, FOLLOWING
-        // GAP_SEARCH included: the driver may already be steering; Nash guides from the start.
+        // Lat Nash @ NashDtLat — GAP_SEARCH, MERGE, FOLLOWING.
+        // In GAP_SEARCH the lateral target is the ego's current lane (straight-ahead),
+        // not the platoon lane — this prevents the tug-of-war from yErr≈-2m while still
+        // guarding against dangerous heading excursions or opposite-lane drift.
         if (Phase == MergePhase.GapSearch ||
             Phase == MergePhase.Merge     ||
             Phase == MergePhase.Following)
@@ -329,9 +331,15 @@ public class NashCoordinator : MonoBehaviour
         float force = _latSafety.Compute(ego, platoon);
         _latForceEma = force;
 
+        // During GAP_SEARCH use the ego's current lateral position as target so Nash
+        // keeps the vehicle driving straight (psi→0) without fighting a 2m lane error.
+        // During MERGE/FOLLOWING use the actual platoon lane target.
+        float latTarget = (Phase == MergePhase.GapSearch)
+                        ? -ego.GetY()   // solver convention: current posX − _x0
+                        : platoonLaneY;
+
         // yErr in solver convention: positive = ego right of target (needs to go left)
-        // ego position in solver convention = -ego.GetY() (since solver y = pos.x - _x0 = -GetY())
-        float yErr = -ego.GetY() - platoonLaneY;
+        float yErr = -ego.GetY() - latTarget;
         LatLambda = _authority.ComputeLat(force, yErr);
 
         // Adaptive R2 lateral: l_n based on lane-width normalised y-error
@@ -379,13 +387,13 @@ public class NashCoordinator : MonoBehaviour
         lat.UpdateLinearization(ego);
 
         float[] r1 = _latRef.SystemRef(
-            ego, platoonLaneY, Phase,
+            ego, latTarget, Phase,
             Time.fixedTime,
             settings.Timing.NashNp, settings.Timing.NashDtLat);
 
         float[] r2 = _latRef.HumanRef(
             ego,
-            platoonLaneY, Phase, Time.fixedTime,
+            latTarget, Phase, Time.fixedTime,
             settings.Timing.NashNp, settings.Timing.NashDtLat);
 
         float u1, u2;
@@ -452,7 +460,7 @@ public class NashCoordinator : MonoBehaviour
                 break;
 
             case MergePhase.GapSearch:
-                if (t - _gapSearchStart >= 0.5f)   // GAP_SEARCH_DURATION = 0.5 s
+                if (t - _gapSearchStart >= 2.0f)   // GAP_SEARCH_DURATION = 2.0 s (was 0.5 — gives Nash time to damp psi before Merge entry)
                 {
                     // Notify lat ref generator of MERGE entry for locked polynomial
                     _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetVx(), platoonLaneY, t);

@@ -35,7 +35,8 @@ MonoBehaviour:
   R2_lat: 50000
   DeltaMin: -0.436
   DeltaMax: 0.436
-  DDeltaMax: 0.013
+  DDeltaMaxHuman: 0.020
+  DDeltaMaxSystem: 0.035
   IbrMaxIter: 15
   IbrTol: 0.0001
   SigmaK: 1

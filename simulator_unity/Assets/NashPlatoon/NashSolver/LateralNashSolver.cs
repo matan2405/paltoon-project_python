@@ -198,7 +198,7 @@ namespace NashPlatoon
             double[] P1 = BuildPMatrix((double)W.R1_lat, 1.0);
             var (P1d, P1i, P1p) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
             double[] l1 = new double[_mCon], u1 = new double[_mCon];
-            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, W.DDeltaMax, 0f);
+            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, W.DDeltaMaxSystem, 0f);
             _s1 = new OsqpSolver(SolverSettings());
             _s1.Setup(Nu, _mCon, P1d, P1i, P1p, q0, _Adata, _Ai, _Ap, l1, u1);
 
@@ -210,7 +210,7 @@ namespace NashPlatoon
                 var (P2d, P2i, P2p) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
 
                 double[] l2 = new double[_mCon], u2 = new double[_mCon];
-                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, W.DDeltaMax, 0f);
+                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, W.DDeltaMaxHuman, 0f);
 
                 _s2[i] = new OsqpSolver(SolverSettings());
                 _s2[i].Setup(Nu, _mCon, P2d, P2i, P2p, q0, _Adata, _Ai, _Ap, l2, u2);
@@ -244,9 +244,9 @@ namespace NashPlatoon
             double[] HQ1r2 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r2, zFree));
 
             UpdateBoundsForCall(_s1,
-                W.DeltaMin, W.DeltaMax, W.DDeltaMax, (float)_u1Prev);
+                W.DeltaMin, W.DeltaMax, W.DDeltaMaxSystem, (float)_u1Prev);
             UpdateBoundsForCall(_s2[lamIdx],
-                W.DeltaMin, W.DeltaMax, W.DDeltaMax, (float)_u2Prev);
+                W.DeltaMin, W.DeltaMax, W.DDeltaMaxHuman, (float)_u2Prev);
 
             InjectWarmStart(_s1,        _ws1);
             InjectWarmStart(_s2[lamIdx], _ws2[lamIdx]);

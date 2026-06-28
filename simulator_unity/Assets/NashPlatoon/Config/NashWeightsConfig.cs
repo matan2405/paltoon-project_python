@@ -58,7 +58,8 @@ public class NashWeightsConfig : ScriptableObject {
 
     [Header("Lat constraints")]
     public float DeltaMin = -0.436f, DeltaMax = 0.436f;
-    public float DDeltaMax = 0.070f;  // ~4 deg/step at 20Hz = 1.4 rad/s (doubled for faster reversal at target)
+    public float DDeltaMaxHuman  = 0.020f;  // human driver: 0.40 rad/s at 20 Hz (~Audi TT realistic steering rate)
+    public float DDeltaMaxSystem = 0.035f;  // ADAS system:  0.70 rad/s at 20 Hz (faster correction authority)
 
     [Header("IBR")]
     public int   IbrMaxIter = 15;
