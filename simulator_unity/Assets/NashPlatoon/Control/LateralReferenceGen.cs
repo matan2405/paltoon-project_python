@@ -30,6 +30,7 @@ public class LateralReferenceGen
     // MERGE entry state for locked polynomial
     bool  _mergeEntryLocked;
     float _mergeEntryY;
+    float _mergeEntryYDot;   // yDot at merge entry (solver convention) for smooth polynomial
     float _mergeEntryTime;
     float _mergeTlcSys = -1f;
     float _mergeTlcHum = -1f;   // human T_lc (factor 1.5, locked at merge entry)
@@ -43,25 +44,30 @@ public class LateralReferenceGen
     }
 
     // Called by NashCoordinator when entering MERGE (locks the polynomial base point)
-    public void OnMergeEntry(float egoY, float egoVx, float targetY, float wallTime)
+    public void OnMergeEntry(float egoY, float egoYDot, float egoVx, float targetY, float wallTime)
     {
         _mergeEntryLocked = true;
         _mergeEntryY      = egoY;
+        _mergeEntryYDot   = egoYDot;
         _mergeEntryTime   = wallTime;
 
-        // Reset IIR so the prediction starts from the polynomial (psi=0 at tau=0),
+        // Reset IIR so the prediction starts from the polynomial heading,
         // not from whatever large heading accumulated during APPROACH.
-        _psiKm1 = 0f;
-        _psiKm2 = 0f;
+        _psiKm1 = egoYDot / Mathf.Max(egoVx, 1f);
+        _psiKm2 = _psiKm1;
 
         float maxHeadRad = _c.MaxHeadingDeg * Mathf.Deg2Rad;
-        float dy  = Mathf.Abs(targetY - egoY);
         float vx  = Mathf.Max(egoVx, 1f);
+        // remaining distance to cover: if driver already moving toward target,
+        // effective dy shrinks; use actual remaining gap for T_lc.
+        float dy  = Mathf.Abs(targetY - egoY);
+        // T_lc: time needed to cover dy at max heading, but at least long enough
+        // for the entry yDot to decay naturally (dy_from_yDot = yDot²/(2·a_lat_max)).
         _mergeTlcSys = dy > 1e-4f
                      ? Mathf.Max(Time.fixedDeltaTime, 1.875f * dy / (vx * Mathf.Tan(maxHeadRad)))
                      : Time.fixedDeltaTime;
 
-        // Human T_lc uses factor 1.5 (mirrors Python _lat_hum_ref: factor 1.5 × human max_heading_deg)
+        // Human T_lc uses factor 1.5
         _mergeTlcHum = dy > 1e-4f
                      ? Mathf.Max(Time.fixedDeltaTime, 1.5f * dy / (vx * Mathf.Tan(maxHeadRad)))
                      : Time.fixedDeltaTime;
@@ -82,7 +88,7 @@ public class LateralReferenceGen
         float wallTime,
         int Np, float dt)
     {
-        float y0   = ego.GetY();
+        float y0   = -ego.GetY();   // solver convention: y = pos.x - _x0 = -GetY()
         float dy   = targetY - y0;
         float vx   = Mathf.Max(ego.GetVx(), 1f);
         float maxHeadRad = _c.MaxHeadingDeg * Mathf.Deg2Rad;
@@ -91,34 +97,38 @@ public class LateralReferenceGen
 
         if (phase == MergePhase.Following && _followingEntryTime >= 0f)
         {
-            // Settling cubic from (y0, ẏ0) → (targetY, 0)
-            float T_settle   = 20f;  // DRIVER_PARAMS['normal']['system_settle_time']
-            float tInFollow  = wallTime - _followingEntryTime;
-            float T_rem      = Mathf.Max(T_settle - tInFollow, dt);
+            // FOLLOWING: R1 always aims at targetY (platoon lane centre) so that the
+            // Nash game naturally rewards the driver when steering toward the target
+            // (u1 and u2 agree → driver feels authority) and corrects when opposing.
+            //
+            // T_eff is fixed at T_settle rather than shrinking — the old shrinking
+            // T_rem → 0 caused ydot/T_rem → ∞ oscillation.
+            const float T_settle = 20f;
 
-            float vy0 = ego.GetYDot();
+            float vy0 = -ego.GetYDot();  // solver convention: vy_solver = -GetYDot()
+
             if (Mathf.Abs(dy) > 1e-6f)
             {
-                float vyMax = 1.5f * Mathf.Abs(dy) / T_rem;
+                float vyMax = 1.5f * Mathf.Abs(dy) / T_settle;
                 vy0 = Mathf.Clamp(vy0, -vyMax, vyMax);
             }
             else { vy0 = 0f; }
 
             float a0 = y0;
-            float a1 = vy0 * T_rem;
-            float a2 = 3f * dy - 2f * vy0 * T_rem;
-            float a3 = -2f * dy + vy0 * T_rem;
+            float a1 = vy0 * T_settle;
+            float a2 = 3f * dy - 2f * vy0 * T_settle;
+            float a3 = -2f * dy + vy0 * T_settle;
 
             for (int k = 0; k < Np; k++)
             {
-                float tPred = k * dt;
-                float tau   = Mathf.Min(tPred / T_rem, 1f);
+                float tPred = (k + 1) * dt;
+                float tau   = Mathf.Min(tPred / T_settle, 1f);
                 float y, psi;
                 if (tau < 1f)
                 {
                     y   = a0 + a1 * tau + a2 * tau * tau + a3 * tau * tau * tau;
-                    float ydot = (a1 + 2f * a2 * tau + 3f * a3 * tau * tau) / T_rem;
-                    psi = Mathf.Clamp(-ydot / vx, -0.3f, 0.3f);  // ψ = -ẏ/vx (y = _x0 - pos.x)
+                    float ydot = (a1 + 2f * a2 * tau + 3f * a3 * tau * tau) / T_settle;
+                    psi = Mathf.Clamp(ydot / vx, -0.3f, 0.3f);
                 }
                 else { y = targetY; psi = 0f; }
                 ref_[2 * k]     = y;
@@ -127,14 +137,31 @@ public class LateralReferenceGen
         }
         else if (phase == MergePhase.Merge && _mergeEntryLocked)
         {
-            // Time-based polynomial locked to entry state (τ advances with wall clock)
-            float yStart  = _mergeEntryY;
-            float dyMerge = targetY - yStart;
+            // Time-based polynomial locked to entry state.
+            // Uses quintic Hermite with non-zero entry yDot so the polynomial
+            // matches the vehicle's actual lateral velocity at merge entry.
+            float yStart   = _mergeEntryY;
+            float vy0      = _mergeEntryYDot;   // solver-convention yDot at entry
+            float dyMerge  = targetY - yStart;
             if (_mergeTlcSys < 0f)
-                OnMergeEntry(y0, vx, targetY, wallTime);  // fallback init
+                OnMergeEntry(y0, -ego.GetYDot(), vx, targetY, wallTime);  // fallback init
 
-            float T_lc    = _mergeTlcSys;
+            float T_lc     = _mergeTlcSys;
             float tElapsed = wallTime - _mergeEntryTime;
+
+            // Quintic Hermite: y(0)=yStart, y'(0)=vy0, y''(0)=0
+            //                  y(T)=targetY, y'(T)=0,   y''(T)=0
+            // Normalised τ = t/T:
+            //   a0 = yStart
+            //   a1 = vy0·T
+            //   a2 = 0
+            //   a3 = 10·dy - 6·vy0·T
+            //   a4 = -15·dy + 8·vy0·T
+            //   a5 = 6·dy - 3·vy0·T
+            float vT  = vy0 * T_lc;
+            float c3  = 10f * dyMerge - 6f * vT;
+            float c4  = -15f * dyMerge + 8f * vT;
+            float c5  = 6f * dyMerge - 3f * vT;
 
             for (int k = 0; k < Np; k++)
             {
@@ -144,12 +171,17 @@ public class LateralReferenceGen
                 float t3     = t2 * tau;
                 float t4     = t3 * tau;
                 float t5     = t4 * tau;
-                float y      = yStart + dyMerge * (10f * t3 - 15f * t4 + 6f * t5);
-                float psi    = 0f;
+                float y, psi;
                 if (tau < 1f)
                 {
-                    float ydot = (dyMerge / T_lc) * (30f * t2 - 60f * t3 + 30f * t4);
-                    psi = Mathf.Clamp(-ydot / vx, -0.3f, 0.3f);  // ψ = -ẏ/vx
+                    y = yStart + vT * tau + c3 * t3 + c4 * t4 + c5 * t5;
+                    float ydot = (vT + 3f * c3 * t2 + 4f * c4 * t3 + 5f * c5 * t4) / T_lc;
+                    psi = Mathf.Clamp(ydot / vx, -0.3f, 0.3f);
+                }
+                else
+                {
+                    y   = targetY;
+                    psi = 0f;
                 }
                 ref_[2 * k]     = y;
                 ref_[2 * k + 1] = psi;
@@ -175,7 +207,7 @@ public class LateralReferenceGen
                 if (tau < 1f)
                 {
                     float ydot = (dy / Mathf.Max(T, 1e-6f)) * (30f * t2 - 60f * t3 + 30f * t4);
-                    psi = Mathf.Clamp(-ydot / Mathf.Max(vx, 0.1f), -0.3f, 0.3f);  // ψ = -ẏ/vx
+                    psi = Mathf.Clamp(ydot / Mathf.Max(vx, 0.1f), -0.3f, 0.3f);
                 }
                 ref_[2 * k]     = y;
                 ref_[2 * k + 1] = psi;
@@ -232,9 +264,9 @@ public class LateralReferenceGen
         if (phase == MergePhase.Merge && _mergeEntryLocked && _mergeTlcHum > 0f)
         {
             float tauSeed = Mathf.Min((wallTime - _mergeEntryTime) / _mergeTlcHum, 1f);
-            psiNow = tauSeed < 1f
-                   ? (targetY - _mergeEntryY) * (6f * tauSeed - 6f * tauSeed * tauSeed) / _mergeTlcHum / vx
-                   : 0f;
+            // ẏ/vx = psi when y = _x0 - pos.x and rightward is positive
+            float yDotSeed = (targetY - _mergeEntryY) * (6f * tauSeed - 6f * tauSeed * tauSeed) / _mergeTlcHum;
+            psiNow = tauSeed < 1f ? yDotSeed / vx : 0f;
         }
         else
         {
@@ -264,16 +296,30 @@ public class LateralReferenceGen
             float T_lc_h   = _mergeTlcHum;
             float tElapsed = wallTime - _mergeEntryTime;
 
-            // Polynomial psi at current time → used to compute driver's deviation offset
-            // ψ = -ẏ/vx because y = _x0 - position.x (body y opposite to world X)
-            float tauNow     = Mathf.Min(tElapsed / T_lc_h, 1f);
-            float psiPolyNow = tauNow < 1f
-                             ? -deltaY * (6f * tauNow - 6f * tauNow * tauNow) / T_lc_h / vx
-                             : 0f;
+            // psiPolyNow from the same quintic Hermite used by R1 (with vy0 = _mergeEntryYDot)
+            float tauNow = Mathf.Min(tElapsed / T_lc_h, 1f);
+            float psiPolyNow;
+            if (tauNow < 1f)
+            {
+                float vy0h = _mergeEntryYDot;
+                float vTh  = vy0h * T_lc_h;
+                float c3h  = 10f * deltaY - 6f * vTh;
+                float c4h  = -15f * deltaY + 8f * vTh;
+                float c5h  = 6f * deltaY - 3f * vTh;
+                float tau2 = tauNow * tauNow;
+                float tau3 = tau2 * tauNow;
+                float tau4 = tau3 * tauNow;
+                float ydotNow = (vTh + 3f * c3h * tau2 + 4f * c4h * tau3 + 5f * c5h * tau4) / T_lc_h;
+                psiPolyNow = ydotNow / vx;
+            }
+            else { psiPolyNow = 0f; }
 
-            // Steering offset: driver's deviation from the polynomial at this moment
-            float maxOffset     = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
-            float steeringOffset = Mathf.Clamp(psiSteering - psiPolyNow, -maxOffset, maxOffset);
+            // Steering offset: driver's intentional deviation from the polynomial.
+            // Scale by |rawSteering| so a passive/neutral driver produces zero offset
+            // and only active steering inputs from the driver modulate R2.
+            float maxOffset      = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
+            float steerMagMerge  = Mathf.Clamp01(Mathf.Abs(rawSteering) / 0.15f);
+            float steeringOffset = steerMagMerge * Mathf.Clamp(psiSteering - psiPolyNow, -maxOffset, maxOffset);
 
             for (int k = 0; k < Np; k++)
             {
@@ -285,10 +331,8 @@ public class LateralReferenceGen
                     float tau2 = tau * tau;
                     yRef   = _mergeEntryY + deltaY * (3f * tau2 - 2f * tau2 * tau);
                     float yDot = deltaY * (6f * tau - 6f * tau2) / T_lc_h;
-                    // Na & Cole 2021: driver offset fades linearly as lane change completes.
-                    // At τ=0: full steeringOffset; at τ=1: zero offset (merge done).
                     float offsetAtK = steeringOffset * (1f - tau);
-                    psiDes = -yDot / vx + offsetAtK;
+                    psiDes = yDot / vx + offsetAtK;
                 }
                 else
                 {
@@ -307,25 +351,60 @@ public class LateralReferenceGen
         }
         else
         {
-            // ── NON-MERGE: road centerline + driver steering overlay ───────────────
-            // Na, Cole & Li (Veh. Sys. Dyn. 2021): R2 y-component = desired path geometry
-            // (road centerline = targetY), not the propagated ego position.
-            // Rationale: the driver's GOAL is to be at targetY; the steering input captures
-            // HOW they are getting there (transient heading), not WHERE they want to end up.
-            // Propagating y via psiExec caused R2 to drift away from the lane target whenever
-            // the driver corrected — conflicting with the system's lane-centering goal.
-            float r2MaxPsi = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
+            // ── NON-MERGE (APPROACH / GAP_SEARCH / FOLLOWING): cubic settling to targetY ──
+            // The Forward-Euler bicycle propagation was numerically unstable at high vx
+            // (dt·vx ≈ 0.05·30 = 1.5, near the Euler stability limit for the -vx·ψ coupling).
+            // Instead R2 uses the same cubic form as R1 but seeded from the driver's current
+            // state (vy0 from GetYDot(), psi from IIR-filtered steering intent).
+            // This keeps R1 and R2 in the same function space so IBR converges, while still
+            // letting the driver's actual heading intention (psiSteering via IIR) modulate R2.
+            const float T_h = 20f;  // same settling horizon as R1 SystemRef
 
-            if (Mathf.Abs(vx - _vxCache) > 0.5f) RebuildJacobian(vp, vx);
+            float vy0 = -ego.GetYDot();  // solver convention
+            float dy  = targetY - (-ego.GetY());
+
+            if (Mathf.Abs(dy) > 1e-6f)
+            {
+                float vyMax = 1.5f * Mathf.Abs(dy) / T_h;
+                vy0 = Mathf.Clamp(vy0, -vyMax, vyMax);
+            }
+            else { vy0 = 0f; }
+
+            float a0 = -ego.GetY();  // solver convention
+            float a1 = vy0 * T_h;
+            float a2 = 3f * dy - 2f * vy0 * T_h;
+            float a3 = -2f * dy + vy0 * T_h;
+
+            // IIR-filtered driver heading intent — this is what differentiates R2 from R1:
+            // R1 uses psi=ydot/vx from the polynomial; R2 uses the driver's actual heading.
+            float r2MaxPsi = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
 
             for (int k = 0; k < Np; k++)
             {
-                float psiExec = na0 * psiSteering + na1 * psiK + na2 * psiKm1Pred;
-                psiExec = Mathf.Clamp(psiExec, -r2MaxPsi, r2MaxPsi);
-                ref_[2 * k]     = targetY;   // driver's lateral goal = road centerline
-                ref_[2 * k + 1] = psiExec;   // driver's current heading intent (transient)
-                psiKm1Pred = psiK;
-                psiK       = psiExec;
+                float tPred = (k + 1) * dt;
+                float tau   = Mathf.Min(tPred / T_h, 1f);
+                float yRef, psiRef;
+                if (tau < 1f)
+                {
+                    yRef = a0 + a1 * tau + a2 * tau * tau + a3 * tau * tau * tau;
+                    float ydot = (a1 + 2f * a2 * tau + 3f * a3 * tau * tau) / T_h;
+                    // R2 psi: blend polynomial heading with driver's IIR intent.
+                    // IIR step: neuromuscular filter on psiSteering
+                    float psiExec = na0 * psiSteering + na1 * psiK + na2 * psiKm1Pred;
+                    psiExec       = Mathf.Clamp(psiExec, -r2MaxPsi, r2MaxPsi);
+                    psiKm1Pred    = psiK;
+                    psiK          = psiExec;
+                    // Weight driver intent by steering magnitude; at rest → same as R1
+                    float steerMag = Mathf.Abs(rawSteering);
+                    float blend    = Mathf.Clamp01(steerMag / 0.2f);
+                    psiRef = Mathf.Clamp(
+                        (1f - blend) * (ydot / vx) + blend * psiExec,
+                        -r2MaxPsi, r2MaxPsi);
+                }
+                else { yRef = targetY; psiRef = 0f; }
+
+                ref_[2 * k]     = yRef;
+                ref_[2 * k + 1] = psiRef;
             }
         }
         return ref_;
@@ -347,20 +426,21 @@ public class LateralReferenceGen
         // Row 0: ẏ = -vy - vx·ψ
         _Ac[0 * 4 + 1] = -1f;
         _Ac[0 * 4 + 2] = -vx;
+        // Caf/Car are per-wheel; factor 2 accounts for both wheels on each axle (Belousov Eq. 3.12–3.13)
         // Row 1: v̇y
         _Ac[1 * 4 + 0] = 0f;
-        _Ac[1 * 4 + 1] = -(Caf + Car) / (m * vx);
+        _Ac[1 * 4 + 1] = -2f * (Caf + Car) / (m * vx);
         _Ac[1 * 4 + 2] = 0f;
-        _Ac[1 * 4 + 3] = (lr * Car - lf * Caf) / (m * vx) - vx;
+        _Ac[1 * 4 + 3] = 2f * (lr * Car - lf * Caf) / (m * vx) - vx;
         // Row 2: ψ̇ = psiDot
         _Ac[2 * 4 + 3] = 1f;
         // Row 3: ψ̈
         _Ac[3 * 4 + 0] = 0f;
-        _Ac[3 * 4 + 1] = (lr * Car - lf * Caf) / (Iz * vx);
+        _Ac[3 * 4 + 1] = 2f * (lr * Car - lf * Caf) / (Iz * vx);
         _Ac[3 * 4 + 2] = 0f;
-        _Ac[3 * 4 + 3] = -(lf * lf * Caf + lr * lr * Car) / (Iz * vx);
+        _Ac[3 * 4 + 3] = -2f * (lf * lf * Caf + lr * lr * Car) / (Iz * vx);
 
-        // Bc (4×1)
-        _Bc = new float[] { 0f, Caf / m, 0f, lf * Caf / Iz };
+        // Bc (4×1) — per-wheel Caf × 2 for full axle
+        _Bc = new float[] { 0f, 2f * Caf / m, 0f, 2f * lf * Caf / Iz };
     }
 }

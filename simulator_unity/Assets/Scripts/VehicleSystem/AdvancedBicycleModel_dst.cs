@@ -15,13 +15,16 @@ public class AdvancedBicycleModel : MonoBehaviour
     // Internal variables
     private float y = 0f;
     private float yDot = 0f;
+    private float vyBody = 0f;  // body-frame lateral velocity [m/s] = sNew[3]
     private float _x0 = 0f;   // world-X at spawn; y = _x0 - position.x
     private float psi = 0f;
     private float psiDot = 0f;
     private float vx = 0;
     private float ax = 0;
     private Vector4 state;
-    private float Fx_tot = 0f;
+    private float Fx_tot     = 0f;
+    private float _fxContact = 0f;
+    private float _fxResist  = 0f;
     private SteeringAngles angles = new SteeringAngles { inner = 0, outer = 0, average = 0, steeringWheelAngle = 0 };
     private VehicleParameters vehicleParams;
     public Powertrain powertrain { get; private set; }
@@ -49,6 +52,7 @@ public class AdvancedBicycleModel : MonoBehaviour
     [HideInInspector] public float NashSteerNorm;
     private float _prevDelta = 0f;
     private float Totaldistance = 0f;
+    private float m_eff;  // Belousov Eq. 3.8: m + Iw/r²
 
     void Awake()
     {
@@ -58,6 +62,10 @@ public class AdvancedBicycleModel : MonoBehaviour
         powertrain = new Powertrain(vehicleParams, engineAudio);
         brakeSystem = new BrakeSystem(vehicleParams);
         steeringSystem = new SteeringSystem(vehicleParams);
+
+        // Belousov Eq. 3.8: m_eff = m + Iw/r²  (wheel inertia referred to vehicle body)
+        float r = vehicleParams.wheelRadius;
+        m_eff = vehicleParams.mass + vehicleParams.wheelInertia / (r * r);
     }
 
     void Start()
@@ -191,14 +199,19 @@ public class AdvancedBicycleModel : MonoBehaviour
         float Fxf_contact = Fxf_engine - FbrakeFront;
         float Fxr_contact = -FbrakeRear;
 
-        Fx_tot = Fxf_contact + Fxr_contact - Faero - Rxf - Rxr - slopeForce - naturalDeceleration;
+        // Fx_contact: contact-patch forces only — these are coupled to steering angle (enter cosδ/sinδ)
+        // Fx_resist:  body-level resistances — act along vehicle body axis, NOT coupled to wheel angle
+        float Fx_contact = Fxf_contact + Fxr_contact;
+        float Fx_resist  = Faero + Rxf + Rxr + slopeForce + naturalDeceleration;
+        Fx_tot    = Fx_contact - Fx_resist;  // kept for GetFx_tot() / AutoMode RPM update
+        _fxContact = Fx_contact;
+        _fxResist  = Fx_resist;
 
         if (AutoMode) {
-            float engineForce = Fx_tot + Faero + Rxf + Rxr + slopeForce + naturalDeceleration;
-            powertrain.UpdateRpmForAutonomousMode(engineForce, vx);
+            powertrain.UpdateRpmForAutonomousMode(Fx_contact, vx);
         }
 
-        UpdateDynamics6D(Fxf_contact, Fxr_contact, Faero, Rxf + Rxr, slopeForce + naturalDeceleration, angles.average, dt);
+        UpdateDynamics6D(Fx_contact, Fxf_contact, Fx_resist, angles.average, dt);
 
         Totaldistance += math.sqrt(math.pow(vx * dt, 2) + math.pow(yDot * dt, 2));
 
@@ -230,8 +243,14 @@ public class AdvancedBicycleModel : MonoBehaviour
     public float GetPsi() => psi;
     public float GetPsiDot() => psiDot;
     public float GetEngineRpm() => powertrain.EngineRpm;
-    public float GetFx_tot() => Fx_tot;
-    public float GetLambda() => angles.average;
+    public float GetFx_tot()     => Fx_tot;
+    public float GetFx_contact() => _fxContact;
+    public float GetFx_resist()  => _fxResist;
+    public float GetVy()         => vyBody;  // body-frame lateral velocity (sNew[3])
+    public float GetLambda()     => angles.average;
+    public float GetThrottleRaw()  => throttleInput;
+    public float GetBrakeRaw()     => brakeInput;
+    public float GetSteeringRaw()  => steeringInput;
     public int GetIndexPlatoon() => IndexPlatoon;
     public void SetIndexPlatoon(int index) => IndexPlatoon = index;
     public bool IsAutoMode() => AutoMode;
@@ -250,15 +269,13 @@ public class AdvancedBicycleModel : MonoBehaviour
     public float GetSteeringWheelAngle() => angles.steeringWheelAngle;
 
     // ── Belousov RK4 6D dynamics ──────────────────────────────────────────
-    // Fxf_contact: front axle contact-patch force [N] — enters Eq. 3.11a (with cosδ), 3.11b/c sinδ terms
-    // Fxr_contact: rear axle contact-patch force [N]  — enters Eq. 3.11a directly (no cosδ)
-    // Faero      : aerodynamic drag [N]               — enters Eq. 3.11a directly
-    // Frr        : rolling resistance total [N]        — enters Eq. 3.11a directly
-    // Fslope     : slope + natural decel [N]           — enters Eq. 3.11a directly
-    void UpdateDynamics6D(float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta, float dt) {
+    // Fx_contact : contact-patch forces [N] — enter Eq. 3.11a via cosδ, and 3.11b/c via sinδ
+    // Fxf_contact: front axle contact-patch force [N] — enters Eq. 3.11b/c sinδ terms only
+    // Fx_resist  : body-level resistances [N] (Faero+Rr+Rg) — enter Eq. 3.11a directly, NOT via cosδ
+    void UpdateDynamics6D(float Fx_contact, float Fxf_contact, float Fx_resist, float delta, float dt) {
         float deltaRL = RateLimitDelta(delta, dt);
         float[] s    = GetState6DArray();
-        float[] sNew = RK4Step(s, Fxf_contact, Fxr_contact, Faero, Frr, Fslope, deltaRL, dt);
+        float[] sNew = RK4Step(s, Fx_contact, Fxf_contact, Fx_resist, deltaRL, dt);
 
                 sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f);
         sNew[3] = Mathf.Clamp(sNew[3], -2f, 2f);
@@ -277,25 +294,25 @@ public class AdvancedBicycleModel : MonoBehaviour
         position.x = sNew[2];
         psi        = sNew[4];
         psiDot     = sNew[5];
+        vyBody     = sNew[3];      // body-frame lateral velocity
         float xDotNew = vx * Mathf.Sin(psi) + sNew[3] * Mathf.Cos(psi);
         yDot = -xDotNew;           // ẏ = -d(position.x)/dt
         y    = _x0 - position.x;  // exact world-frame lateral tracking
     }
 
-    float[] RK4Step(float[] s, float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta, float dt) {
-        float[] k1 = Derivatives6D(s, Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
-        float[] k2 = Derivatives6D(Add6(s, Scale6(k1, dt / 2f)), Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
-        float[] k3 = Derivatives6D(Add6(s, Scale6(k2, dt / 2f)), Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
-        float[] k4 = Derivatives6D(Add6(s, Scale6(k3, dt)),       Fxf_contact, Fxr_contact, Faero, Frr, Fslope, delta);
+    float[] RK4Step(float[] s, float Fx_contact, float Fxf_contact, float Fx_resist, float delta, float dt) {
+        float[] k1 = Derivatives6D(s, Fx_contact, Fxf_contact, Fx_resist, delta);
+        float[] k2 = Derivatives6D(Add6(s, Scale6(k1, dt / 2f)), Fx_contact, Fxf_contact, Fx_resist, delta);
+        float[] k3 = Derivatives6D(Add6(s, Scale6(k2, dt / 2f)), Fx_contact, Fxf_contact, Fx_resist, delta);
+        float[] k4 = Derivatives6D(Add6(s, Scale6(k3, dt)),       Fx_contact, Fxf_contact, Fx_resist, delta);
         float[] wsum = Add6(Add6(k1, Scale6(k2, 2f)), Add6(Scale6(k3, 2f), k4));
         return Add6(s, Scale6(wsum, dt / 6f));
     }
 
     // Belousov Eq. 3.11a/b/c:
-    //   Fxf_contact → 3.11a with cosδ; 3.11b/c sinδ terms
-    //   Fxr_contact → 3.11a directly (no cosδ, rear wheels point straight)
-    //   Faero, Frr, Fslope → 3.11a directly (body-level resistances, no cosδ)
-    float[] Derivatives6D(float[] s, float Fxf_contact, float Fxr_contact, float Faero, float Frr, float Fslope, float delta) {
+    //   Fx_contact  → 3.11a via cosδ; Fxf_contact → 3.11b/c sinδ terms
+    //   Fx_resist   → 3.11a directly (no cosδ): body-level drag, rolling, grade
+    float[] Derivatives6D(float[] s, float Fx_contact, float Fxf_contact, float Fx_resist, float delta) {
         float vxS    = s[1], vyS = s[3], psiS = s[4], psiDotS = s[5];
         float vxSafe = Mathf.Max(Mathf.Abs(vxS), 1.0f);
 
@@ -304,8 +321,16 @@ public class AdvancedBicycleModel : MonoBehaviour
         float alphaF = fv * (delta - Mathf.Atan2(vyS + vehicleParams.lf * psiDotS, vxSafe));
         float alphaR = fv * Mathf.Atan2(vehicleParams.lr * psiDotS - vyS, vxSafe);
 
-        float Fyf = vehicleParams.Caf * alphaF;
-        float Fyr = vehicleParams.Car * alphaR;
+        // Rajamani Eq. 13.45 — parabolic tire model (replaces linear Fyf = C·α)
+        // Caf/Car are per-wheel stiffness values → divide axle load by 2, then sum both wheels (×2)
+        // Normal loads: 50/50 CG split → Fz_axle_f = m·g·lr/(lf+lr), per wheel = /2
+        float mu         = vehicleParams.tireFrictionCoefficient;
+        float Fz_f_wheel = vehicleParams.mass * vehicleParams.gravity * vehicleParams.lr
+                         / (vehicleParams.lf + vehicleParams.lr) / 2f;
+        float Fz_r_wheel = vehicleParams.mass * vehicleParams.gravity * vehicleParams.lf
+                         / (vehicleParams.lf + vehicleParams.lr) / 2f;
+        float Fyf = 2f * TireForce(alphaF, vehicleParams.Caf, mu, Fz_f_wheel);
+        float Fyr = 2f * TireForce(alphaR, vehicleParams.Car, mu, Fz_r_wheel);
         float m   = vehicleParams.mass;
 
         float cosD = Mathf.Cos(delta), sinD = Mathf.Sin(delta);
@@ -314,9 +339,9 @@ public class AdvancedBicycleModel : MonoBehaviour
         float zDot = vxS * cosP - vyS * sinP;
         float xDot = vxS * sinP + vyS * cosP;
 
-        // Eq. 3.11a: only Fxf_contact gets cosδ (front wheels are steered);
-        // Fxr_contact, Faero, Frr, Fslope act along the body axis — no cosδ.
-        float vxDot = vyS * psiDotS + (Fxf_contact * cosD + Fxr_contact - Fyf * sinD - Faero - Frr - Fslope) / m;
+        // Eq. 3.11a: contact forces enter via cosδ; body resistances subtract directly (no cosδ)
+        // m_eff = m + Iw/r² (Belousov Eq. 3.8)
+        float vxDot = vyS * psiDotS + (Fx_contact * cosD - Fyf * sinD - Fx_resist) / m_eff;
 
         float k_vy  = vehicleParams.tireFrictionCoefficient * vehicleParams.gravity / 0.5f;
         float k_psi = vehicleParams.tireFrictionCoefficient * vehicleParams.mass
@@ -343,7 +368,18 @@ public class AdvancedBicycleModel : MonoBehaviour
         return limited;
     }
 
-        float[] GetState6DArray() => new[] { position.z, vx, position.x, yDot, psi, psiDot };
+        float[] GetState6DArray() => new[] { position.z, vx, position.x, vyBody, psi, psiDot };
+
+    // Rajamani Eq. 13.45 — parabolic pressure distribution tire model.
+    // Linear (F ≈ C·α) for small slip; saturates at μ·Fz for full sliding.
+    static float TireForce(float alpha, float C, float mu, float Fz)
+    {
+        float theta = C / (3f * mu * Fz);
+        float S     = Mathf.Tan(alpha);
+        if (Mathf.Abs(S) <= 1f / theta)
+            return mu * Fz * (3f*theta*S - 3f*theta*theta*S*S + theta*theta*theta*S*S*S);
+        return Mathf.Sign(S) * mu * Fz;
+    }
 
     static float[] Add6(float[] a, float[] b) =>
         new[] { a[0]+b[0], a[1]+b[1], a[2]+b[2], a[3]+b[3], a[4]+b[4], a[5]+b[5] };
@@ -352,8 +388,18 @@ public class AdvancedBicycleModel : MonoBehaviour
         new[] { v[0]*sc, v[1]*sc, v[2]*sc, v[3]*sc, v[4]*sc, v[5]*sc };
 
     // ── Nash linearization methods ────────────────────────────────────────
-    // Linearised bicycle model — Belousov Eq. 3.11b/c — for state [y, ẏ, ψ, ψ̇].
-    // state[1] = ẏ (world-frame dy/dt); slip angles via vy_Belousov ≈ −ẏ (small-ψ, Unity sign).
+    // Jacobian of Belousov Eq. 3.11b/c, linearised around δ=0 (straight driving).
+    // State: [y, vy, ψ, ψ̇].  Caf/Car are per-wheel → factor 2 for full axle.
+    // k_vy / k_psi are the low-speed numerical damping terms from Derivatives6D —
+    // included here so the Jacobian exactly matches the simulated equations.
+    //
+    // Derivation (δ=0 → cosδ=1, sinδ=0, αf=-(vy+lf·ψ̇)/vx, αr=-(vy-lr·ψ̇)/vx):
+    //   A[1,1] = ∂v̇y/∂vy  = -2(Caf+Car)/(m·vx) - (1-fv)·k_vy
+    //   A[1,3] = ∂v̇y/∂ψ̇  =  2(lr·Car - lf·Caf)/(m·vx) - vx
+    //   A[3,1] = ∂ψ̈/∂vy   =  2(lr·Car - lf·Caf)/(Iz·vx)
+    //   A[3,3] = ∂ψ̈/∂ψ̇   = -2(lf²·Caf + lr²·Car)/(Iz·vx) - (1-fv)·k_psi
+    //   B[1]   = ∂v̇y/∂δ  =  2·Caf/m
+    //   B[3]   = ∂ψ̈/∂δ   =  2·lf·Caf/Iz
     public (float[,] Ac_lat, float[] Bc_lat) GetLatJacobian() {
         float vxS = Mathf.Max(Mathf.Abs(vx), 0.5f);
         float m   = vehicleParams.mass, Iz = vehicleParams.Iz;
@@ -361,13 +407,20 @@ public class AdvancedBicycleModel : MonoBehaviour
         float Caf = vehicleParams.Caf,  Car = vehicleParams.Car;
         float fv  = ((float)System.Math.Tanh(10.0 * vxS - 8.0) + 1f) / 2f;
 
+        float k_vy  = vehicleParams.tireFrictionCoefficient * vehicleParams.gravity / 0.5f;
+        float k_psi = vehicleParams.tireFrictionCoefficient * vehicleParams.mass
+                    * vehicleParams.gravity * vehicleParams.wheelbase
+                    / (4f * vehicleParams.Iz * 0.3f);
+
+        // Standard bicycle model convention: y = pos.x - _x0 (rightward = +).
+        // ẏ = vy + vx·ψ  →  Ac[0,1]=+1, Ac[0,2]=+vx
         float[,] Ac = {
-            { 0,  1,  0,  0 },
-            { 0, -fv*(2f*Caf + 2f*Car)/(m*vxS),       0,  fv*(2f*Caf*lf - 2f*Car*lr)/(m*vxS) },
+            { 0,  1,  vxS,  0 },
+            { 0, -2f*(Caf+Car)/(m*vxS) - (1f-fv)*k_vy,      0,  2f*(lr*Car - lf*Caf)/(m*vxS) - vxS },
             { 0,  0,  0,  1 },
-            { 0,  fv*(2f*lf*Caf - 2f*lr*Car)/(Iz*vxS), 0, -fv*(2f*lf*lf*Caf + 2f*lr*lr*Car)/(Iz*vxS) }
+            { 0,  2f*(lr*Car - lf*Caf)/(Iz*vxS), 0, -2f*(lf*lf*Caf + lr*lr*Car)/(Iz*vxS) - (1f-fv)*k_psi }
         };
-        float[] Bc = { 0f, -fv*2f*Caf/m, 0f, fv*2f*lf*Caf/Iz };
+        float[] Bc = { 0f, 2f*Caf/m, 0f, 2f*lf*Caf/Iz };
         return (Ac, Bc);
     }
 
@@ -379,14 +432,16 @@ public class AdvancedBicycleModel : MonoBehaviour
     // v̇x = −dragLin·vx + 1·u  →  Bc = [0, 1].
     public (float[,] Ac_long, float[] Bc_long) GetLongJacobian() {
         float dragLin = 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea
-                      * Mathf.Abs(vx) / vehicleParams.mass;
+                      * Mathf.Abs(vx) / m_eff;
         float[,] Ac = { { 0, 1 }, { 0, -dragLin } };
         float[]  Bc = { 0f, 1f };   // u = a_des [m/s²], not force [N]
         return (Ac, Bc);
     }
 
     public float[] GetLongState()      => new[] { position.z, vx };
-    public float[] GetLatStateVector() => new[] { y, yDot, psi, psiDot };
+    // Solver convention: y_solver = pos.x - _x0 (rightward = +), matching GetLatJacobian Ac[0,1]=+1.
+    // GetY() returns _x0 - pos.x (Belousov), so y_solver = -GetY(). yDot likewise negated.
+    public float[] GetLatStateVector() => new[] { -y, -yDot, psi, psiDot };
     public float   GetX()              => position.z;
     public float   GetLength()         => vehicleParams.length;
 

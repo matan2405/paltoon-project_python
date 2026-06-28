@@ -20,8 +20,18 @@ public class VehicleParameters
     public float lf = 1.2525f;                // Distance from CG to front axle (wheelbase/2)
     public float lr = 1.2525f;                // Distance from CG to rear axle (wheelbase/2)
     public float trackWidth = 1.572f;         // From specs: 1572mm (front)
-    public float Caf = 15000f;                // Front tire cornering stiffness
-    public float Car = 18000f;                // Rear tire cornering stiffness
+    // Lateral (cornering) stiffness — per single wheel [N/rad].
+    // Belousov Eq. 3.12–3.13 use per-axle (2·Cα), so Derivatives6D must multiply by 2.
+    // Source: load-based estimate (Pacejka rule: Cα ≈ 9.2·Fz at nominal load).
+    //   Audi TT FWD, mass=1305 kg, 62/38 weight split:
+    //   Fz_front_wheel ≈ 1305·0.62·9.81/2 ≈ 3,963 N  → Caf ≈ 9.2·3963 ≈ 36,500 N/rad
+    //   Fz_rear_wheel  ≈ 1305·0.38·9.81/2 ≈  2,428 N  → Car ≈ 9.2·2428 ≈ 22,300 N/rad
+    // Cross-checked against Rajamani "Vehicle Dynamics and Control" Ch.2 (compact FWD range).
+    //
+    // Longitudinal stiffness (Cs) is NOT stored here because Fx is computed directly
+    // from engine/brake forces — slip-based longitudinal tire model is not used.
+    public float Caf = 36500f;               // Front tire lateral (cornering) stiffness, per wheel [N/rad]
+    public float Car = 22300f;               // Rear  tire lateral (cornering) stiffness, per wheel [N/rad]
 
     [Header("Environmental Parameters")]
     public float gravity = 9.81f;             // Gravity acceleration

@@ -32,19 +32,22 @@ public class NashWeightsConfig : ScriptableObject {
     public float GapMin = 7f;
 
     [Header("Lat tracking")]
-    public float Q_y = 800f,   Q_psi = 10000f;
-    // Q_psi_terminal reduced to 10×Q_psi (was 50×=500000): at high vx the -vx·ψ coupling
-    // in Ac[0,2] amplifies aggressive psi corrections into lateral oscillation.
-    // Python uses 50× safely because its Ac[0,2]=0 (no vx coupling in y equation).
-    public float Q_y_terminal = 8000f, Q_psi_terminal = 100000f;  // 10×Q_psi (Unity-specific)
+    // Q_psi reduced relative to Q_y: at vx≈30 m/s, ψ=0.1 rad → ẏ=3 m/s (large).
+    // Previous Q_psi/Q_y=12.5 caused the solver to over-correct heading aggressively
+    // → large δ → ψ overshoots → oscillation. Target ratio Q_psi/Q_y ≈ 1 so that
+    // a 0.1 rad heading error costs the same as a ~0.3 m lateral error.
+    public float Q_y = 5000f,   Q_psi = 2000f;
+    public float Q_y_terminal = 20000f, Q_psi_terminal = 8000f;
 
     [Header("Lat effort")]
-    public float R1_lat = 50000f, R2_lat = 50000f;
+    // R increased 5× to damp IBR coupling: convergence requires ||HQ1H||/R < 1.
+    // With vx≈30 m/s the H matrix has large entries from the -vx·ψ coupling in Ac.
+    public float R1_lat = 250000f, R2_lat = 250000f;
 
     [Header("Lat — Adaptive R2 EMA (R2LatStart → R2LatFollow per l_n)")]
     // R2LatFollow < R1_lat so driver has higher authority once centred (Na et al. 2022).
-    public float R2LatStart           =  50000f;  // R2 when far from target lane
-    public float R2LatFollow          =  15000f;  // R2 once lane-centred (< R1_lat=50000)
+    public float R2LatStart           = 250000f;  // R2 when far from target lane
+    public float R2LatFollow          =  75000f;  // R2 once lane-centred (< R1_lat=250000)
     public float R2LatEmaAlpha        =    0.05f;
     public float R2LatUpdateThreshold =   200f;
 
@@ -55,7 +58,7 @@ public class NashWeightsConfig : ScriptableObject {
 
     [Header("Lat constraints")]
     public float DeltaMin = -0.436f, DeltaMax = 0.436f;
-    public float DDeltaMax = 0.087f;
+    public float DDeltaMax = 0.070f;  // ~4 deg/step at 20Hz = 1.4 rad/s (doubled for faster reversal at target)
 
     [Header("IBR")]
     public int   IbrMaxIter = 15;

@@ -132,9 +132,12 @@ public class NashCoordinator : MonoBehaviour
         {
             float platoonX  = sumX  / n;
             float platoonVx = sumVx / n;
-            platoonLaneY = ego.GetPosition().x - platoonX;
+            // GetLatJacobian uses solver convention: y_solver = pos.x - _x0 (rightward = +).
+            // platoonLaneY must be in that convention: platoonX - _x0.
+            // _x0 = ego.GetPosition().x + ego.GetY()  (since GetY() = _x0 - pos.x)
+            platoonLaneY = platoonX - (ego.GetPosition().x + ego.GetY());
             Debug.Log($"[NashCoordinator] platoonLaneY auto = {platoonLaneY:F2} " +
-                      $"(platoonX={platoonX:F2}, egoX={ego.GetPosition().x:F2})");
+                      $"(platoonX={platoonX:F2}, egoX={ego.GetPosition().x:F2}, egoY={ego.GetY():F2})");
 
             // Warm-start: if platoon is significantly faster, seed _u1Prev/_u2Prev at
             // 2.0 m/s² so the first Nash step isn't jerk-capped at Du1Max*dt ≈ 0.15 m/s².
@@ -326,7 +329,9 @@ public class NashCoordinator : MonoBehaviour
         float force = _latSafety.Compute(ego, platoon);
         _latForceEma = force;
 
-        float yErr = ego.GetY() - platoonLaneY;
+        // yErr in solver convention: positive = ego right of target (needs to go left)
+        // ego position in solver convention = -ego.GetY() (since solver y = pos.x - _x0 = -GetY())
+        float yErr = -ego.GetY() - platoonLaneY;
         LatLambda = _authority.ComputeLat(force, yErr);
 
         // Adaptive R2 lateral: l_n based on lane-width normalised y-error
@@ -337,22 +342,28 @@ public class NashCoordinator : MonoBehaviour
         _r2LatCurrent    = settings.Nash.R2LatEmaAlpha * r2LaTarget
                          + (1f - settings.Nash.R2LatEmaAlpha) * _r2LatCurrent;
 
-        // Activity-based R2 scaling (Lazcano et al. 2021): when driver actively steers,
-        // reduce R2_lat to amplify u2 — gives perceptible lateral authority.
-        // steering in [0, 0.3] → scale ramps from 1 → R2LatActivityMinScale.
-        float latSteering = VehicleInputs.Instance != null
-                          ? Mathf.Abs(VehicleInputs.Instance.SteeringInput) : 0f;
-        float latActScale = 1f - Mathf.Clamp01(latSteering / 0.3f)
-                                * (1f - settings.Nash.R2LatActivityMinScale);
-        float r2LatEffective = _r2LatCurrent * latActScale;
-
-        // Conflict boost (Lazcano 2021): during MERGE the system steers toward target lane;
-        // if the driver resists (u1 and u2 opposing), boost R2 so the system can complete
-        // the merge. In FOLLOWING u1≈0 (vehicle centred) → |u1|<1e-4 → buffer stays 0
-        // → no boost → activity scaling operates undisturbed.
+        // Conflict detection (moving average over last 5 Nash ticks)
         float conflictMav = 0f;
         for (int ci = 0; ci < ConflictBufLen; ci++) conflictMav += _conflictBuf[ci];
         conflictMav /= ConflictBufLen;
+
+        // Activity-based R2 scaling (Lazcano et al. 2021): when driver actively steers,
+        // reduce R2_lat to amplify u2 — gives perceptible lateral authority.
+        // During MERGE with active conflict, skip activity reduction: a resisting driver
+        // should not receive amplified authority — conflict boost handles suppression instead.
+        float latSteering = VehicleInputs.Instance != null
+                          ? Mathf.Abs(VehicleInputs.Instance.SteeringInput) : 0f;
+        float latActScale;
+        if (Phase == MergePhase.Merge && conflictMav > 0.2f)
+            latActScale = 1f;   // no R2 reduction during contested merge
+        else
+            latActScale = 1f - Mathf.Clamp01(latSteering / 0.3f)
+                              * (1f - settings.Nash.R2LatActivityMinScale);
+        float r2LatEffective = _r2LatCurrent * latActScale;
+
+        // Conflict boost: during MERGE if the driver resists (u1 and u2 opposing),
+        // boost R2 so P2 penalises u2 more, suppressing the opposing human input.
+        // In FOLLOWING u1≈0 → buffer stays 0 → no boost.
         float conflictBoost = conflictMav <= 0.2f ? 0f
                             : conflictMav >= 0.8f ? ConflictBoostMag
                             : ConflictBoostMag * (conflictMav - 0.2f) / 0.6f;
@@ -444,7 +455,7 @@ public class NashCoordinator : MonoBehaviour
                 if (t - _gapSearchStart >= 0.5f)   // GAP_SEARCH_DURATION = 0.5 s
                 {
                     // Notify lat ref generator of MERGE entry for locked polynomial
-                    _latRef.OnMergeEntry(ego.GetY(), ego.GetVx(), platoonLaneY, t);
+                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetVx(), platoonLaneY, t);
                     Phase = MergePhase.Merge;
                     Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s");
                 }
@@ -459,6 +470,7 @@ public class NashCoordinator : MonoBehaviour
                         _latRef.OnFollowingEntry(t);
                         Phase           = MergePhase.Following;
                         _phaseHoldTimer = 0f;
+                        _latNash?.Reset();   // clear warm-start from Merge so Following starts fresh
                         Debug.Log($"[NashCoordinator] MERGE → FOLLOWING at t={t:F1}s");
                     }
                 }
@@ -475,7 +487,7 @@ public class NashCoordinator : MonoBehaviour
 
     bool IsMergeComplete(AdvancedBicycleModel[] platoon)
     {
-        bool yOk  = Mathf.Abs(ego.GetY()   - platoonLaneY) < 0.3f;
+        bool yOk  = Mathf.Abs(-ego.GetY() - platoonLaneY) < 0.3f;
         bool psiOk = Mathf.Abs(ego.GetPsi())               < 0.05f;
 
         var leader = _mergeLocked ? _lockedLeader : FindLeader(platoon);
