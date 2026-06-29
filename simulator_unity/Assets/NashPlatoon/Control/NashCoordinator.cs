@@ -27,7 +27,9 @@ public class NashCoordinator : MonoBehaviour
     [SerializeField] NashPlatoonSettings   settings;
 
     [Header("Platoon geometry")]
-    [SerializeField] float platoonLaneY      = 0f;    // PLATOON_LANE_Y
+    [SerializeField] float platoonLaneY      = 0f;    // PLATOON_LANE_Y (solver convention: pos.x - ego._x0)
+    [SerializeField] bool  autoDetectLane    = true;  // if true, overrides platoonLaneY on J-press with snapped lane centre
+    [SerializeField] float laneWidth         = 2.0f;  // road lane width [m] — used for lane-centre snapping
     [SerializeField] float approachCheckDist = 300f;  // APPROACH_MOBIL_CHECK_DISTANCE [m]
 
     // ── Public read-only state ────────────────────────────────────────────────
@@ -132,12 +134,22 @@ public class NashCoordinator : MonoBehaviour
         {
             float platoonX  = sumX  / n;
             float platoonVx = sumVx / n;
-            // GetLatJacobian uses solver convention: y_solver = pos.x - _x0 (rightward = +).
-            // platoonLaneY must be in that convention: platoonX - _x0.
-            // _x0 = ego.GetPosition().x + ego.GetY()  (since GetY() = _x0 - pos.x)
-            platoonLaneY = platoonX - (ego.GetPosition().x + ego.GetY());
-            Debug.Log($"[NashCoordinator] platoonLaneY auto = {platoonLaneY:F2} " +
-                      $"(platoonX={platoonX:F2}, egoX={ego.GetPosition().x:F2}, egoY={ego.GetY():F2})");
+
+            if (autoDetectLane)
+            {
+                // Snap the platoon's average lateral position to the nearest lane centre,
+                // then express it in solver convention (pos.x - _x0).
+                // _x0 = ego.GetPosition().x + ego.GetY()  (since GetY() = _x0 - pos.x)
+                float x0          = ego.GetPosition().x + ego.GetY();
+                float lanecentre   = Mathf.Round(platoonX / laneWidth) * laneWidth;
+                platoonLaneY      = lanecentre - x0;
+                Debug.Log($"[NashCoordinator] platoonLaneY auto = {platoonLaneY:F2} " +
+                          $"(platoonX={platoonX:F2} → lanecentre={lanecentre:F2}, x0={x0:F2})");
+            }
+            else
+            {
+                Debug.Log($"[NashCoordinator] platoonLaneY manual = {platoonLaneY:F2} (autoDetect off)");
+            }
 
             // Warm-start: if platoon is significantly faster, seed _u1Prev/_u2Prev at
             // 2.0 m/s² so the first Nash step isn't jerk-capped at Du1Max*dt ≈ 0.15 m/s².
@@ -463,7 +475,7 @@ public class NashCoordinator : MonoBehaviour
                 if (t - _gapSearchStart >= 2.0f)   // GAP_SEARCH_DURATION = 2.0 s (was 0.5 — gives Nash time to damp psi before Merge entry)
                 {
                     // Notify lat ref generator of MERGE entry for locked polynomial
-                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetVx(), platoonLaneY, t);
+                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetVx(), platoonLaneY, t);
                     Phase = MergePhase.Merge;
                     Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s");
                 }

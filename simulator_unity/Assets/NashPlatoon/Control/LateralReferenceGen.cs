@@ -44,33 +44,41 @@ public class LateralReferenceGen
     }
 
     // Called by NashCoordinator when entering MERGE (locks the polynomial base point)
-    public void OnMergeEntry(float egoY, float egoYDot, float egoVx, float targetY, float wallTime)
+    public void OnMergeEntry(float egoY, float egoYDot, float egoPsi, float egoVx, float targetY, float wallTime)
     {
         _mergeEntryLocked = true;
         _mergeEntryY      = egoY;
         _mergeEntryYDot   = egoYDot;
         _mergeEntryTime   = wallTime;
 
-        // Reset IIR so the prediction starts from the polynomial heading,
-        // not from whatever large heading accumulated during APPROACH.
-        _psiKm1 = egoYDot / Mathf.Max(egoVx, 1f);
-        _psiKm2 = _psiKm1;
+        // Seed IIR from the actual physical heading (not yDot/vx).
+        // GetLatStateVector() passes x0[2]=psi to the solver, so seeding with egoPsi
+        // keeps HumanRef consistent with the solver's initial state — no step jump at t=0.
+        _psiKm1 = egoPsi;
+        _psiKm2 = egoPsi;
 
         float maxHeadRad = _c.MaxHeadingDeg * Mathf.Deg2Rad;
         float vx  = Mathf.Max(egoVx, 1f);
-        // remaining distance to cover: if driver already moving toward target,
-        // effective dy shrinks; use actual remaining gap for T_lc.
         float dy  = Mathf.Abs(targetY - egoY);
-        // T_lc: time needed to cover dy at max heading, but at least long enough
-        // for the entry yDot to decay naturally (dy_from_yDot = yDot²/(2·a_lat_max)).
+
+        // T_lc lower bound: enough time to decelerate both yDot and psi to zero.
+        // Without this, a late J-press (small dy but large yDot or psi) yields
+        // T_lc < 0.5s and the quintic polynomial overshoots badly.
+        const float aLatMax  = 0.8f;   // lateral deceleration budget [m/s²]
+        const float omegaMax = 0.15f;  // yaw straightening rate budget [rad/s]
+        const float tMinAbs  = 1.0f;   // absolute floor [s]
+        float tStopVy  = Mathf.Abs(egoYDot) / aLatMax;
+        float tStopPsi = Mathf.Abs(egoPsi)  / omegaMax;
+        float tMin     = Mathf.Max(tMinAbs, Mathf.Max(tStopVy, tStopPsi));
+
         _mergeTlcSys = dy > 1e-4f
-                     ? Mathf.Max(Time.fixedDeltaTime, 1.875f * dy / (vx * Mathf.Tan(maxHeadRad)))
-                     : Time.fixedDeltaTime;
+                     ? Mathf.Max(tMin, 1.875f * dy / (vx * Mathf.Tan(maxHeadRad)))
+                     : tMin;
 
         // Human T_lc uses factor 1.5
         _mergeTlcHum = dy > 1e-4f
-                     ? Mathf.Max(Time.fixedDeltaTime, 1.5f * dy / (vx * Mathf.Tan(maxHeadRad)))
-                     : Time.fixedDeltaTime;
+                     ? Mathf.Max(tMin, 1.5f * dy / (vx * Mathf.Tan(maxHeadRad)))
+                     : tMin;
     }
 
     public void OnFollowingEntry(float wallTime)
@@ -144,7 +152,7 @@ public class LateralReferenceGen
             float vy0      = _mergeEntryYDot;   // solver-convention yDot at entry
             float dyMerge  = targetY - yStart;
             if (_mergeTlcSys < 0f)
-                OnMergeEntry(y0, -ego.GetYDot(), vx, targetY, wallTime);  // fallback init
+                OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), vx, targetY, wallTime);  // fallback init
 
             float T_lc     = _mergeTlcSys;
             float tElapsed = wallTime - _mergeEntryTime;
