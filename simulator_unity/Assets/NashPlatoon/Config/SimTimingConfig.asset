@@ -18,4 +18,5 @@ MonoBehaviour:
   NashNp: 20
   NashNu: 10
   PhaseLockTime: 5
-  MaxSteerRate: 0.005
+  MaxSteerRate: 0.010
+  LatJerkMax: 5

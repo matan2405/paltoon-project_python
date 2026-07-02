@@ -9,4 +9,8 @@ public class SimTimingConfig : ScriptableObject {
     public int   NashNu        = 10;
     public float PhaseLockTime = 5.0f;
     public float MaxSteerRate  = 0.087f;
+    // ISO 11270 §5.4: jerk_lat ≤ LatJerkMax m/s³
+    // Approximation a_lat ≈ vx·δ̇ gives: |Δ²δ| ≤ (LatJerkMax/vx)·dt²
+    // Applied in LateralNashSolver (dt=NashDtLat) and RateLimitDelta (dt=SimDt).
+    public float LatJerkMax    = 5.0f;   // m/s³ — ISO 11270 §5.4
 }

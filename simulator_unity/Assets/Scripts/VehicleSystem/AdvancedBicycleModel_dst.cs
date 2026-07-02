@@ -51,6 +51,8 @@ public class AdvancedBicycleModel : MonoBehaviour
     [HideInInspector] public float NashBrake;
     [HideInInspector] public float NashSteerNorm;
     private float _prevDelta = 0f;
+    private float ay      = 0f;  // body-frame lateral acceleration [m/s²], from Eq. 3.11b
+    private float y_dot_dot = 0f; // world-frame lateral acceleration [m/s²], from Eq. 3.11b result
     private float Totaldistance = 0f;
     private float m_eff;  // Belousov Eq. 3.8: m + Iw/r²
 
@@ -272,32 +274,36 @@ public class AdvancedBicycleModel : MonoBehaviour
     // Fx_contact : contact-patch forces [N] — enter Eq. 3.11a via cosδ, and 3.11b/c via sinδ
     // Fxf_contact: front axle contact-patch force [N] — enters Eq. 3.11b/c sinδ terms only
     // Fx_resist  : body-level resistances [N] (Faero+Rr+Rg) — enter Eq. 3.11a directly, NOT via cosδ
-    void UpdateDynamics6D(float Fx_contact, float Fxf_contact, float Fx_resist, float delta, float dt) {
+    void UpdateDynamics6D(float Fx_contact, float Fxf_contact, float Fx_resist, float delta, float dt) 
+    {
         float deltaRL = RateLimitDelta(delta, dt);
         float[] s    = GetState6DArray();
         float[] sNew = RK4Step(s, Fx_contact, Fxf_contact, Fx_resist, deltaRL, dt);
 
-                sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f);
-        sNew[3] = Mathf.Clamp(sNew[3], -2f, 2f);
-        sNew[4] = Mathf.Clamp(sNew[4], -0.5236f, 0.5236f);
-        sNew[5] = Mathf.Clamp(sNew[5], -0.3f, 0.3f);
+        sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f); // clamp vx to [0, maxVelocity] m/s
+        sNew[3] = Mathf.Clamp(sNew[3], -2f, 2f);// clamp body-frame lateral velocity to [-2, 2] m/s
+        sNew[4] = Mathf.Clamp(sNew[4], -0.5236f, 0.5236f);// clamp yaw angle to [-30°, 30°] radians
+        sNew[5] = Mathf.Clamp(sNew[5], -0.3f, 0.3f);// clamp yaw rate to [-0.3, 0.3] rad/s
 
         if (float.IsNaN(sNew[0]) || float.IsNaN(sNew[1]) || float.IsNaN(sNew[2]) ||
-            float.IsNaN(sNew[3]) || float.IsNaN(sNew[4]) || float.IsNaN(sNew[5])) {
+            float.IsNaN(sNew[3]) || float.IsNaN(sNew[4]) || float.IsNaN(sNew[5])) // check for NaN in 6D state
+        {
             Debug.LogWarning("[Belousov] NaN in 6D state — resetting lateral velocities");
             sNew[3] = 0f; sNew[5] = 0f;
         }
-
-                position.z = sNew[0];
-        ax         = (sNew[1] - s[1]) / dt;
-        vx         = sNew[1];
-        position.x = sNew[2];
-        psi        = sNew[4];
-        psiDot     = sNew[5];
+        ax = (sNew[1] - s[1]) / dt; // longitudinal acceleration (Belousov v̇x)
+        position.z = sNew[0]; // longitudinal position (Belousov z)
+        vx         = sNew[1];// longitudinal velocity (Belousov vx)
+        position.x = sNew[2];// lateral position (Belousov x)
         vyBody     = sNew[3];      // body-frame lateral velocity
-        float xDotNew = vx * Mathf.Sin(psi) + sNew[3] * Mathf.Cos(psi);
-        yDot = -xDotNew;           // ẏ = -d(position.x)/dt
+        psi        = sNew[4];// yaw angle (Belousov ψ)
+        psiDot     = sNew[5];// yaw rate (Belousov ψ̇)
+        ay = (sNew[3] - s[3]) / dt; // lateral acceleration (Belousov v̇y)
+
+        yDot = -(vx * Mathf.Sin(psi) + vyBody * Mathf.Cos(psi));
         y    = _x0 - position.x;  // exact world-frame lateral tracking
+        // a_lat = v̇y - vx·ψ̇  (Eq. 3.11b result, world-frame lateral acceleration)
+        y_dot_dot = ay - vx * psiDot; // world-frame lateral acceleration
     }
 
     float[] RK4Step(float[] s, float Fx_contact, float Fxf_contact, float Fx_resist, float delta, float dt) {
@@ -362,11 +368,13 @@ public class AdvancedBicycleModel : MonoBehaviour
     }
 
     float RateLimitDelta(float delta, float dt) {
-        float maxChange = SimCfg.I != null ? SimCfg.I.Timing.MaxSteerRate : 0.087f;
-        float limited   = Mathf.Clamp(delta, _prevDelta - maxChange, _prevDelta + maxChange);
-        _prevDelta      = limited;
+        float maxRate = SimCfg.I != null ? SimCfg.I.Timing.MaxSteerRate : 0.087f;
+        float limited = Mathf.Clamp(delta, _prevDelta - maxRate, _prevDelta + maxRate);
+        _prevDelta = limited;
         return limited;
     }
+
+    public float GetALat() => y_dot_dot;  // world-frame lateral acceleration (Belousov Eq. 3.11b result)
 
         float[] GetState6DArray() => new[] { position.z, vx, position.x, vyBody, psi, psiDot };
 

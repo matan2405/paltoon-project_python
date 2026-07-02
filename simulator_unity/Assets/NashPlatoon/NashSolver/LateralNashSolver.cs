@@ -9,7 +9,7 @@
 //   Player 2:  P2 = 2(α·H'Q1H + R2·I)    q2 = -2α(H'Q1(r2-z_free) - H'Q1H·u1_new)
 //   α = 1/(1+λ)  — Pustilnik & Borrelli 2025
 //
-// Constraint matrix (2·Nu × Nu): box on δ + jerk-from-prev on |dδ| ≤ DDeltaMax.
+// Constraint matrix (2·Nu × Nu): box on δ + rate |dδ| ≤ DDeltaMax.
 //
 // Continuous-time A_c, B_c from linearised bicycle model at current vx;
 // ZOH-discretised at dt = NashDtLat (20 Hz). Re-linearise via SetupSolvers
@@ -35,8 +35,12 @@ namespace NashPlatoon
         double[] _Adata; int[] _Ai, _Ap;
         int _mCon;
 
-        // ── Previous controls (jerk-from-prev) ────────────────────────────────
+        // ── Previous controls (rate limit) ───────────────────────────────────────
         double _u1Prev, _u2Prev;
+
+        // ── Measured lateral acceleration (direct, not via delta) ─────────────
+        float _aLatPrev;    // a_lat[k-1] — for jerk = Δa_lat/dt
+        float _aLatCurrent; // updated via SetALat() each Nash tick before SolveNashEquilibrium
 
         // ── Warm-start horizon shifts ─────────────────────────────────────────
         double[]   _ws1;
@@ -44,6 +48,11 @@ namespace NashPlatoon
 
         // ── Linearisation cache ───────────────────────────────────────────────
         float _vxCache = -1f;
+
+        // ── R79 Category C transient jerk tracker (system player only) ────────
+        // Tracks how long system jerk has exceeded LatJerkMaxHuman.
+        // Resets immediately when jerk drops back to ≤ LatJerkMaxHuman.
+        float _highJerkTime = 0f;
 
         // ── Optional risk-aware Hessian modifier (SE-kernel GP) ───────────────
         SEKernelGP _seGp;
@@ -166,17 +175,21 @@ namespace NashPlatoon
 
         void BuildConstraintMatrix()
         {
+            // Block 0 (Nu rows):   box on δ[k]
+            // Block 1 (Nu rows):   rate  |δ[k]-δ[k-1]| ≤ DDeltaMax
+            // ISO 11270 §5.4 jerk limit enforced as soft cost (R_jerk·L'L in P),
+            // not as a hard constraint — hard jerk at dt=0.05s gives duJerk≈0.000625 rad,
+            // which is 7× tighter than DDeltaMax and causes QP infeasibility on any
+            // meaningful lane correction, returning garbage from OSQP.
             _mCon = 2 * Nu;
             var Adense = new double[_mCon * Nu];
 
-            // Box rows
+            // Block 0: box rows — identity
             for (int k = 0; k < Nu; k++)
                 Adense[k * Nu + k] = 1.0;
 
-            // Jerk-from-prev for u[0]
+            // Block 1: rate rows — |δ[k]-δ[k-1]| ≤ DDeltaMax
             Adense[Nu * Nu + 0] = 1.0;
-
-            // Inter-step jerk
             for (int k = 1; k < Nu; k++)
             {
                 Adense[(Nu + k) * Nu + (k - 1)] = -1.0;
@@ -198,7 +211,7 @@ namespace NashPlatoon
             double[] P1 = BuildPMatrix((double)W.R1_lat, 1.0);
             var (P1d, P1i, P1p) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
             double[] l1 = new double[_mCon], u1 = new double[_mCon];
-            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, W.DDeltaMaxSystem, 0f);
+            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxSystem, 22f), 0f);
             _s1 = new OsqpSolver(SolverSettings());
             _s1.Setup(Nu, _mCon, P1d, P1i, P1p, q0, _Adata, _Ai, _Ap, l1, u1);
 
@@ -210,7 +223,7 @@ namespace NashPlatoon
                 var (P2d, P2i, P2p) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
 
                 double[] l2 = new double[_mCon], u2 = new double[_mCon];
-                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, W.DDeltaMaxHuman, 0f);
+                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxHuman, 22f), 0f);
 
                 _s2[i] = new OsqpSolver(SolverSettings());
                 _s2[i].Setup(Nu, _mCon, P2d, P2i, P2p, q0, _Adata, _Ai, _Ap, l2, u2);
@@ -227,9 +240,12 @@ namespace NashPlatoon
 
         // ── IBR solve ─────────────────────────────────────────────────────────
 
+        public void SetALat(float aLat) => _aLatCurrent = aLat;
+
         public override (float u1, float u2) SolveNashEquilibrium(
             float[] x0, float[] r1f, float[] r2f, float lambda)
         {
+            float aLatCurrent = _aLatCurrent;
             int    lamIdx = FindLambdaIdx(lambda);
             double alpha  = PustilnikAlpha(LambdaLevels[lamIdx]);
 
@@ -243,10 +259,11 @@ namespace NashPlatoon
             double[] HQ1r1 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r1, zFree));
             double[] HQ1r2 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r2, zFree));
 
+            float jerkSystem = SystemJerkLimit(aLatCurrent);
             UpdateBoundsForCall(_s1,
-                W.DeltaMin, W.DeltaMax, W.DDeltaMaxSystem, (float)_u1Prev);
+                W.DeltaMin, W.DeltaMax, DDeltaFromJerk(jerkSystem, _vxCache), (float)_u1Prev);
             UpdateBoundsForCall(_s2[lamIdx],
-                W.DeltaMin, W.DeltaMax, W.DDeltaMaxHuman, (float)_u2Prev);
+                W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxHuman, _vxCache), (float)_u2Prev);
 
             InjectWarmStart(_s1,        _ws1);
             InjectWarmStart(_s2[lamIdx], _ws2[lamIdx]);
@@ -298,10 +315,24 @@ namespace NashPlatoon
 
         public void Reset()
         {
-            _u1Prev = 0; _u2Prev = 0;
+            _u1Prev = 0; _u2Prev = 0; _aLatPrev = 0f; _highJerkTime = 0f;
             Array.Clear(_ws1, 0, _ws1.Length);
             for (int i = 0; i < _ws2.Length; i++)
                 Array.Clear(_ws2[i], 0, _ws2[i].Length);
+        }
+
+        // Seed solver history from driver state just before Nash activation.
+        // driverDelta: current wheel angle [rad] from ego.GetLambda()
+        // aLatNow    : measured lateral acceleration [m/s²] from ego.GetALat()
+        public void WarmStartFromDriverState(float driverDelta, float aLatNow)
+        {
+            _u1Prev       = driverDelta;
+            _u2Prev       = driverDelta;
+            _aLatPrev     = aLatNow;
+            _highJerkTime = 0f;
+            for (int k = 0; k < _ws1.Length; k++) _ws1[k] = driverDelta;
+            for (int i = 0; i < _ws2.Length; i++)
+                for (int k = 0; k < _ws2[i].Length; k++) _ws2[i][k] = driverDelta;
         }
 
         /// Hot-path R2 update: rebuild P2 for all λ levels with new R2 value.
@@ -335,10 +366,36 @@ namespace NashPlatoon
             return q;
         }
 
+        // DDelta = LatJerkMax × NashDtLat / vx  (UN ECE-R79 jerk→rate conversion)
+        float DDeltaFromJerk(float jerkMax, float vx) =>
+            vx > 1f ? jerkMax * T.NashDtLat / vx : jerkMax * T.NashDtLat / 22f;
+
+        // Returns allowed system jerk based on measured a_lat from physics.
+        // actualJerk = |aLat[k] - aLat[k-1]| / NashDtLat  (direct measurement, no delta approximation)
+        float SystemJerkLimit(float aLatCurrent)
+        {
+            float actualJerk = Mathf.Abs(aLatCurrent - _aLatPrev) / T.NashDtLat;
+            _aLatPrev = aLatCurrent;
+
+            if (actualJerk > W.LatJerkMaxHuman)
+            {
+                _highJerkTime += T.NashDtLat;
+                return _highJerkTime <= W.LatJerkTransientSec
+                    ? W.LatJerkMaxSystem
+                    : W.LatJerkMaxHuman;
+            }
+
+            _highJerkTime = 0f;
+            return W.LatJerkMaxSystem;
+        }
+
         void FillBounds(double[] l, double[] u, float uMin, float uMax,
                         float duStep, float uPrev)
         {
+            // Block 0: box
             for (int k = 0; k < Nu; k++) { l[k] = uMin; u[k] = uMax; }
+
+            // Block 1: rate  |δ[k]-δ[k-1]| ≤ duStep
             l[Nu] = uPrev - duStep;
             u[Nu] = uPrev + duStep;
             for (int k = 1; k < Nu; k++) { l[Nu + k] = -duStep; u[Nu + k] = duStep; }

@@ -35,8 +35,9 @@ MonoBehaviour:
   R2_lat: 50000
   DeltaMin: -0.436
   DeltaMax: 0.436
-  DDeltaMaxHuman: 0.020
-  DDeltaMaxSystem: 0.035
+  LatJerkMaxHuman: 5
+  LatJerkMaxSystem: 7
+  LatJerkTransientSec: 2
   IbrMaxIter: 15
   IbrTol: 0.0001
   SigmaK: 1

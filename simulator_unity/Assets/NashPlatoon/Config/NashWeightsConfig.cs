@@ -58,8 +58,10 @@ public class NashWeightsConfig : ScriptableObject {
 
     [Header("Lat constraints")]
     public float DeltaMin = -0.436f, DeltaMax = 0.436f;
-    public float DDeltaMaxHuman  = 0.020f;  // human driver: 0.40 rad/s at 20 Hz (~Audi TT realistic steering rate)
-    public float DDeltaMaxSystem = 0.035f;  // ADAS system:  0.70 rad/s at 20 Hz (faster correction authority)
+    // DDeltaMax computed dynamically in solver: DDelta = LatJerkMax * NashDtLat / vx
+    public float LatJerkMaxHuman  = 5.0f;  // UN ECE-R79 §5.6.2.1.3(c) — B1 steady-state jerk limit [m/s³]
+    public float LatJerkMaxSystem = 7.0f;  // UN ECE-R79 §5.6.4.4 Category C transient (×1.4 for ≤2s), else 5 m/s³
+    public float LatJerkTransientSec = 2.0f;  // max duration of transient jerk allowance [s]
 
     [Header("IBR")]
     public int   IbrMaxIter = 15;

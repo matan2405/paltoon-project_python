@@ -31,9 +31,18 @@ public class LateralReferenceGen
     bool  _mergeEntryLocked;
     float _mergeEntryY;
     float _mergeEntryYDot;   // yDot at merge entry (solver convention) for smooth polynomial
+    float _mergeEntryPsi;    // psi at merge entry — fade-out over T_lc for continuity
     float _mergeEntryTime;
     float _mergeTlcSys = -1f;
     float _mergeTlcHum = -1f;   // human T_lc (factor 1.5, locked at merge entry)
+
+    // GAP_SEARCH entry state for psi/psiDot fade-out
+    float _gsEntryPsi    = 0f;
+    float _gsEntryPsiDot = 0f;
+    float _gsEntryYDot   = 0f;
+    float _gsEntryY      = 0f;
+    float _gsSettleT     = 0f;   // computed from psi/psiDot at entry
+    float _gsEntryTime   = -1f;
 
     // FOLLOWING entry time
     float _followingEntryTime = -1f;
@@ -44,11 +53,12 @@ public class LateralReferenceGen
     }
 
     // Called by NashCoordinator when entering MERGE (locks the polynomial base point)
-    public void OnMergeEntry(float egoY, float egoYDot, float egoPsi, float egoVx, float targetY, float wallTime)
+    public void OnMergeEntry(float egoY, float egoYDot, float egoPsi, float egoPsiDot, float egoVx, float targetY, float wallTime)
     {
         _mergeEntryLocked = true;
         _mergeEntryY      = egoY;
         _mergeEntryYDot   = egoYDot;
+        _mergeEntryPsi    = egoPsi;
         _mergeEntryTime   = wallTime;
 
         // Seed IIR from the actual physical heading (not yDot/vx).
@@ -61,15 +71,21 @@ public class LateralReferenceGen
         float vx  = Mathf.Max(egoVx, 1f);
         float dy  = Mathf.Abs(targetY - egoY);
 
-        // T_lc lower bound: enough time to decelerate both yDot and psi to zero.
-        // Without this, a late J-press (small dy but large yDot or psi) yields
-        // T_lc < 0.5s and the quintic polynomial overshoots badly.
-        const float aLatMax  = 0.8f;   // lateral deceleration budget [m/s²]
-        const float omegaMax = 0.15f;  // yaw straightening rate budget [rad/s]
-        const float tMinAbs  = 1.0f;   // absolute floor [s]
-        float tStopVy  = Mathf.Abs(egoYDot) / aLatMax;
-        float tStopPsi = Mathf.Abs(egoPsi)  / omegaMax;
-        float tMin     = Mathf.Max(tMinAbs, Mathf.Max(tStopVy, tStopPsi));
+        // T_lc lower bound: enough time to decelerate yDot, psi, and psiDot to zero.
+        // tStopPsi  handles position-like heading (prevents overshoot from large psi).
+        // tStopPsiDot handles angular momentum: a driver entering with psiDot=0.3 rad/s
+        //   needs extra time even if psi is small — Nash can only apply ~0.20 rad/s²
+        //   of yaw deceleration at the δ values used during lane-change entry.
+        //   alphaPsiMax = 0.20 rad/s² ≈ 27% of physical max (2·lf·Caf/Iz·δ_entry ≈ 0.73)
+        //   — conservative so T_lc is not too tight when actual δ is small.
+        const float aLatMax      = 0.8f;   // lateral deceleration budget [m/s²]
+        const float omegaMax     = 0.15f;  // yaw position budget [rad/s]
+        const float alphaPsiMax  = 0.20f;  // yaw rate deceleration budget [rad/s²] — 2·lf·Caf/Iz × δ_typical
+        const float tMinAbs      = 4.0f;   // absolute floor [s]
+        float tStopVy     = Mathf.Abs(egoYDot) / aLatMax;
+        float tStopPsi    = Mathf.Abs(egoPsi)   / omegaMax;
+        float tStopPsiDot = Mathf.Abs(egoPsiDot) / alphaPsiMax;
+        float tMin        = Mathf.Max(tMinAbs, Mathf.Max(tStopVy, Mathf.Max(tStopPsi, tStopPsiDot)));
 
         _mergeTlcSys = dy > 1e-4f
                      ? Mathf.Max(tMin, 1.875f * dy / (vx * Mathf.Tan(maxHeadRad)))
@@ -79,6 +95,28 @@ public class LateralReferenceGen
         _mergeTlcHum = dy > 1e-4f
                      ? Mathf.Max(tMin, 1.5f * dy / (vx * Mathf.Tan(maxHeadRad)))
                      : tMin;
+    }
+
+    // Called by NashCoordinator when entering GAP_SEARCH (locks psi/psiDot for fade-out)
+    public void OnGapSearchEntry(float egoY, float egoYDot, float egoPsi, float egoPsiDot, float egoVx, float wallTime)
+    {
+        const float omegaMax_gs   = 0.15f;
+        const float alphaPsiMax_gs = 0.20f;
+        const float tMinAbs_gs    = 1.0f;
+
+        _gsEntryY      = egoY;
+        _gsEntryYDot   = egoYDot;
+        _gsEntryPsi    = egoPsi;
+        _gsEntryPsiDot = egoPsiDot;
+        _gsEntryTime   = wallTime;
+
+        float tFromPsi    = Mathf.Abs(egoPsi)    / omegaMax_gs;
+        float tFromPsiDot = Mathf.Abs(egoPsiDot) / alphaPsiMax_gs;
+        _gsSettleT = Mathf.Max(tMinAbs_gs, Mathf.Max(tFromPsi, tFromPsiDot));
+
+        // Seed IIR from actual heading so HumanRef starts consistently
+        _psiKm1 = egoPsi;
+        _psiKm2 = egoPsi;
     }
 
     public void OnFollowingEntry(float wallTime)
@@ -152,7 +190,7 @@ public class LateralReferenceGen
             float vy0      = _mergeEntryYDot;   // solver-convention yDot at entry
             float dyMerge  = targetY - yStart;
             if (_mergeTlcSys < 0f)
-                OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), vx, targetY, wallTime);  // fallback init
+                OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), vx, targetY, wallTime);  // fallback init
 
             float T_lc     = _mergeTlcSys;
             float tElapsed = wallTime - _mergeEntryTime;
@@ -184,7 +222,7 @@ public class LateralReferenceGen
                 {
                     y = yStart + vT * tau + c3 * t3 + c4 * t4 + c5 * t5;
                     float ydot = (vT + 3f * c3 * t2 + 4f * c4 * t3 + 5f * c5 * t4) / T_lc;
-                    psi = Mathf.Clamp(ydot / vx, -0.3f, 0.3f);
+                    psi = Mathf.Clamp(ydot / vx + (1f - tau) * _mergeEntryPsi, -0.3f, 0.3f);
                 }
                 else
                 {
@@ -197,10 +235,29 @@ public class LateralReferenceGen
         }
         else
         {
-            // APPROACH / GAP_SEARCH: position-based 5th-order polynomial
-            float T = Mathf.Abs(dy) > 1e-4f
-                    ? Mathf.Max(dt, 1.875f * Mathf.Abs(dy) / (vx * Mathf.Tan(maxHeadRad)))
-                    : dt;
+            // APPROACH / GAP_SEARCH: position-based 5th-order polynomial with psi fade-out.
+            //
+            // T is locked from OnGapSearchEntry (_gsSettleT) when in GapSearch, so that R1
+            // and R2 use the same horizon and the solver stays consistent across IBR iterations.
+            // In APPROACH _gsEntryTime<0 so T falls back to the dy-based formula.
+            // psi decays linearly as (1-τ)·psiEntry — same fade-out as Merge branch.
+            float psiEntry;
+            float T;
+            if (phase == MergePhase.GapSearch && _gsEntryTime >= 0f)
+            {
+                psiEntry = _gsEntryPsi;
+                float tFromDy = Mathf.Abs(dy) > 1e-4f
+                              ? 1.875f * Mathf.Abs(dy) / (vx * Mathf.Tan(maxHeadRad))
+                              : 0f;
+                T = Mathf.Max(dt, Mathf.Max(tFromDy, _gsSettleT));
+            }
+            else
+            {
+                psiEntry = ego.GetPsi();
+                T = Mathf.Abs(dy) > 1e-4f
+                  ? Mathf.Max(dt, 1.875f * Mathf.Abs(dy) / (vx * Mathf.Tan(maxHeadRad)))
+                  : dt;
+            }
 
             for (int k = 0; k < Np; k++)
             {
@@ -214,8 +271,9 @@ public class LateralReferenceGen
                 float psi = 0f;
                 if (tau < 1f)
                 {
-                    float ydot = (dy / Mathf.Max(T, 1e-6f)) * (30f * t2 - 60f * t3 + 30f * t4);
-                    psi = Mathf.Clamp(ydot / Mathf.Max(vx, 0.1f), -0.3f, 0.3f);
+                    float ydot    = (dy / Mathf.Max(T, 1e-6f)) * (30f * t2 - 60f * t3 + 30f * t4);
+                    float psiPoly = Mathf.Abs(dy) > 1e-4f ? ydot / Mathf.Max(vx, 0.1f) : 0f;
+                    psi = Mathf.Clamp(psiPoly + (1f - tau) * psiEntry, -0.3f, 0.3f);
                 }
                 ref_[2 * k]     = y;
                 ref_[2 * k + 1] = psi;
@@ -265,16 +323,22 @@ public class LateralReferenceGen
         float na1 = (2f * neuroJ + neuroB * dt) / nd;
         float na2 = -neuroJ / nd;
 
-        // Seed IIR: during MERGE use polynomial psi to break the circular dependency
+        // Seed IIR: during MERGE/GAP_SEARCH use polynomial psi to break the circular dependency
         // where large actual psi seeds the IIR → R2 predicts large psi → Nash can't correct.
-        // Outside MERGE, seed from actual heading (reflects driver inputs normally).
+        // In GapSearch, psi decays linearly from _gsEntryPsi matching the SystemRef fade-out.
+        // Outside MERGE/GAP_SEARCH, seed from actual heading (reflects driver inputs normally).
         float psiNow;
         if (phase == MergePhase.Merge && _mergeEntryLocked && _mergeTlcHum > 0f)
         {
-            float tauSeed = Mathf.Min((wallTime - _mergeEntryTime) / _mergeTlcHum, 1f);
-            // ẏ/vx = psi when y = _x0 - pos.x and rightward is positive
+            float tauSeed  = Mathf.Min((wallTime - _mergeEntryTime) / _mergeTlcHum, 1f);
             float yDotSeed = (targetY - _mergeEntryY) * (6f * tauSeed - 6f * tauSeed * tauSeed) / _mergeTlcHum;
             psiNow = tauSeed < 1f ? yDotSeed / vx : 0f;
+        }
+        else if (phase == MergePhase.GapSearch && _gsEntryTime >= 0f && _gsSettleT > 0f)
+        {
+            // Mirror GapSearch SystemRef: psi decays linearly from entry value
+            float tauSeed = Mathf.Min((wallTime - _gsEntryTime) / _gsSettleT, 1f);
+            psiNow = tauSeed < 1f ? (1f - tauSeed) * _gsEntryPsi : 0f;
         }
         else
         {
@@ -329,6 +393,12 @@ public class LateralReferenceGen
             float steerMagMerge  = Mathf.Clamp01(Mathf.Abs(rawSteering) / 0.15f);
             float steeringOffset = steerMagMerge * Mathf.Clamp(psiSteering - psiPolyNow, -maxOffset, maxOffset);
 
+            // Cubic Hermite with non-zero entry yDot — continuity at merge entry
+            float vy0R2 = _mergeEntryYDot;
+            float vTR2  = vy0R2 * T_lc_h;
+            float a2R2  = 3f * deltaY - 2f * vTR2;
+            float a3R2  = -2f * deltaY + vTR2;
+
             for (int k = 0; k < Np; k++)
             {
                 float tTotal = tElapsed + (k + 1) * dt;
@@ -337,10 +407,11 @@ public class LateralReferenceGen
                 if (tau < 1f)
                 {
                     float tau2 = tau * tau;
-                    yRef   = _mergeEntryY + deltaY * (3f * tau2 - 2f * tau2 * tau);
-                    float yDot = deltaY * (6f * tau - 6f * tau2) / T_lc_h;
+                    float tau3 = tau2 * tau;
+                    yRef = _mergeEntryY + vTR2 * tau + a2R2 * tau2 + a3R2 * tau3;
+                    float yDot      = (vTR2 + 2f * a2R2 * tau + 3f * a3R2 * tau2) / T_lc_h;
                     float offsetAtK = steeringOffset * (1f - tau);
-                    psiDes = yDot / vx + offsetAtK;
+                    psiDes = yDot / vx + offsetAtK + (1f - tau) * _mergeEntryPsi;
                 }
                 else
                 {
@@ -357,16 +428,63 @@ public class LateralReferenceGen
                 ref_[2 * k + 1] = psiExec;
             }
         }
+        else if (phase == MergePhase.GapSearch && _gsEntryTime >= 0f)
+        {
+            // ── GAP_SEARCH: psi/psiDot fade-out (mirrors Merge branch) ──────────────
+            // Identical treatment to Merge: lock entry state, fade psi linearly over
+            // _gsSettleT, include driver steering offset so R2 is distinguishable from R1.
+            float r2MaxPsi   = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
+            float maxOffset  = r2MaxPsi;
+            float tElapsed   = wallTime - _gsEntryTime;
+            float T_gs       = _gsSettleT;
+
+            // y stays at entry (latTarget = current y in GapSearch) — dy=0
+            float yEntry = _gsEntryY;
+            float vy0gs  = _gsEntryYDot;
+            // cubic with vy0 → vy=0 over T_gs (dy=0 so a2=a3 simplify)
+            float vTgs = vy0gs * T_gs;
+            // dy=0: a2 = -2·vT, a3 = vT
+            float a2gs = -2f * vTgs;
+            float a3gs =  vTgs;
+
+            float steerMagGs  = Mathf.Clamp01(Mathf.Abs(rawSteering) / 0.15f);
+            float steeringOffGs = steerMagGs * Mathf.Clamp(psiSteering - _gsEntryPsi, -maxOffset, maxOffset);
+
+            for (int k = 0; k < Np; k++)
+            {
+                float tTotal = tElapsed + (k + 1) * dt;
+                float tau    = Mathf.Min(tTotal / T_gs, 1f);
+                float yRef, psiDes;
+                if (tau < 1f)
+                {
+                    float tau2 = tau * tau;
+                    float tau3 = tau2 * tau;
+                    yRef = yEntry + vTgs * tau + a2gs * tau2 + a3gs * tau3;
+                    float ydot = (vTgs + 2f * a2gs * tau + 3f * a3gs * tau2) / T_gs;
+                    float offsetAtK = steeringOffGs * (1f - tau);
+                    psiDes = ydot / vx + offsetAtK + (1f - tau) * _gsEntryPsi;
+                }
+                else
+                {
+                    yRef   = targetY;
+                    psiDes = psiSteering;
+                }
+                float psiExec = na0 * psiDes + na1 * psiK + na2 * psiKm1Pred;
+                psiExec = Mathf.Clamp(psiExec, -maxOffset, maxOffset);
+                psiKm1Pred = psiK;
+                psiK       = psiExec;
+                ref_[2 * k]     = yRef;
+                ref_[2 * k + 1] = psiExec;
+            }
+        }
         else
         {
-            // ── NON-MERGE (APPROACH / GAP_SEARCH / FOLLOWING): cubic settling to targetY ──
-            // The Forward-Euler bicycle propagation was numerically unstable at high vx
-            // (dt·vx ≈ 0.05·30 = 1.5, near the Euler stability limit for the -vx·ψ coupling).
-            // Instead R2 uses the same cubic form as R1 but seeded from the driver's current
+            // ── APPROACH / FOLLOWING: cubic settling to targetY ───────────────────────
+            // R2 uses the same cubic form as R1 but seeded from the driver's current
             // state (vy0 from GetYDot(), psi from IIR-filtered steering intent).
             // This keeps R1 and R2 in the same function space so IBR converges, while still
             // letting the driver's actual heading intention (psiSteering via IIR) modulate R2.
-            const float T_h = 20f;  // same settling horizon as R1 SystemRef
+            const float T_h = 20f;
 
             float vy0 = -ego.GetYDot();  // solver convention
             float dy  = targetY - (-ego.GetY());
@@ -383,8 +501,6 @@ public class LateralReferenceGen
             float a2 = 3f * dy - 2f * vy0 * T_h;
             float a3 = -2f * dy + vy0 * T_h;
 
-            // IIR-filtered driver heading intent — this is what differentiates R2 from R1:
-            // R1 uses psi=ydot/vx from the polynomial; R2 uses the driver's actual heading.
             float r2MaxPsi = _c.R2MaxHeadingDeg * Mathf.Deg2Rad;
 
             for (int k = 0; k < Np; k++)
@@ -397,7 +513,6 @@ public class LateralReferenceGen
                     yRef = a0 + a1 * tau + a2 * tau * tau + a3 * tau * tau * tau;
                     float ydot = (a1 + 2f * a2 * tau + 3f * a3 * tau * tau) / T_h;
                     // R2 psi: blend polynomial heading with driver's IIR intent.
-                    // IIR step: neuromuscular filter on psiSteering
                     float psiExec = na0 * psiSteering + na1 * psiK + na2 * psiKm1Pred;
                     psiExec       = Mathf.Clamp(psiExec, -r2MaxPsi, r2MaxPsi);
                     psiKm1Pred    = psiK;

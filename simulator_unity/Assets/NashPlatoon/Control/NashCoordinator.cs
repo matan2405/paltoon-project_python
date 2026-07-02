@@ -70,6 +70,9 @@ public class NashCoordinator : MonoBehaviour
     float _longTimer;
     float _latTimer;
 
+    // ── Lateral warm-start: seed solver from driver state on first tick ──────
+    bool _latWarmStartDone;
+
     // ── Phase hold state ──────────────────────────────────────────────────────
     float _gapSearchStart = -1f;
     float _phaseHoldTimer;
@@ -170,9 +173,10 @@ public class NashCoordinator : MonoBehaviour
         Phase           = MergePhase.Approach;
         _mergeLocked    = false;
         _mobilApproved  = false;
-        _longTimer      = 0f;
-        _latTimer       = 0f;
-        _phaseHoldTimer = 0f;
+        _longTimer         = 0f;
+        _latTimer          = 0f;
+        _phaseHoldTimer    = 0f;
+        _latWarmStartDone  = false;
         Debug.Log("[NashCoordinator] Nash disabled — returning to manual control.");
     }
 
@@ -222,13 +226,22 @@ public class NashCoordinator : MonoBehaviour
         // In GAP_SEARCH the lateral target is the ego's current lane (straight-ahead),
         // not the platoon lane — this prevents the tug-of-war from yErr≈-2m while still
         // guarding against dangerous heading excursions or opposite-lane drift.
-        if (Phase == MergePhase.GapSearch ||
-            Phase == MergePhase.Merge     ||
-            Phase == MergePhase.Following)
+        // During Approach: keep warm-start updated so solver starts from exact driver state.
+        if (Phase == MergePhase.Approach)
+        {
+            EnsureLatNash().WarmStartFromDriverState(ego.GetLambda(), ego.GetALat());
+        }
+        else if (Phase == MergePhase.GapSearch ||
+                 Phase == MergePhase.Merge     ||
+                 Phase == MergePhase.Following)
         {
             _latTimer += dt;
             if (_latTimer >= settings.Timing.NashDtLat)
             {
+                if (!_latWarmStartDone)
+                {
+                    _latWarmStartDone = true;
+                }
                 RunLatNashStep(platoon);
                 _latTimer = 0f;
             }
@@ -412,6 +425,7 @@ public class NashCoordinator : MonoBehaviour
         try
         {
             float[] x0 = ego.GetLatStateVector();
+            lat.SetALat(ego.GetALat());
             (u1, u2) = lat.SolveNashEquilibrium(x0, r1, r2, LatLambda);
         }
         catch (System.Exception ex)
@@ -464,6 +478,7 @@ public class NashCoordinator : MonoBehaviour
                     if (_mobilApproved)
                     {
                         LockMergePosition(platoon);
+                        _latRef.OnGapSearchEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), t);
                         Phase           = MergePhase.GapSearch;
                         _gapSearchStart = t;
                         Debug.Log($"[NashCoordinator] APPROACH → GAP_SEARCH at t={t:F1}s — {_mobil.LastStatus}");
@@ -475,7 +490,7 @@ public class NashCoordinator : MonoBehaviour
                 if (t - _gapSearchStart >= 2.0f)   // GAP_SEARCH_DURATION = 2.0 s (was 0.5 — gives Nash time to damp psi before Merge entry)
                 {
                     // Notify lat ref generator of MERGE entry for locked polynomial
-                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetVx(), platoonLaneY, t);
+                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
                     Phase = MergePhase.Merge;
                     Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s");
                 }
@@ -490,7 +505,8 @@ public class NashCoordinator : MonoBehaviour
                         _latRef.OnFollowingEntry(t);
                         Phase           = MergePhase.Following;
                         _phaseHoldTimer = 0f;
-                        _latNash?.Reset();   // clear warm-start from Merge so Following starts fresh
+                        _latNash?.Reset();         // clear warm-start from Merge so Following starts fresh
+                        _latWarmStartDone = false; // re-seed from current a_lat at first Following tick
                         Debug.Log($"[NashCoordinator] MERGE → FOLLOWING at t={t:F1}s");
                     }
                 }

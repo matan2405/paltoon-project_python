@@ -37,6 +37,8 @@ public class PlatoonManager : MonoBehaviour
     public AdvancedBicycleModel egoVehicle;   // Assign in Inspector — starts outside platoon
     public KeyCode joinKey  = KeyCode.J;      // Press to join platoon at current position
     public KeyCode leaveKey = KeyCode.L;      // Press to leave platoon (returns to manual)
+    public int joinWheelButton  = 0;          // Steering wheel button index to join (G29: 0=X/Cross)
+    public int leaveWheelButton = 2;          // Steering wheel button index to leave (G29: 2=Square)
     public bool _egoInPlatoon = false;        // public so NashCoordinator/HUD can read it
 
     [Header("Nash")]
@@ -52,9 +54,11 @@ public class PlatoonManager : MonoBehaviour
     void Update()
     {
         if (egoVehicle == null) return;
-        if (!_egoInPlatoon && Input.GetKeyDown(joinKey))
+        bool joinPressed  = Input.GetKeyDown(joinKey)  || Input.GetKeyDown("joystick button " + joinWheelButton);
+        bool leavePressed = Input.GetKeyDown(leaveKey) || Input.GetKeyDown("joystick button " + leaveWheelButton);
+        if (!_egoInPlatoon && joinPressed)
             JoinPlatoon();
-        else if (_egoInPlatoon && Input.GetKeyDown(leaveKey))
+        else if (_egoInPlatoon && leavePressed)
             LeavePlatoon();
     }
     
