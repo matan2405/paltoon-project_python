@@ -50,15 +50,17 @@ public class VehicleDataVisualizer : MonoBehaviour
     private bool                 _isEgo;
     private string               _csvFilename; // locked at Start, stable for entire run
 
+    void Awake()
+    {
+        var rb = GetComponent<Rigidbody>();
+        _isEgo = rb != null && rb.CompareTag("Player");
+        // Lock filename in Awake — before PlatoonManager.Start() renames GameObjects by slot index.
+        _csvFilename = _isEgo ? "ego_vehicle.csv" : $"vehicle_{name}.csv";
+    }
+
     void Start()
     {
         _vehicle = GetComponent<AdvancedBicycleModel>();
-        var rb   = GetComponent<Rigidbody>();
-        _isEgo   = rb != null && rb.CompareTag("Player");
-        // Use the GameObject name (e.g. "Car1", "Car2") as the stable file identifier.
-        // Platoon index is reassigned every time SetupPlatoon() is called, so it
-        // cannot be used as a stable filename across a run.
-        _csvFilename = _isEgo ? "ego_vehicle.csv" : $"vehicle_{name}.csv";
     }
 
     void FixedUpdate()
