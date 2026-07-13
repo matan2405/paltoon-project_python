@@ -280,10 +280,7 @@ public class AdvancedBicycleModel : MonoBehaviour
         float[] s    = GetState6DArray();
         float[] sNew = RK4Step(s, Fx_contact, Fxf_contact, Fx_resist, deltaRL, dt);
 
-        sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f); // clamp vx to [0, maxVelocity] m/s
-        sNew[3] = Mathf.Clamp(sNew[3], -2f, 2f);// clamp body-frame lateral velocity to [-2, 2] m/s
-        sNew[4] = Mathf.Clamp(sNew[4], -0.5236f, 0.5236f);// clamp yaw angle to [-30°, 30°] radians
-        sNew[5] = Mathf.Clamp(sNew[5], -0.3f, 0.3f);// clamp yaw rate to [-0.3, 0.3] rad/s
+        sNew[1] = Mathf.Clamp(sNew[1], 0f, vehicleParams.maxVelocity / 3.6f);
 
         if (float.IsNaN(sNew[0]) || float.IsNaN(sNew[1]) || float.IsNaN(sNew[2]) ||
             float.IsNaN(sNew[3]) || float.IsNaN(sNew[4]) || float.IsNaN(sNew[5])) // check for NaN in 6D state
@@ -473,6 +470,27 @@ public class AdvancedBicycleModel : MonoBehaviour
 
         float Fx_tot = Fxf - Fbrake - Faero - 2f * Rxf - naturalDecel;
         return Fx_tot / vehicleParams.mass;
+    }
+
+    // Physical acceleration bounds [m/s²] derived from Eq. 3.11a (δ≈0, vy·ψ̇≈0):
+    //   m_eff · v̇x = Fx_contact − Fx_resist
+    // aMax: full-throttle net (Fxf_engine_max − Faero − Rr) / m_eff
+    // aMin: full-brake + engine braking (−FbrakeMax − F_engBrk − Faero − Rr) / m_eff
+    // Uses m_eff (Belousov Eq. 3.8) and the same resistance terms as FixedUpdate.
+    public void GetPhysicalAccelBounds(out float aMin, out float aMax)
+    {
+        float Faero = 0.5f * 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea * vx * vx;
+        float Cr    = 0.012f * (1f + vx * 0.008f);
+        float Frr   = vehicleParams.mass * vehicleParams.gravity * Cr; // Rxf + Rxr
+
+        float Fxf_max   = powertrain.CalculateMaxForceAtCurrentSpeed(vx);
+        aMax = (Fxf_max - Faero - Frr) / m_eff;
+        aMax = Mathf.Max(aMax, 0f);
+
+        float Fbrake_max  = brakeSystem.CalculateBrakeForce(1.0f, vx);
+        float F_eng_coast = powertrain.GetEngineBrakingForce(vx);
+        aMin = -(Fbrake_max + F_eng_coast + Faero + Frr) / m_eff;
+        aMin = Mathf.Min(aMin, 0f);
     }
 
     // a_des [m/s²] → (throttle, brake) ∈ [0,1]

@@ -13,8 +13,11 @@ public class PlatoonManager : MonoBehaviour
     // These parameters define the behavior of the platoon.
     public float platoonMaxVelocity = 250 / 3.6f;
     public float platoonTargetVelocity = 50 / 3.6f; // Target speed 50 km/h converted to m/s
-    public float MaxAcceleration = 2.5f; // Maximum acceleration for the platoon vehicles in m/s²
-    public float headway = 1.5f; // Desired time headway in seconds
+    public float MaxAcceleration = 2.5f;
+
+    // Pulled from NashCoordinator.settings so both stay in sync — no duplicate Inspector field needed
+    public float TimeGap        => nashCoordinator != null ? nashCoordinator.Settings.SafetyField.PlatoonTimeGap : 1.5f;
+    public float StandstillDist => nashCoordinator != null ? nashCoordinator.Settings.SafetyField.StandstillDist : 2.0f;
     
     [Header("Control Inputs")]
     private float[] ThrottleInput;
@@ -57,8 +60,8 @@ public class PlatoonManager : MonoBehaviour
         bool joinPressed  = Input.GetKeyDown(joinKey)  || Input.GetKeyDown("joystick button " + joinWheelButton);
         bool leavePressed = Input.GetKeyDown(leaveKey) || Input.GetKeyDown("joystick button " + leaveWheelButton);
         if (!_egoInPlatoon && joinPressed)
-            JoinPlatoon();
-        else if (_egoInPlatoon && leavePressed)
+            nashCoordinator?.EnableNash();
+        if (_egoInPlatoon && leavePressed)
             LeavePlatoon();
     }
     
@@ -79,8 +82,14 @@ public class PlatoonManager : MonoBehaviour
             return;
         }
         
-        // Sort vehicles by position (front to back) - assuming they're aligned on Z axis
-        System.Array.Sort(platoonVehicles, (a, b) => b.GetPosition().z.CompareTo(a.GetPosition().z));
+        // Sort vehicles by position (front to back) only when ego is NOT in the array.
+        // When ego is already inserted (via JoinPlatoon), the order is set by the Nash
+        // lock and must not be overridden by Z — ego may be slightly behind its locked
+        // follower during the lane-change approach.
+        bool egoPresent = egoVehicle != null &&
+                          System.Array.IndexOf(platoonVehicles, egoVehicle) >= 0;
+        if (!egoPresent)
+            System.Array.Sort(platoonVehicles, (a, b) => b.GetPosition().z.CompareTo(a.GetPosition().z));
         
         // Initialize input arrays
         int numVehicles = platoonVehicles.Length;
@@ -153,18 +162,20 @@ public class PlatoonManager : MonoBehaviour
     
     public (float a_des, float s_des) CalculateRajamaniAcceleration(AdvancedBicycleModel Car_1, AdvancedBicycleModel Car_2)
     {
-        float h = headway;   // Use the inspector value for time headway
-        
-        float k1 = -0.12f, k5 = 0.1f; // k1 < -tau/h, k5 > 0
+        float h = TimeGap;
+
+        float k1 = -0.12f, k5 = 0.1f;
         float k2 = -k1 - h * k1 * k5;
         float k3 = 1f / h - k1 * k5;
         float k4 = k5 / h;
 
-        // Calculate actual gap and relative velocity
-        float e = Car_2.GetPosition().z - Car_1.GetPosition().z + Car_1.GetVehicleParameters().length + 2f; // [m] actual gap
-        float e_dot = Car_2.GetVx() - Car_1.GetVx(); // [m/s] relative velocity
+        // e defined so equilibrium at e=-(h*v) gives bumper-to-bumper = StandstillDist + h*v,
+        // matching NashCoordinator exactly and supporting vehicles of different lengths.
+        float halfLengths = Car_1.GetVehicleParameters().length / 2f + Car_2.GetVehicleParameters().length / 2f;
+        float e     = Car_2.GetPosition().z - Car_1.GetPosition().z + halfLengths + StandstillDist;
+        float e_dot = Car_2.GetVx() - Car_1.GetVx();
 
-        float s_des = Car_1.GetVehicleParameters().length + 2f + h * Car_2.GetVx(); // [m] desired gap
+        float s_des = StandstillDist + h * Car_2.GetVx();
         float a_des = -k1 * Car_1.GetAx()
                       - k2 * Car_2.GetAx()
                       - k3 * e_dot
@@ -174,7 +185,7 @@ public class PlatoonManager : MonoBehaviour
         return (a_des, s_des);
     }
     
-    public static float FreeRoadAcceleration(float v, float v_target, float a_max)
+    public static float FreeRoadAcceleration(float v, float v_target, float a_max, float a_min)
     {
         float delta = 4f; // exponent
 
@@ -185,7 +196,7 @@ public class PlatoonManager : MonoBehaviour
         }
         else
         {
-            dv_dt = -a_max * (1f - Mathf.Pow(v_target / v, delta));
+            dv_dt = -a_min * (1f - Mathf.Pow(v_target / v, delta));
         }
         return dv_dt;
     }
@@ -200,26 +211,55 @@ public class PlatoonManager : MonoBehaviour
 
     void JoinPlatoon()
     {
-        // Save current _prevAcc so existing vehicles don't get a jerk spike on re-init
-        float[] savedPrevAcc = _prevAcc != null ? (float[])_prevAcc.Clone() : null;
-
-        // Find insertion index: platoon is sorted front-to-back (descending Z).
-        // Insert ego at the first position where ego is ahead of the existing vehicle.
-        int insertIdx = platoonVehicles.Length; // default: append at back
+        // Fallback: called from Update (manual J press without Nash lock).
+        // Insert ego before the first vehicle it is ahead of or parallel to.
+        int insertIdx = platoonVehicles.Length;
         for (int i = 0; i < platoonVehicles.Length; i++)
         {
-            if (egoVehicle.GetPosition().z > platoonVehicles[i].GetPosition().z)
+            float dz      = egoVehicle.GetPosition().z - platoonVehicles[i].GetPosition().z;
+            float halfSum = egoVehicle.GetVehicleParameters().length * 0.5f
+                          + platoonVehicles[i].GetVehicleParameters().length * 0.5f;
+            if (Mathf.Abs(dz) <= halfSum || dz > 0f) { insertIdx = i; break; }
+        }
+        JoinPlatoonAtIndex(insertIdx);
+    }
+
+    public void JoinPlatoon(AdvancedBicycleModel lockedLeader, AdvancedBicycleModel lockedFollower)
+    {
+        // Insert ego between lockedLeader and lockedFollower — exact position determined
+        // by the Nash lock at GapSearch entry, not by current Z (which may have drifted).
+        int insertIdx = platoonVehicles.Length;
+        if (lockedFollower != null)
+        {
+            for (int i = 0; i < platoonVehicles.Length; i++)
             {
-                insertIdx = i;
-                break;
+                if (platoonVehicles[i] == lockedFollower) { insertIdx = i; break; }
             }
         }
+        else if (lockedLeader != null)
+        {
+            // No follower: insert immediately after the leader
+            for (int i = 0; i < platoonVehicles.Length; i++)
+            {
+                if (platoonVehicles[i] == lockedLeader) { insertIdx = i + 1; break; }
+            }
+        }
+        JoinPlatoonAtIndex(insertIdx);
+    }
+
+    void JoinPlatoonAtIndex(int insertIdx)
+    {
+        // Save current _prevAcc so existing vehicles don't get a jerk spike on re-init
+        float[] savedPrevAcc = _prevAcc != null ? (float[])_prevAcc.Clone() : null;
 
         var list = new List<AdvancedBicycleModel>(platoonVehicles);
         list.Insert(insertIdx, egoVehicle);
         platoonVehicles = list.ToArray();
 
-        // Re-init platoon state (sorts, rebuilds arrays, sets AutoMode=true for all)
+        // Re-init platoon state (sorts by Z, rebuilds arrays, sets AutoMode=true for all).
+        // NOTE: SetupPlatoon re-sorts by Z — so insertIdx is only a hint; the sort
+        // corrects any minor positional drift. The locked-follower path above guarantees
+        // we pass the right index before the sort runs.
         SetupPlatoon();
         InitializeDataLogging();
 
@@ -231,13 +271,12 @@ public class PlatoonManager : MonoBehaviour
                 if (newIdx < insertIdx)
                     _prevAcc[newIdx] = savedPrevAcc[newIdx];
                 else if (newIdx == insertIdx)
-                    _prevAcc[newIdx] = egoVehicle.GetAx(); // start jerk limiter from current ego accel
+                    _prevAcc[newIdx] = egoVehicle.GetAx();
                 else
                     _prevAcc[newIdx] = savedPrevAcc[newIdx - 1];
             }
         }
 
-        nashCoordinator?.EnableNash();
         _egoInPlatoon = true;
         Debug.Log($"Ego joined platoon at index {insertIdx} " +
                   $"(Z={egoVehicle.GetPosition().z:F1}m), platoon size={platoonVehicles.Length}");
@@ -283,8 +322,9 @@ public class PlatoonManager : MonoBehaviour
 
         // Leader: free-road acceleration
         AdvancedBicycleModel LeaderVehicle = platoonVehicles[0];
-        float acc_leader = FreeRoadAcceleration(LeaderVehicle.GetVx(), platoonTargetVelocity, MaxAcceleration);
-        acc_leader = JerkLimit(0, Mathf.Clamp(acc_leader, -MaxAcceleration, MaxAcceleration));
+        LeaderVehicle.GetPhysicalAccelBounds(out float leaderAMin, out float leaderAMax);
+        float acc_leader = FreeRoadAcceleration(LeaderVehicle.GetVx(), platoonTargetVelocity, leaderAMax, -leaderAMin);
+        acc_leader = JerkLimit(0, Mathf.Clamp(acc_leader, leaderAMin, leaderAMax));
         acc[0] = acc_leader;
         vx[0] = Mathf.Clamp(LeaderVehicle.GetVx() + acc_leader * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
         if (!LeaderVehicle.NashModeActive) {
@@ -305,7 +345,8 @@ public class PlatoonManager : MonoBehaviour
             (float a_des, float s_des) = CalculateRajamaniAcceleration(Car_ahead, Car);
             des_gap[car_num - 1].Add(s_des);
 
-            float acc_ = JerkLimit(car_num, Mathf.Clamp(a_des, -MaxAcceleration, MaxAcceleration));
+            Car.GetPhysicalAccelBounds(out float carAMin, out float carAMax);
+            float acc_ = JerkLimit(car_num, Mathf.Clamp(a_des, carAMin, carAMax));
             acc[car_num] = acc_;
             vx[car_num]  = Mathf.Clamp(Car.GetVx() + acc_ * Time.fixedDeltaTime, 0f, platoonMaxVelocity);
 

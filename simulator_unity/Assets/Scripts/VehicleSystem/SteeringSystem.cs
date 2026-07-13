@@ -53,7 +53,6 @@ public class SteeringSystem
             frontLeftWheel.localRotation = Quaternion.Euler(0f, angles.inner * Mathf.Rad2Deg, 0f);
         if (frontRightWheel != null)
             frontRightWheel.localRotation = Quaternion.Euler(0f, angles.outer * Mathf.Rad2Deg, 0f);
-        // if (SteeringWheel != null)
-        //     SteeringWheel.localRotation = Quaternion.Euler(0f, angles.steeringWheelAngle, 0f);
+
     }
 }

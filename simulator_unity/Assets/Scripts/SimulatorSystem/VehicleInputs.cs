@@ -11,6 +11,13 @@ public class VehicleInputs : MonoBehaviour
     public float ThrottleInput { get; private set; }
     public float BrakeInput { get; private set; }
     private bool PressPedal = false;
+
+    public Transform SteeringWheel;      // SteeringW
+    public Transform SteeringWheelPivot; // SteerW_cube
+    public Transform PlayerCar;          // PlayerCar — provides forward axis
+    public float maxSteeringWheelAngle = 450f;
+    private float appliedWheelAngle;
+
     void Awake()
     {
         if (Instance == null)
@@ -31,7 +38,7 @@ public class VehicleInputs : MonoBehaviour
         SteeringInput = 0;
         ThrottleInput = 0;
         BrakeInput = 0;
-
+        appliedWheelAngle = 0;
     }
 
     void FixedUpdate()
@@ -51,6 +58,8 @@ public class VehicleInputs : MonoBehaviour
             SteeringInput = Input.GetAxis("Horizontal");
             BrakeInput = Input.GetAxis("Jump");
         }
+
+        RotateSteeringWheel(SteeringInput);
 
         // if (!PressPedal && (rawThrottleInput < 0.01f || rawBrakeInput < 0.01f))
         // {
@@ -74,7 +83,17 @@ public class VehicleInputs : MonoBehaviour
             ThrottleInput = 0f; // Reset throttle if not pressed
             BrakeInput = 0f; // Reset brake if not pressed
         }
-        // Debugging logs for inputs 
+        // Debugging logs for inputs
         Debug.Log($"Steering1: {SteeringInput:F2}, Throttle1: {ThrottleInput:F2}, Brake1: {BrakeInput:F2}");
+    }
+
+    void RotateSteeringWheel(float steerInput)
+    {
+        if (SteeringWheel == null || SteeringWheelPivot == null || PlayerCar == null) return;
+
+        float targetAngle = steerInput * maxSteeringWheelAngle;
+        float deltaAngle  = targetAngle - appliedWheelAngle;
+        SteeringWheel.RotateAround(SteeringWheelPivot.position, PlayerCar.forward, deltaAngle);
+        appliedWheelAngle = targetAngle;
     }
 }

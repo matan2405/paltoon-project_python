@@ -84,8 +84,8 @@ public class PlatoonDataVisualizer : MonoBehaviour
         - ahead.GetVehicleParameters().length / 2f
         - behind.GetVehicleParameters().length / 2f;
 
-    static float RajamaniDes(float headway, AdvancedBicycleModel leader, AdvancedBicycleModel follower) =>
-        leader.GetVehicleParameters().length + 2f + headway * follower.GetVx();
+    static float RajamaniDes(float headway, float standstillDist, AdvancedBicycleModel follower) =>
+        standstillDist + headway * follower.GetVx();
 
     void Start()
     {
@@ -113,7 +113,7 @@ public class PlatoonDataVisualizer : MonoBehaviour
             for (int i = 0; i < vehicles.Length - 1 && slot < _nPlatoon; i++)
             {
                 actual[slot] = BumperGap(vehicles[i], vehicles[i + 1]);
-                des[slot]    = RajamaniDes(_platoonManager.headway, vehicles[i], vehicles[i + 1]);
+                des[slot]    = RajamaniDes(_platoonManager.TimeGap, _platoonManager.StandstillDist, vehicles[i + 1]);
                 slot++;
             }
         }
