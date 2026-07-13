@@ -143,16 +143,27 @@ public class LateralReferenceGen
 
         if (phase == MergePhase.Following && _followingEntryTime >= 0f)
         {
-            // FOLLOWING: R1 always aims at targetY (platoon lane centre) so that the
-            // Nash game naturally rewards the driver when steering toward the target
-            // (u1 and u2 agree → driver feels authority) and corrects when opposing.
-            //
-            // T_eff is fixed at T_settle rather than shrinking — the old shrinking
-            // T_rem → 0 caused ydot/T_rem → ∞ oscillation.
-            const float T_settle = 20f;
+            // FOLLOWING: same T_lc formula as Merge (OnMergeEntry) so the reference
+            // horizon scales naturally with the remaining lateral error.
+            // Floor at 3 s (vs 4 s in Merge) because Following corrections are small.
+            const float aLatMax     = 0.8f;
+            const float omegaMax    = 0.15f;
+            const float alphaPsiMax = 0.20f;
+            const float tMinAbs     = 3.0f;
 
-            float vy0 = -ego.GetYDot();  // solver convention: vy_solver = -GetYDot()
+            float vy0cur    = -ego.GetYDot();
+            float psi0      = ego.GetPsi();
+            float psiDot0   = ego.GetPsiDot();
+            float tStopVy   = Mathf.Abs(vy0cur) / aLatMax;
+            float tStopPsi  = Mathf.Abs(psi0)   / omegaMax;
+            float tStopPsiD = Mathf.Abs(psiDot0) / alphaPsiMax;
+            float tMin      = Mathf.Max(tMinAbs, Mathf.Max(tStopVy, Mathf.Max(tStopPsi, tStopPsiD)));
 
+            float T_settle = Mathf.Abs(dy) > 1e-4f
+                           ? Mathf.Max(tMin, 1.875f * Mathf.Abs(dy) / (vx * Mathf.Tan(maxHeadRad)))
+                           : tMin;
+
+            float vy0 = vy0cur;
             if (Mathf.Abs(dy) > 1e-6f)
             {
                 float vyMax = 1.5f * Mathf.Abs(dy) / T_settle;
@@ -480,15 +491,30 @@ public class LateralReferenceGen
         else
         {
             // ── APPROACH / FOLLOWING: cubic settling to targetY ───────────────────────
-            // R2 uses the same cubic form as R1 but seeded from the driver's current
-            // state (vy0 from GetYDot(), psi from IIR-filtered steering intent).
-            // This keeps R1 and R2 in the same function space so IBR converges, while still
-            // letting the driver's actual heading intention (psiSteering via IIR) modulate R2.
-            const float T_h = 20f;
+            // R2 uses the same T_lc formula as R1/Merge so the human reference horizon
+            // scales with the remaining lateral error — identical logic to SystemRef Following.
+            const float aLatMax_h     = 0.8f;
+            const float omegaMax_h    = 0.15f;
+            const float alphaPsiMax_h = 0.20f;
+            const float tMinAbs_h     = 3.0f;
 
-            float vy0 = -ego.GetYDot();  // solver convention
-            float dy  = targetY - (-ego.GetY());
+            float dy   = targetY - (-ego.GetY());
+            float vx_h = Mathf.Max(ego.GetVx(), 1f);
+            float maxHeadRad_h = _c.MaxHeadingDeg * Mathf.Deg2Rad;
 
+            float vy0_h   = -ego.GetYDot();
+            float psi0_h  = ego.GetPsi();
+            float psiD0_h = ego.GetPsiDot();
+            float tStopVy_h   = Mathf.Abs(vy0_h)  / aLatMax_h;
+            float tStopPsi_h  = Mathf.Abs(psi0_h)  / omegaMax_h;
+            float tStopPsiD_h = Mathf.Abs(psiD0_h) / alphaPsiMax_h;
+            float tMin_h = Mathf.Max(tMinAbs_h, Mathf.Max(tStopVy_h, Mathf.Max(tStopPsi_h, tStopPsiD_h)));
+
+            float T_h = Mathf.Abs(dy) > 1e-4f
+                      ? Mathf.Max(tMin_h, 1.875f * Mathf.Abs(dy) / (vx_h * Mathf.Tan(maxHeadRad_h)))
+                      : tMin_h;
+
+            float vy0 = vy0_h;
             if (Mathf.Abs(dy) > 1e-6f)
             {
                 float vyMax = 1.5f * Mathf.Abs(dy) / T_h;
@@ -521,7 +547,7 @@ public class LateralReferenceGen
                     float steerMag = Mathf.Abs(rawSteering);
                     float blend    = Mathf.Clamp01(steerMag / 0.2f);
                     psiRef = Mathf.Clamp(
-                        (1f - blend) * (ydot / vx) + blend * psiExec,
+                        (1f - blend) * (ydot / vx_h) + blend * psiExec,
                         -r2MaxPsi, r2MaxPsi);
                 }
                 else { yRef = targetY; psiRef = 0f; }

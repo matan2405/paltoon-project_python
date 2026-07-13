@@ -14,8 +14,10 @@ public class ReferenceGeneratorConfig : ScriptableObject {
     public float TtcThreshold      = 1.2f;    // TTC below this → collision avoidance [s]
     public float MinCritGapOffset  = 2.0f;    // min critical gap = offset + L/2 [m]
     public float MaxEmergDecel     = -5.0f;   // emergency deceleration cap [m/s²]
-    public float CatchupMultiplier = 1.05f;   // cruise target = V_platoon × this
-    public float FreeDelta         = 4.0f;    // IDM exponent for free-road acceleration
+    public float CatchupMultiplier    = 1.05f;  // cruise target = V_platoon × this
+    public float FreeDelta            = 4.0f;   // IDM exponent for free-road acceleration
+    public float CatchupVelThreshold  = 5.0f;   // vel diff above this always triggers CATCHUP [m/s]
+    public float FollowingGapDeadband = 3.0f;   // gap error below this in FOLLOWING → velocity-only tracking [m]
 
     // ── IDM — Human longitudinal reference ───────────────────────────────────
     // HighD-calibrated values from Zhang & Sun 2024 (passenger cars, ~68 km/h steady-state).

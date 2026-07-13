@@ -46,6 +46,15 @@ namespace NashPlatoon
         double[]   _ws1;
         double[][] _ws2;
 
+        // ── Runtime Q overrides (set by UpdateQ1; -1 = use W defaults) ──────────
+        float _qyOverride       = -1f;
+        float _qpsiOverride     = -1f;
+        float _qyTermOverride   = -1f;
+        float _qpsiTermOverride = -1f;
+
+        // ── Current adaptive R2 (set by UpdateR2; used by UpdateQ1 to avoid reset) ──
+        float _r2Current = -1f;
+
         // ── Linearisation cache ───────────────────────────────────────────────
         float _vxCache = -1f;
 
@@ -144,15 +153,27 @@ namespace NashPlatoon
             ApplyGpRiskHessian();      // optional: HQ1H_risk = (I+4γ·HQ1H·Σ)·HQ1H
             BuildConstraintMatrix();
             InitOsqpSolvers();
+            // Re-apply runtime overrides that were active before re-linearisation.
+            // InitOsqpSolvers builds P2 from W.R2_lat; restore the adaptive R2/Q1 state
+            // so a vx-triggered rebuild does not silently discard coordinator updates.
+            if (_r2Current > 0f)
+                UpdateR2(_r2Current);
+            if (_qyOverride > 0f)
+                UpdateQ1(_qyOverride, _qpsiOverride, _qyTermOverride, _qpsiTermOverride);
         }
 
         // ── Q1 block: [Q_y, Q_psi] with horizon weighting (Flad et al. 2017) ──
         // Tracking cost scales from 1× at step 0 to wQ× at step Np-1 so the solver
         // penalises far-horizon deviations more heavily than near-horizon ones.
+        // Uses _qyOverride / _qpsiOverride when set (>0), otherwise falls back to W defaults.
         protected override void FillQ1Block(double[] Q1full, int rows, int i, bool terminal)
         {
-            double qy   = terminal ? W.Q_y_terminal   : W.Q_y;
-            double qpsi = terminal ? W.Q_psi_terminal : W.Q_psi;
+            double qy   = terminal
+                ? (_qyTermOverride   > 0f ? _qyTermOverride   : W.Q_y_terminal)
+                : (_qyOverride       > 0f ? _qyOverride       : W.Q_y);
+            double qpsi = terminal
+                ? (_qpsiTermOverride > 0f ? _qpsiTermOverride : W.Q_psi_terminal)
+                : (_qpsiOverride     > 0f ? _qpsiOverride     : W.Q_psi);
             if (!terminal && Np > 1)
             {
                 double scale = 1.0 + (i / (double)(Np - 1)) * (1.5 - 1.0);
@@ -339,10 +360,40 @@ namespace NashPlatoon
         /// Uses osqp_update_data_mat — no re-factorisation required.
         public void UpdateR2(float r2New)
         {
+            _r2Current = r2New;
             for (int i = 0; i < LambdaLevels.Length; i++)
             {
                 double alpha = PustilnikAlpha(LambdaLevels[i]);
                 double[] P2  = BuildPMatrix((double)r2New, alpha);
+                var (P2d, _, _) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
+                _s2[i].UpdateP(P2d);
+            }
+        }
+
+        /// Hot-path Q1 update: stores overrides, rebuilds HQ1H/HtQ1 and P1/P2 for all λ levels.
+        /// Full RebuildCostMatrices is required because Q is baked into HQ1H.
+        /// Guard with a threshold in the caller to avoid per-tick rebuilds.
+        public void UpdateQ1(float qy, float qpsi, float qyTerm, float qpsiTerm)
+        {
+            _qyOverride       = qy;
+            _qpsiOverride     = qpsi;
+            _qyTermOverride   = qyTerm;
+            _qpsiTermOverride = qpsiTerm;
+            RebuildCostMatrices();
+            ApplyGpRiskHessian();
+
+            // Rebuild P1 (uses current R1_lat from W, Q encoded in HQ1H)
+            double[] P1 = BuildPMatrix((double)W.R1_lat, 1.0);
+            var (P1d, _, _) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
+            _s1.UpdateP(P1d);
+
+            // Rebuild P2 with the current adaptive R2 (not the static W.R2_lat default)
+            // so a Q1 rebuild cannot silently reset the R2 that UpdateR2 just applied.
+            double r2 = _r2Current > 0f ? _r2Current : W.R2_lat;
+            for (int i = 0; i < LambdaLevels.Length; i++)
+            {
+                double alpha = PustilnikAlpha(LambdaLevels[i]);
+                double[] P2  = BuildPMatrix(r2, alpha);
                 var (P2d, _, _) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
                 _s2[i].UpdateP(P2d);
             }

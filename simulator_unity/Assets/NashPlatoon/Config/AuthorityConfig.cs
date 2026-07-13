@@ -45,4 +45,13 @@ public class AuthorityConfig : ScriptableObject {
     [Header("Long — FOLLOWING phase caps")]
     public float LongLambdaMaxFollowing = 5.0f;  // LONG_AUTHORITY_LAMBDA_MAX_FOLLOWING
     public float LongAlphaFollowing     = 0.05f; // LONG_AUTHORITY_ALPHA_FOLLOWING (faster EMA ~3s)
+
+    // ── No-leader (ego is first in platoon) caps ──────────────────────────────
+    // When leader == null, velErr = ego.vx - targetVel can be large (~12 m/s)
+    // on join-before entry. A wider threshold prevents λ from spiking immediately.
+    // The lambda cap then bounds the system's authority so braking is gradual,
+    // avoiding loss of lateral control during the concurrent lane-change.
+    [Header("Long — No-leader caps (join-before / first-in-platoon)")]
+    public float AuthVelErrorMaxNoLeader  = 15.0f; // wider vel-error normalisation [m/s]
+    public float LongLambdaMaxNoLeader    =  2.0f; // max λ when no forward leader
 }

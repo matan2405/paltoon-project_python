@@ -44,6 +44,9 @@ namespace NashPlatoon
         // ── Linearisation cache ────────────────────────────────────────────────
         float _vxCache = -1f;
 
+        // ── Physical box bounds (updated each Nash step from vehicle model) ────
+        float _u1Min, _u1Max, _u2Min, _u2Max;
+
         // ── Statistics (read-only) ────────────────────────────────────────────
         public int   LastIbrIters { get; private set; }
         public bool  LastConverged { get; private set; }
@@ -69,6 +72,9 @@ namespace NashPlatoon
             AdvancedBicycleModel vehicle)
         {
             var s = new LongitudinalNashSolver(w, t);
+            // Initialise physical bounds to config defaults until first UpdatePhysicalBounds call
+            s._u1Min = w.U1Min; s._u1Max = w.U1Max;
+            s._u2Min = w.U2Min; s._u2Max = w.U2Max;
             s.InitDoubleIntegratorC();              // builds C only
             s.UpdateLinearization(vehicle, t.NashDtLong);   // builds A,B from physics
             return s;
@@ -235,11 +241,11 @@ namespace NashPlatoon
             double[] HQ1r1 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r1, zFree));
             double[] HQ1r2 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r2, zFree));
 
-            // Update jerk-from-prev bounds for this call
+            // Update jerk-from-prev bounds using physical box limits set by UpdatePhysicalBounds
             float du1 = W.Du1Max * T.NashDtLong;
             float du2 = W.Du2Max * T.NashDtLong;
-            UpdateBoundsForCall(_s1, W.U1Min, W.U1Max, du1, (float)_u1Prev);
-            UpdateBoundsForCall(_s2[lamIdx], W.U2Min, W.U2Max, du2, (float)_u2Prev);
+            UpdateBoundsForCall(_s1, _u1Min, _u1Max, du1, (float)_u1Prev);
+            UpdateBoundsForCall(_s2[lamIdx], _u2Min, _u2Max, du2, (float)_u2Prev);
 
             // Warm-start: inject shifted-horizon solution from previous Nash step
             InjectWarmStart(_s1,       _ws1);
@@ -302,12 +308,18 @@ namespace NashPlatoon
                 Array.Clear(_ws2[i], 0, _ws2[i].Length);
         }
 
-        /// Seed jerk integrator from current ego acceleration so the first Nash step
-        /// is not cold-capped at Du1Max*dt ≈ 0.15 m/s².
+        /// Seed solver state from current ego acceleration (mirrors LateralNashSolver.WarmStartFromDriverState).
+        /// Call every Nash tick during Approach/GapSearch so _u1Prev, _u2Prev, and the horizon
+        /// warm-starts all reflect the physical vehicle state before the first Merge step.
         public void WarmStartPrev(float ax)
         {
             _u1Prev = ax;
             _u2Prev = ax;
+            for (int k = 0; k < Nu; k++)
+                _ws1[k] = ax;
+            for (int i = 0; i < _ws2.Length; i++)
+                for (int k = 0; k < Nu; k++)
+                    _ws2[i][k] = ax;
         }
 
         /// Hot-path R2 update: rebuild P2 for all λ levels with new R2 value.
@@ -361,6 +373,22 @@ namespace NashPlatoon
             var l = new double[_mCon]; var u = new double[_mCon];
             FillBounds(l, u, uMin, uMax, duStep, uPrev);
             solver.UpdateBounds(l, u);
+        }
+
+        // Tighten box bounds using physical vehicle limits (called each Nash step before IBR).
+        // Config bounds U1Min/U1Max and U2Min/U2Max act as hard safety ceilings;
+        // physics bounds further restrict within them based on current vx.
+        // Stores the result so SolveNashEquilibrium uses physical bounds, not config defaults.
+        public void UpdatePhysicalBounds(float aMin, float aMax, float du1, float du2)
+        {
+            _u1Min = Mathf.Max(W.U1Min, aMin);
+            _u1Max = Mathf.Min(W.U1Max, aMax);
+            _u2Min = Mathf.Max(W.U2Min, aMin);
+            _u2Max = Mathf.Min(W.U2Max, aMax);
+
+            UpdateBoundsForCall(_s1, _u1Min, _u1Max, du1, (float)_u1Prev);
+            for (int i = 0; i < _s2.Length; i++)
+                UpdateBoundsForCall(_s2[i], _u2Min, _u2Max, du2, (float)_u2Prev);
         }
 
         static void InjectWarmStart(OsqpSolver solver, double[] ws)

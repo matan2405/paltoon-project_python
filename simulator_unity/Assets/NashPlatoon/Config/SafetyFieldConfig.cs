@@ -65,6 +65,14 @@ public class SafetyFieldConfig : ScriptableObject {
     public float LongDistanceDecay      = 15.0f;  // LONG_SAFETY_DISTANCE_DECAY [m]
     public float LongFollowingSoftFactor = 0.35f; // LONG_SAFETY_FOLLOWING_SOFT_FACTOR
 
+    // ── TTC-based force floor (monotonic with danger) ────────────────────────
+    // Ensures force does not drop inside the elliptic potential's dead zone.
+    // ttcFrac = 1 - clamp((TTC - TtcCritical) / (TtcWarn - TtcCritical), 0, 1)
+    // ttcForce = ttcFrac * LongMaxForce  →  merged as max(ellipticForce, ttcForce)
+    [Header("Long — TTC force floor")]
+    public float LongTtcWarn     = 8.0f;  // TTC [s] at which floor starts rising
+    public float LongTtcCritical = 2.0f;  // TTC [s] at which floor reaches LongMaxForce
+
     // ── Dynamic DSF position and velocity multipliers ─────────────────────────
     [Header("Long — Dynamic DSF multipliers")]
     public float LongLeaderPosMult      = 0.8f;   // LONG_SAFETY_LEADER_POSITION_MULT

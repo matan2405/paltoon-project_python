@@ -25,11 +25,13 @@ public class NashCoordinator : MonoBehaviour
     [SerializeField] AdvancedBicycleModel  ego;
     [SerializeField] PlatoonManager        platoonManager;
     [SerializeField] NashPlatoonSettings   settings;
+    public NashPlatoonSettings Settings => settings;
 
     [Header("Platoon geometry")]
-    [SerializeField] float platoonLaneY      = 0f;    // PLATOON_LANE_Y (solver convention: pos.x - ego._x0)
+    [SerializeField] float platoonLaneY      = 3.5f;    // PLATOON_LANE_Y (solver convention: pos.x - ego._x0)
     [SerializeField] bool  autoDetectLane    = true;  // if true, overrides platoonLaneY on J-press with snapped lane centre
-    [SerializeField] float laneWidth         = 2.0f;  // road lane width [m] — used for lane-centre snapping
+    [SerializeField] float laneWidth         = 3.5f;  // road lane width [m] — used for lane-centre snapping (overridden from RoadArchitect if roadRef set)
+    [SerializeField] RoadArchitect.Road roadRef;      // optional — when set, laneWidth is read from Road.laneWidth at Awake
     [SerializeField] float approachCheckDist = 300f;  // APPROACH_MOBIL_CHECK_DISTANCE [m]
 
     // ── Public read-only state ────────────────────────────────────────────────
@@ -57,6 +59,7 @@ public class NashCoordinator : MonoBehaviour
     // ── Adaptive R2 EMA state (coordinator.py lines 1026-1034 / 1063-1071) ────
     float _r2LongCurrent, _r2LongPrev;
     float _r2LatCurrent,  _r2LatPrev;
+    float _qyPrev; // last Q_y sent to UpdateQ1 — for threshold gating
 
     // ── Lateral conflict detection (Lazcano et al., IEEE T-MECH 2021) ─────────
     // Moving-average filter over last 5 Nash ticks: smoother than instantaneous
@@ -77,10 +80,25 @@ public class NashCoordinator : MonoBehaviour
     float _gapSearchStart = -1f;
     float _phaseHoldTimer;
 
+    // ── Merge→Following convergence tracking ─────────────────────────────────
+    float _prevGapErr;
+    float _prevGapErrTime;
+
+    // ── Following→Merge hysteresis ────────────────────────────────────────────
+    float _followingDivTimer;
+    float _prevGap;
+    float _prevGapTime;
+
     // ── Locked merge partners (set at GAP_SEARCH→MERGE) ──────────────────────
     AdvancedBicycleModel _lockedLeader;
     AdvancedBicycleModel _lockedFollower;
     bool                 _mergeLocked;
+
+    // ── Virtual leader (Kennedy 2023) — active in Following when no real leader ──
+    readonly VirtualLeaderVehicle _virtualLeader = new VirtualLeaderVehicle();
+
+    // ── GapSearch lateral hold: y position locked at J-press ─────────────────
+    float _gsLockedY;
 
     // =========================================================================
     // Unity lifecycle
@@ -89,6 +107,22 @@ public class NashCoordinator : MonoBehaviour
     void Awake()
     {
         SimCfg.I    = settings;
+
+        // Pull lane width from RoadArchitect so scene geometry is the single source of truth.
+        // Falls back to explicit reference → scene lookup → serialized default.
+        if (roadRef == null)
+            roadRef = FindObjectOfType<RoadArchitect.Road>();
+        if (roadRef != null)
+        {
+            laneWidth = roadRef.laneWidth;
+            Debug.Log($"[NashCoordinator] laneWidth = {laneWidth:F2} m (from RoadArchitect.Road '{roadRef.name}', laneAmount={roadRef.laneAmount})");
+        }
+        else
+        {
+            Debug.LogWarning($"[NashCoordinator] No RoadArchitect.Road found — using serialized laneWidth={laneWidth:F2} m");
+        }
+
+        settings.SafetyField.LaneWidth = laneWidth;
         _longSafety = new LongitudinalSafetyField(settings.SafetyField);
         _latSafety  = new LateralSafetyField(settings.SafetyField);
         _authority  = new AuthorityAllocator(settings.Authority, settings.SafetyField);
@@ -125,27 +159,23 @@ public class NashCoordinator : MonoBehaviour
     public void EnableNash()
     {
         var platoon = platoonManager.GetPlatoonVehicles();
-        float sumX = 0f; float sumVx = 0f; int n = 0;
+
+        // Detect platoon lane from current platoon vehicles (excluding ego)
+        float sumX = 0f; int n = 0;
         foreach (var v in platoon)
         {
             if (v == null || v == ego) continue;
-            sumX  += v.GetPosition().x;
-            sumVx += v.GetVx();
+            sumX += v.GetPosition().x;
             n++;
         }
         if (n > 0)
         {
-            float platoonX  = sumX  / n;
-            float platoonVx = sumVx / n;
-
+            float platoonX = sumX / n;
             if (autoDetectLane)
             {
-                // Snap the platoon's average lateral position to the nearest lane centre,
-                // then express it in solver convention (pos.x - _x0).
-                // _x0 = ego.GetPosition().x + ego.GetY()  (since GetY() = _x0 - pos.x)
-                float x0          = ego.GetPosition().x + ego.GetY();
-                float lanecentre   = Mathf.Round(platoonX / laneWidth) * laneWidth;
-                platoonLaneY      = lanecentre - x0;
+                float x0         = ego.GetPosition().x + ego.GetY();
+                float lanecentre = Mathf.Round(platoonX / laneWidth) * laneWidth;
+                platoonLaneY     = lanecentre - x0;
                 Debug.Log($"[NashCoordinator] platoonLaneY auto = {platoonLaneY:F2} " +
                           $"(platoonX={platoonX:F2} → lanecentre={lanecentre:F2}, x0={x0:F2})");
             }
@@ -153,30 +183,62 @@ public class NashCoordinator : MonoBehaviour
             {
                 Debug.Log($"[NashCoordinator] platoonLaneY manual = {platoonLaneY:F2} (autoDetect off)");
             }
-
-            // Warm-start: if platoon is significantly faster, seed _u1Prev/_u2Prev at
-            // 2.0 m/s² so the first Nash step isn't jerk-capped at Du1Max*dt ≈ 0.15 m/s².
-            _longNash.WarmStartPrev(platoonVx > ego.GetVx() + 5f ? 2.0f : ego.GetAx());
         }
-        else
+
+        // Lock merge position at J-press time so insertion index is correct
+        // before the platoon moves further ahead.
+        LockMergePosition(platoon);
+
+        // Join platoon between locked leader and follower
+        platoonManager.JoinPlatoon(_lockedLeader, _lockedFollower);
+
+        _longNash.WarmStartPrev(ego.GetAx());
+
+        // Lock lateral position at J-press — GapSearch holds the vehicle straight at this y.
+        _gsLockedY = -ego.GetY();  // solver convention
+        _latRef.OnGapSearchEntry(_gsLockedY, -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), Time.fixedTime);
+
+        // Activate virtual leader immediately if ego has no real leader (joins at front).
+        // This gives GapSearch and Merge a valid longitudinal reference from the start.
+        if (_lockedLeader == null)
         {
-            _longNash.WarmStartPrev(ego.GetAx());
+            var platVehicles = platoonManager.GetPlatoonVehicles();
+            float initVx = (platVehicles != null && platVehicles.Length > 0)
+                         ? platVehicles[0].GetVx()
+                         : platoonManager.GetTargetVelocity();
+            ego.GetPhysicalAccelBounds(out float vAMin, out float vAMax);
+            _virtualLeader.Activate(
+                ego.GetPosition().z, ego.GetLength(),
+                initVx,
+                platoonManager.GetTargetVelocity(),
+                settings.SafetyField.StandstillDist,
+                settings.SafetyField.PlatoonTimeGap,
+                vAMax, -vAMin);
         }
 
-        NashActive = true;
+        NashActive      = true;
+        Phase           = MergePhase.GapSearch;
+        _gapSearchStart = Time.fixedTime;
+        Debug.Log($"[NashCoordinator] APPROACH → GAP_SEARCH at t={Time.fixedTime:F1}s (J pressed)");
     }
 
     public void DisableNash()
     {
         NashActive = false;
         _longNash.Reset();
-        Phase           = MergePhase.Approach;
-        _mergeLocked    = false;
-        _mobilApproved  = false;
+        _virtualLeader.Deactivate();
+        Phase              = MergePhase.Approach;
+        _mergeLocked       = false;
+        _mobilApproved     = false;
         _longTimer         = 0f;
         _latTimer          = 0f;
         _phaseHoldTimer    = 0f;
         _latWarmStartDone  = false;
+        _prevGapErr        = 0f;
+        _prevGapErrTime    = 0f;
+        _followingDivTimer = 0f;
+        _prevGap           = 0f;
+        _prevGapTime       = 0f;
         Debug.Log("[NashCoordinator] Nash disabled — returning to manual control.");
     }
 
@@ -189,6 +251,10 @@ public class NashCoordinator : MonoBehaviour
         var   platoon = platoonManager.GetPlatoonVehicles();
         float t       = Time.fixedTime;
 
+        // Advance virtual leader every physics frame using FreeRoadAcceleration
+        if (_virtualLeader.IsActive)
+            _virtualLeader.Step(dt);
+
         // ── Safety override (100 Hz) ───────────────────────────────────────────
         // Runs every physics step regardless of Nash timer so the 10 Hz Nash lag
         // cannot allow the ego to pass through a platoon vehicle.
@@ -198,7 +264,7 @@ public class NashCoordinator : MonoBehaviour
         {
             float overrideGap = overrideLeader.GetPosition().z
                               - ego.GetPosition().z
-                              - overrideLeader.GetLength();
+                              - overrideLeader.GetLength() / 2f - ego.GetLength() / 2f;
             if (overrideGap < settings.SafetyField.LongMinSafeDist)
             {
                 ego.NashBrake      = 1f;
@@ -213,6 +279,12 @@ public class NashCoordinator : MonoBehaviour
         }
 
         UpdatePhase(platoon, t, dt);
+
+        // Seed longitudinal solver state from physical vehicle acceleration during Approach.
+        // GapSearch is excluded: Nash is already running there and manages _u1Prev itself.
+        // Must run after UpdatePhase so the GapSearch→Merge transition also gets a correct seed.
+        if (Phase == MergePhase.Approach)
+            _longNash.WarmStartPrev(ego.GetAx());
 
         // Long Nash @ NashDtLong
         _longTimer += dt;
@@ -257,22 +329,63 @@ public class NashCoordinator : MonoBehaviour
         var leader   = _mergeLocked ? _lockedLeader   : FindLeader(platoon);
         var follower = _mergeLocked ? _lockedFollower : null;
 
+        // When ego has no real leader (joined at front), use the virtual leader across
+        // all phases (GapSearch, Merge, Following). Activated in EnableNash() when
+        // _lockedLeader == null, so this flag is true from J-press onward.
+        bool usingVirtual = (leader == null && _virtualLeader.IsActive);
+
         // Re-linearise with vehicle physical Jacobian when vx drifts > 0.5 m/s
         _longNash.UpdateLinearization(ego, settings.Timing.NashDtLong);
 
-        // Safety force (Li et al. DSF with dynamic params)
-        float force = _longSafety.Compute(ego, leader, follower, Phase);
-        _longForceEma = force;   // _longSafety already applies EMA internally
+        // Safety force (Li et al. DSF with dynamic params).
+        // When using the virtual leader, pass its position and velocity via the
+        // dedicated overload so LeaderForceRaw receives a valid gap and TTC.
+        float force;
+        if (usingVirtual)
+            force = _longSafety.ComputeWithVirtual(ego, _virtualLeader, follower, Phase);
+        else
+            force = _longSafety.Compute(ego, leader, follower, Phase);
+        _longForceEma = force;
 
-        // Gap and velocity errors for authority
-        float gapErr = leader != null ? LongGapError(leader) : 0f;
-        float velErr = leader != null ? ego.GetVx() - leader.GetVx() : 0f;
+        // Gap and velocity errors for authority.
+        float targetVel = platoonManager.GetTargetVelocity();
+        float gapErr, velErr;
+        if (usingVirtual)
+        {
+            // Virtual leader errors — converge to zero when vx == targetVelocity
+            // and gap == desGap(v*), as required by Kennedy Sec. V-A.
+            gapErr = _virtualLeader.GapError(
+                settings.SafetyField.StandstillDist,
+                settings.SafetyField.PlatoonTimeGap,
+                ego.GetPosition().z, ego.GetLength(), ego.GetVx());
+            velErr = _virtualLeader.VelocityError(ego.GetVx());
+        }
+        else if (leader != null)
+        {
+            gapErr = LongGapError(leader);
+            velErr = ego.GetVx() - leader.GetVx();
+        }
+        else
+        {
+            gapErr = 0f;
+            velErr = ego.GetVx() - targetVel;
+        }
         LongLambda = _authority.ComputeLong(force, gapErr, velErr, Phase);
+
+        // Cap λ when there is truly no reference at all (not even a virtual leader).
+        if (leader == null && !usingVirtual)
+            LongLambda = Mathf.Min(LongLambda, settings.Authority.LongLambdaMaxNoLeader);
 
         // Adaptive R2: EMA from R2LongStart (far) → R2LongFollow (integrated)
         // l_n ∈ [0,1]: 0 = far from platoon, 1 = fully synchronised
+        // When no leader, use a wider vel-error normalisation so a large speed
+        // overshoot (e.g. 12 m/s) produces a gradual l_n decay, not an instant drop to 0.
+        // Virtual leader counts as a real reference for velErrMax normalisation.
+        float velErrMax = (leader != null || usingVirtual)
+                        ? settings.Authority.AuthVelErrorMax
+                        : settings.Authority.AuthVelErrorMaxNoLeader;
         float l_n_gap  = Mathf.Clamp01(1f - Mathf.Abs(gapErr) / settings.Authority.AuthGapErrorMax);
-        float l_n_vel  = Mathf.Clamp01(1f - Mathf.Abs(velErr) / settings.Authority.AuthVelErrorMax);
+        float l_n_vel  = Mathf.Clamp01(1f - Mathf.Abs(velErr) / velErrMax);
         float l_n      = Mathf.Min(l_n_gap, l_n_vel);
         float r2LTarget = settings.Nash.R2LongStart
                         + (settings.Nash.R2LongFollow - settings.Nash.R2LongStart) * l_n;
@@ -292,20 +405,30 @@ public class NashCoordinator : MonoBehaviour
             _r2LongPrev = r2LongEffective;
         }
 
+        // Physical bounds needed both for reference clamping and solver constraints
+        ego.GetPhysicalAccelBounds(out float aMin, out float aMax);
+
         // Reference trajectories
         float[] r1 = _longRef.SystemRef(
             ego, leader,
             platoonManager.GetTargetVelocity(),
-            settings.Timing.NashNp, settings.Timing.NashDtLong);
+            Phase, aMin, aMax,
+            settings.Timing.NashNp, settings.Timing.NashDtLong,
+            usingVirtual ? _virtualLeader : null);
 
         float[] r2 = _longRef.HumanRef(
             ego, _lockedLeader, Phase, platoonManager.GetTargetVelocity(),
             settings.Timing.NashNp, settings.Timing.NashDtLong);
 
+        // Tighten box constraints to physical vehicle limits before solving
+        _longNash.UpdatePhysicalBounds(aMin, aMax,
+            settings.Nash.Du1Max * settings.Timing.NashDtLong,
+            settings.Nash.Du2Max * settings.Timing.NashDtLong);
+
         // Nash solve
         float[] x0 = ego.GetLongState();
         var (u1, u2) = _longNash.SolveNashEquilibrium(x0, r1, r2, LongLambda);
-        float uShared = u1 + u2;
+        float uShared = Mathf.Clamp(u1 + u2, aMin, aMax);
 
         // Inject: acceleration → (throttle, brake) via vehicle's inverse engine map
         var (thr, brk) = ego.AccelerationToInputs(uShared);
@@ -313,9 +436,10 @@ public class NashCoordinator : MonoBehaviour
         ego.NashBrake      = brk;
         ego.NashModeActive = true;
 
-        // During APPROACH / GAP_SEARCH the lateral Nash is not yet running.
-        // Pass driver steering through so NashModeActive=true doesn't zero-out the wheel.
-        if (Phase != MergePhase.Merge && Phase != MergePhase.Following)
+        // During APPROACH: lateral Nash not running → pass driver steering through.
+        // During GAP_SEARCH: lateral Nash runs with latTarget=current lane (straight-keeping),
+        // so its output already suppresses driver drift — do NOT pass SteeringInput through.
+        if (Phase == MergePhase.Approach)
             ego.NashSteerNorm = VehicleInputs.Instance != null
                               ? VehicleInputs.Instance.SteeringInput : 0f;
 
@@ -356,56 +480,117 @@ public class NashCoordinator : MonoBehaviour
         float force = _latSafety.Compute(ego, platoon);
         _latForceEma = force;
 
-        // During GAP_SEARCH use the ego's current lateral position as target so Nash
-        // keeps the vehicle driving straight (psi→0) without fighting a 2m lane error.
+        // During GAP_SEARCH hold the lateral position locked at J-press so Nash
+        // straightens the vehicle (psi→0, vy→0) without chasing a moving target.
         // During MERGE/FOLLOWING use the actual platoon lane target.
         float latTarget = (Phase == MergePhase.GapSearch)
-                        ? -ego.GetY()   // solver convention: current posX − _x0
+                        ? _gsLockedY
                         : platoonLaneY;
 
         // yErr in solver convention: positive = ego right of target (needs to go left)
         float yErr = -ego.GetY() - latTarget;
+
+        // Soft transition in Following (mirrors LongitudinalSafetyField quadratic fade):
+        // scale lat_force by (yErr/halfLane)² so force → 0 as yErr → 0.
+        // Prevents DSF from producing constant λ_lat when ego is already in-lane.
+        if (Phase == MergePhase.Following)
+        {
+            float latThr  = laneWidth * 0.5f;
+            float beyondS = Mathf.Min(1f, (Mathf.Abs(yErr) / latThr) * (Mathf.Abs(yErr) / latThr));
+            force *= beyondS;
+        }
+
         LatLambda = _authority.ComputeLat(force, yErr);
 
-        // Adaptive R2 lateral: l_n based on lane-width normalised y-error
-        float halfLane  = settings.SafetyField.LaneWidth * 0.5f;
+        // Quarter/half-lane geometry
+        float halfLane    = laneWidth * 0.5f;
+        float quarterLane = halfLane * 0.5f;
+
+        // beyondFrac: 0 inside deadband, ramps to 1 at ±halfLane.
+        // In Following use FollowingYDeadband (3 cm) so even small lane offsets
+        // from steering activity trigger Q_y/R2 correction — prevents permanent
+        // u1/u2 cancellation when y_err is small but nonzero.
+        // In Merge keep the wider quarterLane deadband for a softer transition.
+        float beyondDeadband = (Phase == MergePhase.Following)
+                             ? settings.Nash.FollowingYDeadband
+                             : quarterLane;
+        float beyondFrac = Mathf.Clamp01(
+            (Mathf.Abs(yErr) - beyondDeadband) / Mathf.Max(halfLane - beyondDeadband, 1e-3f));
+
+        // ── Adaptive R2 lateral ───────────────────────────────────────────────
+        // Inside quarter-lane: R2=R2LatFree (large) → driver has authority.
+        // Outside quarter-lane: R2 lerps toward R2LatStart (default large) while
+        // Q rises (see below), making u1 stronger without stripping u2 entirely.
+        // During Merge: use original l_n_lat ramp (approach/lane-change logic).
         float l_n_lat   = Mathf.Clamp01((halfLane - Mathf.Abs(yErr)) / Mathf.Max(halfLane, 1e-3f));
-        float r2LaTarget = settings.Nash.R2LatStart
-                         + (settings.Nash.R2LatFollow - settings.Nash.R2LatStart) * l_n_lat;
-        _r2LatCurrent    = settings.Nash.R2LatEmaAlpha * r2LaTarget
-                         + (1f - settings.Nash.R2LatEmaAlpha) * _r2LatCurrent;
+        float r2LaTarget;
+        if (Phase == MergePhase.Following)
+        {
+            // R2 ramps from R2LatFree (inside deadband) → R2LatFollow (at halfLane).
+            // R2LatFollow < R1_lat so system gains real authority for residual correction.
+            // Previously used R2LatStart as endpoint (= R2LatFree = 250000) → no change → oscillation.
+            r2LaTarget = Mathf.Lerp(settings.Nash.R2LatFree,
+                                    settings.Nash.R2LatFollow,
+                                    beyondFrac);
+        }
+        else
+        {
+            r2LaTarget = settings.Nash.R2LatStart
+                       + (settings.Nash.R2LatFollow - settings.Nash.R2LatStart) * l_n_lat;
+        }
+        _r2LatCurrent = settings.Nash.R2LatEmaAlpha * r2LaTarget
+                      + (1f - settings.Nash.R2LatEmaAlpha) * _r2LatCurrent;
 
         // Conflict detection (moving average over last 5 Nash ticks)
         float conflictMav = 0f;
         for (int ci = 0; ci < ConflictBufLen; ci++) conflictMav += _conflictBuf[ci];
         conflictMav /= ConflictBufLen;
 
-        // Activity-based R2 scaling (Lazcano et al. 2021): when driver actively steers,
-        // reduce R2_lat to amplify u2 — gives perceptible lateral authority.
-        // During MERGE with active conflict, skip activity reduction: a resisting driver
-        // should not receive amplified authority — conflict boost handles suppression instead.
+        // ── Activity-based R2 scaling (Lazcano et al. 2021) ──────────────────
+        // Active steering → reduce R2 to amplify u2 (driver feels control).
+        // During contested Merge → no reduction (conflict boost handles suppression).
         float latSteering = VehicleInputs.Instance != null
                           ? Mathf.Abs(VehicleInputs.Instance.SteeringInput) : 0f;
         float latActScale;
         if (Phase == MergePhase.Merge && conflictMav > 0.2f)
-            latActScale = 1f;   // no R2 reduction during contested merge
+            latActScale = 1f;
         else
             latActScale = 1f - Mathf.Clamp01(latSteering / 0.3f)
                               * (1f - settings.Nash.R2LatActivityMinScale);
         float r2LatEffective = _r2LatCurrent * latActScale;
 
-        // Conflict boost: during MERGE if the driver resists (u1 and u2 opposing),
-        // boost R2 so P2 penalises u2 more, suppressing the opposing human input.
-        // In FOLLOWING u1≈0 → buffer stays 0 → no boost.
-        float conflictBoost = conflictMav <= 0.2f ? 0f
-                            : conflictMav >= 0.8f ? ConflictBoostMag
-                            : ConflictBoostMag * (conflictMav - 0.2f) / 0.6f;
-        r2LatEffective *= (1f + conflictBoost);
+        // ── Conflict boost (Merge only) ───────────────────────────────────────
+        // Following boundary correction is handled by beyondFrac→R2+Q, not conflict boost.
+        if (Phase == MergePhase.Merge)
+        {
+            float conflictBoost = conflictMav <= 0.2f ? 0f
+                                : conflictMav >= 0.8f ? ConflictBoostMag
+                                : ConflictBoostMag * (conflictMav - 0.2f) / 0.6f;
+            r2LatEffective *= (1f + conflictBoost);
+        }
 
         if (Mathf.Abs(r2LatEffective - _r2LatPrev) > settings.Nash.R2LatUpdateThreshold)
         {
             lat.UpdateR2(r2LatEffective);
             _r2LatPrev = r2LatEffective;
+        }
+
+        // ── Q1 adaptation for Following boundary ─────────────────────────────
+        // Inside quarter-lane: Q_y stays at W default (low) → driver barely feels pull.
+        // Outside quarter-lane: Q_y lerps to Q_y_BeyondBound (large) → both players
+        // pay a high cost for the offset, so u1 grows and u2 naturally aligns.
+        // Gated by Q_LatUpdateThreshold to avoid per-tick RebuildCostMatrices.
+        if (Phase == MergePhase.Following)
+        {
+            float qyEff     = Mathf.Lerp(settings.Nash.Q_y,      settings.Nash.Q_y_BeyondBound,      beyondFrac);
+            float qpsiEff   = Mathf.Lerp(settings.Nash.Q_psi,    settings.Nash.Q_psi_BeyondBound,    beyondFrac);
+            float qyTermEff = Mathf.Lerp(settings.Nash.Q_y_terminal, settings.Nash.Q_yTerm_BeyondBound, beyondFrac);
+            float qpTermEff = Mathf.Lerp(settings.Nash.Q_psi_terminal, settings.Nash.Q_psiTerm_BeyondBound, beyondFrac);
+            if (Mathf.Abs(qyEff - _qyPrev) > settings.Nash.Q_LatUpdateThreshold)
+            {
+                lat.UpdateQ1(qyEff, qpsiEff, qyTermEff, qpTermEff);
+                _qyPrev = qyEff;
+            }
         }
 
         // Re-linearise bicycle model if vx drifted (Coriolis sensitivity)
@@ -469,30 +654,44 @@ public class NashCoordinator : MonoBehaviour
         switch (Phase)
         {
             case MergePhase.Approach:
-                // Run MOBIL only when ego is close enough to the platoon
+                // J-press triggers EnableNash() which locks position, joins platoon,
+                // and transitions directly to GapSearch — nothing to do here.
+                break;
+
+            case MergePhase.GapSearch:
+                // MOBIL checks for a safe lateral gap every Nash tick.
+                // When approved AND longitudinal speed and gap are matched → begin Merge.
                 if (NearestPlatoonDist(platoon) < approachCheckDist)
                 {
                     if (!_mobilApproved)
                         _mobilApproved = _mobil.CheckPlatoonMerge(ego, platoon);
-
-                    if (_mobilApproved)
-                    {
-                        LockMergePosition(platoon);
-                        _latRef.OnGapSearchEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), t);
-                        Phase           = MergePhase.GapSearch;
-                        _gapSearchStart = t;
-                        Debug.Log($"[NashCoordinator] APPROACH → GAP_SEARCH at t={t:F1}s — {_mobil.LastStatus}");
-                    }
                 }
-                break;
 
-            case MergePhase.GapSearch:
-                if (t - _gapSearchStart >= 2.0f)   // GAP_SEARCH_DURATION = 2.0 s (was 0.5 — gives Nash time to damp psi before Merge entry)
+                if (_mobilApproved)
                 {
-                    // Notify lat ref generator of MERGE entry for locked polynomial
-                    _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
-                    Phase = MergePhase.Merge;
-                    Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s");
+                    var gsLeader   = _mergeLocked ? _lockedLeader : FindLeader(platoon);
+                    float gsVelErr = gsLeader != null ? gsLeader.GetVx() - ego.GetVx() : 0f;
+                    bool velReady  = Mathf.Abs(gsVelErr) < settings.RefGen.CatchupVelThreshold;
+
+                    bool gapReady = true;
+                    if (gsLeader != null)
+                    {
+                        float gsGap    = gsLeader.GetPosition().z - ego.GetPosition().z
+                                       - gsLeader.GetLength() * 0.5f - ego.GetLength() * 0.5f;
+                        float gsDesGap = settings.SafetyField.StandstillDist
+                                       + settings.SafetyField.PlatoonTimeGap * ego.GetVx();
+                        gapReady = Mathf.Abs(gsGap - gsDesGap) / Mathf.Max(gsDesGap, 1f)
+                                 < settings.Timing.MergeGapThreshold;
+                    }
+
+                    if (t - _gapSearchStart >= 2.0f && velReady && gapReady)
+                    {
+                        _prevGapErr     = 0f;
+                        _prevGapErrTime = t;
+                        _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        Phase = MergePhase.Merge;
+                        Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s (velErr={gsVelErr:F2} m/s)");
+                    }
                 }
                 break;
 
@@ -507,6 +706,10 @@ public class NashCoordinator : MonoBehaviour
                         _phaseHoldTimer = 0f;
                         _latNash?.Reset();         // clear warm-start from Merge so Following starts fresh
                         _latWarmStartDone = false; // re-seed from current a_lat at first Following tick
+                        System.Array.Clear(_conflictBuf, 0, ConflictBufLen);
+                        _conflictIdx = 0;
+                        _qyPrev = 0f;  // force Q1 update on first Following tick
+
                         Debug.Log($"[NashCoordinator] MERGE → FOLLOWING at t={t:F1}s");
                     }
                 }
@@ -517,25 +720,99 @@ public class NashCoordinator : MonoBehaviour
                 break;
 
             case MergePhase.Following:
+            {
+                // Hysteresis: if gap diverges significantly for long enough → re-enter Merge.
+                // Threshold is intentionally looser than Merge→Following entry conditions.
+                var fLeader = _mergeLocked ? _lockedLeader : FindLeader(platoon);
+                if (fLeader != null)
+                {
+                    float fGap    = fLeader.GetPosition().z - ego.GetPosition().z
+                                  - fLeader.GetLength() * 0.5f - ego.GetLength() * 0.5f;
+                    float fDesGap = settings.SafetyField.StandstillDist
+                                  + settings.SafetyField.PlatoonTimeGap * ego.GetVx();
+                    float fGapFrac = Mathf.Abs(fGap - fDesGap) / Mathf.Max(fDesGap, 1e-3f);
+
+                    // Divergence rate: positive = gap growing (ego falling behind)
+                    float elapsed = t - _prevGapTime;
+                    float gapDivRate = elapsed > 0.05f ? (fGap - _prevGap) / elapsed : 0f;
+                    _prevGap     = fGap;
+                    _prevGapTime = t;
+
+                    // Lateral exit: immediate re-Merge when ego leaves the quarter-lane band.
+                    float fYErr       = -ego.GetY() - platoonLaneY;
+                    float quarterLane = laneWidth * 0.25f;
+                    if (Mathf.Abs(fYErr) > quarterLane)
+                    {
+                        _prevGapErr        = fGap - fDesGap;
+                        _prevGapErrTime    = t;
+                        _followingDivTimer = 0f;
+                        _phaseHoldTimer    = 0f;
+                        _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        Phase = MergePhase.Merge;
+                        Debug.Log($"[NashCoordinator] FOLLOWING → MERGE (lateral) at t={t:F1}s yErr={fYErr:F3}m > quarterLane={quarterLane:F3}m");
+                        break;
+                    }
+
+                    // Longitudinal divergence: hold timer before re-entering Merge.
+                    bool tooBig    = fGapFrac > settings.Timing.FollowingHysteresisGapFrac;
+                    bool diverging = gapDivRate > settings.Timing.FollowingHysteresisDivRate;
+
+                    if (tooBig || diverging)
+                        _followingDivTimer += dt;
+                    else
+                        _followingDivTimer = 0f;
+
+                    if (_followingDivTimer >= settings.Timing.FollowingHysteresisHoldTime)
+                    {
+                        _prevGapErr        = fGap - fDesGap;
+                        _prevGapErrTime    = t;
+                        _followingDivTimer = 0f;
+                        _phaseHoldTimer    = 0f;
+                        _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        Phase = MergePhase.Merge;
+                        Debug.Log($"[NashCoordinator] FOLLOWING → MERGE (longitudinal) at t={t:F1}s " +
+                                  $"gapFrac={fGapFrac:F2} divRate={gapDivRate:F2} " +
+                                  $"(tooBig={tooBig} diverging={diverging})");
+                    }
+                }
                 break;
+            }
         }
     }
 
     bool IsMergeComplete(AdvancedBicycleModel[] platoon)
     {
-        bool yOk  = Mathf.Abs(-ego.GetY() - platoonLaneY) < 0.3f;
-        bool psiOk = Mathf.Abs(ego.GetPsi())               < 0.05f;
+        bool yOk   = Mathf.Abs(-ego.GetY() - platoonLaneY) < 0.3f;
+        bool psiOk = Mathf.Abs(ego.GetPsi())                < 0.05f;
 
         var leader = _mergeLocked ? _lockedLeader : FindLeader(platoon);
-        bool gapOk = true;
+        bool gapOk         = true;
+        bool velOk         = true;
+        bool convergingOk  = true;
         if (leader != null)
         {
-            float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+            float gap    = leader.GetPosition().z - ego.GetPosition().z
+                         - leader.GetLength() / 2f - ego.GetLength() / 2f;
             float desGap = settings.SafetyField.StandstillDist
                          + settings.SafetyField.PlatoonTimeGap * ego.GetVx();
-            gapOk = Mathf.Abs(gap - desGap) / Mathf.Max(desGap, 1e-3f) < 0.20f;
+            float gapErr = gap - desGap;
+
+            gapOk = Mathf.Abs(gapErr) / Mathf.Max(desGap, 1e-3f)
+                  < settings.Timing.MergeGapTolerance;
+            velOk = Mathf.Abs(ego.GetVx() - leader.GetVx())
+                  < settings.Timing.MergeVelTolerance;
+
+            // Gap convergence: |d(gap_err)/dt| must be small (gap settling, not drifting)
+            float elapsed = Time.fixedTime - _prevGapErrTime;
+            if (elapsed > 0.05f)
+            {
+                float gapErrDot    = (gapErr - _prevGapErr) / elapsed;
+                convergingOk       = Mathf.Abs(gapErrDot) < settings.Timing.MergeGapConvergenceRate;
+                _prevGapErr        = gapErr;
+                _prevGapErrTime    = Time.fixedTime;
+            }
         }
-        return yOk && psiOk && gapOk;
+        return yOk && psiOk && gapOk && velOk && convergingOk;
     }
 
     // =========================================================================
@@ -544,7 +821,7 @@ public class NashCoordinator : MonoBehaviour
 
     float LongGapError(AdvancedBicycleModel leader)
     {
-        float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+        float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
         float desGap = settings.SafetyField.StandstillDist
                      + settings.SafetyField.PlatoonTimeGap * ego.GetVx();
         return desGap - gap;   // positive = too close
@@ -577,10 +854,16 @@ public class NashCoordinator : MonoBehaviour
         AdvancedBicycleModel best = null;
         float minD = float.MaxValue;
         float egoZ = ego.GetPosition().z;
+        // A platoon vehicle whose bumper-to-bumper gap to ego is negative is
+        // laterally parallel — ego will merge ahead of it, so it is a follower.
         foreach (var v in platoon)
         {
             if (v == null) continue;
             float d = v.GetPosition().z - egoZ;
+            float halfSum = v.GetLength() * 0.5f + ego.GetLength() * 0.5f;
+            // Skip vehicles laterally parallel to ego (|d| <= halfSum):
+            // ego is merging ahead of them, so they become followers.
+            if (Mathf.Abs(d) <= halfSum) continue;
             if (d > 0f && d < minD) { minD = d; best = v; }
         }
         return best;
@@ -595,7 +878,10 @@ public class NashCoordinator : MonoBehaviour
         {
             if (v == null) continue;
             float d = v.GetPosition().z - egoZ;
-            if (d < 0f && d > maxD) { maxD = d; best = v; }
+            float halfSum = v.GetLength() * 0.5f + ego.GetLength() * 0.5f;
+            // Vehicles parallel to ego (|d| <= halfSum) or behind are followers.
+            if (d > halfSum) continue;  // clearly ahead → leader
+            if (d > maxD) { maxD = d; best = v; }
         }
         return best;
     }

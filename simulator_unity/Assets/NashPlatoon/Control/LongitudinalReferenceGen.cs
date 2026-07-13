@@ -32,26 +32,52 @@ public class LongitudinalReferenceGen
         AdvancedBicycleModel ego,
         AdvancedBicycleModel leader,
         float platoonTargetVelocity,
-        int Np, float dt)
+        MergePhase phase,
+        float aMin, float aMax,
+        int Np, float dt,
+        VirtualLeaderVehicle virtualLeader = null)
     {
         float x  = ego.GetX();
         float vx = ego.GetVx();
 
-        float lx = leader != null ? leader.GetPosition().z : float.MaxValue;
-        float lv = leader != null ? leader.GetVx() : platoonTargetVelocity;
-
         float desGap = _sf.StandstillDist + _c.RajamaniH * vx;
         float detectionRange = _c.DetectionRange;
 
-        float[] ref_ = new float[Np * 2];
-
-        // CATCHUP: leader exists, far behind (gap > 2×desGap), AND platoon significantly
-        // faster (lv > vx+2). Set reference = platoon velocity for all steps so the Nash
-        // QP sees a ~(lv-vx) velocity tracking error at every step and saturates at U1Max.
+        float lx, lv, lHalfLen;
         if (leader != null)
         {
-            float initGap = lx - x - leader.GetLength();
-            if (initGap > 2f * desGap && lv > vx + 2f)
+            lx       = leader.GetPosition().z;
+            lv       = leader.GetVx();
+            lHalfLen = leader.GetLength() / 2f;
+        }
+        else if (virtualLeader != null && virtualLeader.IsActive)
+        {
+            // Use virtual leader (mirrors Car1) as reference — same position and velocity
+            // as the actual platoon lead, so R1 sees a real gap error and velocity error.
+            lx       = virtualLeader.GetPositionZ();
+            lv       = virtualLeader.GetVx();
+            lHalfLen = virtualLeader.GetLength() / 2f;
+        }
+        else
+        {
+            // Fallback: virtual point at desGap(targetVelocity), cruising at target speed.
+            lv       = platoonTargetVelocity;
+            lHalfLen = ego.GetLength() / 2f;
+            float desGapAtTarget = _sf.StandstillDist + _c.RajamaniH * platoonTargetVelocity;
+            lx = x + desGapAtTarget + ego.GetLength() / 2f + lHalfLen;
+        }
+
+        float[] ref_ = new float[Np * 2];
+
+        // CATCHUP: leader (real or virtual) exists AND either:
+        //   (a) gap > 2×desGap AND lv > vx+2  — classic far-behind case
+        //   (b) lv > vx + CatchupVelThreshold  — platoon significantly faster regardless of gap
+        // Set reference = platoon velocity for all steps so the Nash QP sees a ~(lv-vx)
+        // velocity tracking error at every step and saturates at U1Max.
+        if (leader != null || (virtualLeader != null && virtualLeader.IsActive))
+        {
+            float initGap = lx - x - lHalfLen - ego.GetLength() / 2f;
+            if ((initGap > 2f * desGap && lv > vx + 2f) || lv > vx + _c.CatchupVelThreshold)
             {
                 float xk = x;
                 for (int k = 0; k < Np; k++)
@@ -67,27 +93,28 @@ public class LongitudinalReferenceGen
         for (int k = 0; k < Np; k++)
         {
             float a;
-            float gap = lx - x - (leader != null ? leader.GetLength() : 0f);
+            float gap = lx - x - lHalfLen - ego.GetLength() / 2f;
 
-            if (leader == null || gap > detectionRange)
+            if (gap > detectionRange)
             {
-                // CRUISE: IDM free-road toward platoon speed
+                // CRUISE: IDM free-road toward platoon speed (real leader very far)
                 float ratio = platoonTargetVelocity > 0.01f
                             ? vx / (platoonTargetVelocity * _c.CatchupMultiplier)
                             : 0f;
                 a = _c.K1Ctg > 0
                     ? Mathf.Clamp(
-                        _c.IdmAMax * (1f - Mathf.Pow(Mathf.Clamp01(ratio), _c.FreeDelta)),
-                        _c.MaxEmergDecel, _c.IdmAMax)
+                        _c.IdmAMax * (1f - Mathf.Pow(ratio, _c.FreeDelta)),
+                        aMin, aMax)
                     : 0f;
             }
             else
             {
-                // TTC check
+                // TTC check (virtual leader has lv=targetVelocity, never a collision risk)
                 float relVel = vx - lv;
                 float ttc    = relVel > 0.1f ? gap / relVel : 1e6f;
                 float minCritGap = _c.MinCritGapOffset
-                                 + (leader != null ? leader.GetLength() * 0.5f : 0f);
+                                 + lHalfLen
+                                 + ego.GetLength() * 0.5f;
 
                 if (ttc < _c.TtcThreshold || gap < minCritGap)
                 {
@@ -98,30 +125,42 @@ public class LongitudinalReferenceGen
                 {
                     // TRANSITIONAL: Rajamani parabolic + CTG
                     float gapError  = gap - desGap;     // >0 too far, <0 too close
-                    float vTarget   = lv + Mathf.Sign(gapError)
-                                    * Mathf.Sqrt(2f * _c.AComfort * Mathf.Abs(gapError));
-                    float aParabola = _c.KV * (vTarget - vx);
 
-                    // Blend with CTG for small gap errors (quadratic — mirrors coordinator._long_sys_ref)
-                    if (Mathf.Abs(gapError) < 5f)
+                    // In FOLLOWING with small gap error: skip gap correction and track
+                    // leader velocity only. Prevents R1 from generating non-zero acceleration
+                    // while the driver (correctly) releases the pedal, which would cause
+                    // permanent u1/u2 cancellation at near-zero net output.
+                    if (phase == MergePhase.Following && Mathf.Abs(gapError) < _c.FollowingGapDeadband)
                     {
-                        float aDot  = lv - vx;
-                        float aCtg  = _c.K1Ctg * gapError + _c.K2Ctg * aDot;
-                        float gapMag = Mathf.Abs(gapError);
-                        float blend  = Mathf.Pow(1f - gapMag / 5f, 2f);
-                        a = (1f - blend) * aParabola + blend * aCtg;
+                        a = _c.KV * (lv - vx);
                     }
                     else
                     {
-                        a = aParabola;
+                        float vTarget   = lv + Mathf.Sign(gapError)
+                                        * Mathf.Sqrt(2f * _c.AComfort * Mathf.Abs(gapError));
+                        float aParabola = _c.KV * (vTarget - vx);
+
+                        // Blend with CTG for small gap errors (quadratic — mirrors coordinator._long_sys_ref)
+                        if (Mathf.Abs(gapError) < 5f)
+                        {
+                            float aDot  = lv - vx;
+                            float aCtg  = _c.K1Ctg * gapError + _c.K2Ctg * aDot;
+                            float gapMag = Mathf.Abs(gapError);
+                            float blend  = Mathf.Pow(1f - gapMag / 5f, 2f);
+                            a = (1f - blend) * aParabola + blend * aCtg;
+                        }
+                        else
+                        {
+                            a = aParabola;
+                        }
                     }
-                    a = Mathf.Clamp(a, _c.MaxEmergDecel, _c.IdmAMax);
+                    a = Mathf.Clamp(a, aMin, aMax);
                 }
             }
 
             vx = Mathf.Clamp(vx + a * dt, 0f, 50f);
             x += vx * dt;
-            if (leader != null) lx += lv * dt;
+            lx += lv * dt;
 
             ref_[2 * k]     = x;
             ref_[2 * k + 1] = vx;
@@ -199,11 +238,23 @@ public class LongitudinalReferenceGen
         bool hasLeader = (leader != null) &&
                          (phase != MergePhase.Approach) &&
                          (phase != MergePhase.GapSearch);
-        float vRatioIdm = vx / Mathf.Max(targetVelocity, 1f);
-        float a_idm     = aMax * (1f - Mathf.Pow(Mathf.Clamp01(vRatioIdm), _c.IdmDelta));
+        float a_idm;
+        if (!hasLeader && phase == MergePhase.Following)
+        {
+            // Ego is first in platoon — no vehicle ahead to follow and no target
+            // velocity visible to the driver.  The natural attractor is cruise:
+            // maintain current speed, neither accelerate nor brake.
+            a_idm = 0f;
+        }
+        else
+        {
+            float vRatioIdm = vx / Mathf.Max(targetVelocity, 1f);
+            // No Clamp01: ratio > 1 when vx > target → a_idm < 0 → human attractor decelerates.
+            a_idm = aMax * (1f - Mathf.Pow(vRatioIdm, _c.IdmDelta));
+        }
         if (hasLeader)
         {
-            float gap   = leader.GetX() - x - leader.GetLength();
+            float gap   = leader.GetX() - x - leader.GetLength() / 2f - ego.GetLength() / 2f;
             float dv    = vx - leader.GetVx();
             float sStar = _c.IdmS0 + vx * _c.IdmPlanT
                         + vx * dv / (2f * Mathf.Sqrt(Mathf.Max(aMax * _c.IdmPlanB, 1e-6f)));

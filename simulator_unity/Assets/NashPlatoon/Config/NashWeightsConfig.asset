@@ -18,21 +18,38 @@ MonoBehaviour:
   Q_vel_terminal: 6000
   R1_long: 75000
   R2_long: 120000
-  U1Min: -8
-  U1Max: 5
-  U2Min: -5
-  U2Max: 4
-  Du1Max: 1.5
+  R2LongStart: 120000
+  R2LongFollow: 40000
+  R2LongEmaAlpha: 0.05
+  R2LongUpdateThreshold: 50
+  R2ActivityMinScale: 0.25
+  U1Min: -6
+  U1Max: 3
+  U2Min: -6
+  U2Max: 3
+  Du1Max: 15
   Du2Max: 2
   VMin: 0
   VMax: 50
   GapMin: 7
-  Q_y: 800
-  Q_psi: 10000
-  Q_y_terminal: 8000
-  Q_psi_terminal: 40000
-  R1_lat: 50000
-  R2_lat: 50000
+  Q_y: 5000
+  Q_psi: 2000
+  Q_y_terminal: 20000
+  Q_psi_terminal: 8000
+  R1_lat: 250000
+  R2_lat: 250000
+  R2LatStart: 250000
+  R2LatFollow: 30000
+  R2LatEmaAlpha: 0.05
+  R2LatUpdateThreshold: 200
+  R2LatActivityMinScale: 0.25
+  FollowingYDeadband: 0.03
+  R2LatFree: 250000
+  Q_y_BeyondBound: 150000
+  Q_psi_BeyondBound: 8000
+  Q_yTerm_BeyondBound: 80000
+  Q_psiTerm_BeyondBound: 20000
+  Q_LatUpdateThreshold: 500
   DeltaMin: -0.436
   DeltaMax: 0.436
   LatJerkMaxHuman: 5
@@ -42,4 +59,4 @@ MonoBehaviour:
   IbrTol: 0.0001
   SigmaK: 1
   Ell: 2
-  GammaRisk: 0.5
+  GammaRisk: 0

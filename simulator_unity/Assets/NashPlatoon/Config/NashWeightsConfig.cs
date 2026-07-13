@@ -24,10 +24,14 @@ public class NashWeightsConfig : ScriptableObject {
     // activity in [0, 0.3] → scale ramps from 1 → R2ActivityMinScale.
     public float R2ActivityMinScale = 0.25f;
 
-    [Header("Long constraints")]
-    public float U1Min = -7f, U1Max = 4f;
-    public float U2Min = -4f, U2Max = 3f;  // LONG_NASH_U2_MIN=-4, U2_MAX=3
-    public float Du1Max = 1.5f, Du2Max = 2.0f;
+    // Kennedy 2023 (MPC Human Platooning): a_min=-6, a_max=3 m/s² for all vehicles
+    // (autonomous and human-driven alike), "based on performance of an average passenger
+    // vehicle and comfort of passengers". Physical bounds from GetPhysicalAccelBounds()
+    // further tighten these per vx; uShared = Clamp(u1+u2, aMin, aMax) enforces the joint limit.
+    [Header("Long constraints (Kennedy 2023: a_min=-6, a_max=3 m/s²)")]
+    public float U1Min = -6f, U1Max = 3f;
+    public float U2Min = -6f, U2Max = 3f;
+    public float Du1Max = 15f, Du2Max = 2.0f;
     public float VMin = 0f, VMax = 50f;
     public float GapMin = 7f;
 
@@ -47,7 +51,7 @@ public class NashWeightsConfig : ScriptableObject {
     [Header("Lat — Adaptive R2 EMA (R2LatStart → R2LatFollow per l_n)")]
     // R2LatFollow < R1_lat so driver has higher authority once centred (Na et al. 2022).
     public float R2LatStart           = 250000f;  // R2 when far from target lane
-    public float R2LatFollow          =  75000f;  // R2 once lane-centred (< R1_lat=250000)
+    public float R2LatFollow          =  30000f;  // R2 once lane-centred (< R1_lat=250000)
     public float R2LatEmaAlpha        =    0.05f;
     public float R2LatUpdateThreshold =   200f;
 
@@ -55,6 +59,21 @@ public class NashWeightsConfig : ScriptableObject {
     // When driver actively steers, R2 scales down to R2LatFollow × R2LatActivityMinScale.
     // steering in [0, 0.3] → scale ramps from 1 → R2LatActivityMinScale.
     public float R2LatActivityMinScale = 0.25f;
+
+    [Header("Lat — Following boundary weights")]
+    // In Following: beyondFrac starts rising above FollowingYDeadband (not quarterLane).
+    // Small deadband (3 cm) ensures even minor lane offsets trigger Q_y correction,
+    // preventing permanent u1/u2 cancellation when y_err < quarterLane.
+    // In Merge the wider quarterLane deadband is used for a softer transition.
+    public float FollowingYDeadband = 0.03f;  // y_err threshold for beyondFrac in Following [m]
+    // Inside deadband: R2=R2LatFree (large → driver feels free), Q_y=Q_y (low).
+    // Outside deadband: R2 lerps toward R2LatStart, Q_y lerps toward Q_y_BeyondBound.
+    public float R2LatFree         = 250000f; // R2 inside deadband (driver feels free)
+    public float Q_y_BeyondBound   = 150000f; // Q_y outside deadband (strong correction pull)
+    public float Q_psi_BeyondBound =   8000f; // Q_psi outside quarter-lane
+    public float Q_yTerm_BeyondBound   = 80000f; // Q_y_terminal outside quarter-lane
+    public float Q_psiTerm_BeyondBound = 20000f; // Q_psi_terminal outside quarter-lane
+    public float Q_LatUpdateThreshold  =   500f;  // min |ΔQ_y| before triggering UpdateQ1
 
     [Header("Lat constraints")]
     public float DeltaMin = -0.436f, DeltaMax = 0.436f;

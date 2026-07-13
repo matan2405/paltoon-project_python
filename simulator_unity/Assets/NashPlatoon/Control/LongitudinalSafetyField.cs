@@ -35,7 +35,96 @@ public class LongitudinalSafetyField
         _drFilt = cfg.LongDriverRisk;
     }
 
-    // ── Public entry point ────────────────────────────────────────────────────
+    // ── Public entry points ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// Variant for Following phase with no real leader: uses a virtual leader
+    /// (Kennedy 2023) so LeaderForceRaw receives a valid gap and velocity.
+    /// </summary>
+    public float ComputeWithVirtual(
+        AdvancedBicycleModel ego,
+        VirtualLeaderVehicle virt,
+        AdvancedBicycleModel follower,
+        MergePhase phase)
+    {
+        float vx = ego.GetVx();
+        var (s, mo, ri, dr) = DsfParams(vx, hasLeader: true, hasFollower: follower != null);
+
+        float desGap = _c.StandstillDist + _c.PlatoonTimeGap * vx;
+
+        // Virtual leader force (attractive when ego is too fast, repulsive when too slow)
+        float egoZ  = ego.GetPosition().z;
+        float egoL  = ego.GetLength();
+        float virtZ = virt.GetPositionZ();
+        float gap   = virtZ - virt.GetLength() * 0.5f - egoZ - egoL * 0.5f;
+
+        // Virtual mirrors Car1: gap < 0 means data inconsistency, not a real collision.
+        if (gap < 0f)
+        {
+            LastRaw = 0f; LastGap = gap; LastTTC = 999f;
+            _forceFilt = _c.LongEmaAlpha * 0f + (1f - _c.LongEmaAlpha) * _forceFilt;
+            return _forceFilt;
+        }
+
+        float gapErr = desGap - gap;
+        float vRel   = vx - virt.GetVx();
+
+        float fLeader;
+        if (gap < _c.LongMinSafeDist)
+            fLeader = _c.LongMaxForce;
+        else if (gap < _c.LongEmergencyDist)
+        {
+            float t2 = 1f - (gap - _c.LongMinSafeDist) /
+                       Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            fLeader = t2 * _c.LongMaxForce;
+        }
+        else if (gapErr <= 0f)
+        {
+            // Gap >= desired: attractive pull toward virtual leader
+            fLeader = Mathf.Clamp(
+                gapErr / Mathf.Max(desGap, 1f) * _c.LongMaxForce,
+                -0.25f * _c.LongMaxForce, 0f);
+        }
+        else
+        {
+            float rEll    = gapErr / (s + _c.LongEpsilon);
+            float potential = (mo * ri) / ((rEll + _c.LongEpsilon) * (rEll + _c.LongEpsilon));
+            float wDist   = Mathf.Exp(-gapErr / _c.LongDistanceDecay);
+            float wVel    = Mathf.Exp(Mathf.Max(0f, vRel) / 5f);
+            float wRisk   = 1f + dr;
+            fLeader = Mathf.Min(potential * wDist * wVel * wRisk, _c.LongMaxForce);
+        }
+
+        // Soft transition: in Following phase, scale by (gapErr/threshold)²
+        if (phase == MergePhase.Following)
+        {
+            float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
+            if (thr > 0f)
+                fLeader *= Mathf.Min(1f, (Mathf.Abs(gapErr) / thr) * (Mathf.Abs(gapErr) / thr));
+        }
+
+        float fFollowerRaw = follower != null
+            ? FollowerForceRaw(ego, follower, s, mo, ri, dr, desGap) : 0f;
+        float fFollower = _c.LongFollowerWeight * fFollowerRaw;
+        if (phase == MergePhase.Following && follower != null)
+        {
+            float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
+            if (thr > 0f)
+            {
+                float gapR    = ego.GetPosition().z - follower.GetPosition().z - egoL * 0.5f - follower.GetLength() * 0.5f;
+                float gapErrR = Mathf.Abs(desGap - gapR);
+                fFollower *= Mathf.Min(1f, (gapErrR / thr) * (gapErrR / thr));
+            }
+        }
+
+        float raw = fLeader + fFollower;
+        LastRaw = raw;
+        LastGap = gap;
+        LastTTC = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+
+        _forceFilt = _c.LongEmaAlpha * raw + (1f - _c.LongEmaAlpha) * _forceFilt;
+        return _forceFilt;
+    }
 
     /// <summary>
     /// Compute total EMA-filtered longitudinal safety force [N].
@@ -71,13 +160,13 @@ public class LongitudinalSafetyField
             float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
             if (thr > 0f && hasLeader)
             {
-                float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+                float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
                 float gapErr = Mathf.Abs(desGap - gap);
                 fLeader   *= Mathf.Min(1f, (gapErr / thr) * (gapErr / thr));
             }
             if (thr > 0f && hasFollower)
             {
-                float gapR    = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength();
+                float gapR    = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength() / 2f - follower.GetLength() / 2f;
                 float gapErrR = Mathf.Abs(desGap - gapR);
                 fFollower *= Mathf.Min(1f, (gapErrR / thr) * (gapErrR / thr));
             }
@@ -89,7 +178,7 @@ public class LongitudinalSafetyField
         // Update gap/TTC diagnostics from leader
         if (hasLeader)
         {
-            float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+            float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
             float vRel = ego.GetVx() - leader.GetVx();
             LastGap = gap;
             LastTTC = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
@@ -160,7 +249,7 @@ public class LongitudinalSafetyField
         AdvancedBicycleModel ego, AdvancedBicycleModel leader,
         float s, float mo, float ri, float dr, float desGap)
     {
-        float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength();
+        float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
 
         // Hard safety zones (inner = MIN_SAFE, outer = EMERGENCY_BRAKE)
         if (gap < _c.LongMinSafeDist)
@@ -183,19 +272,31 @@ public class LongitudinalSafetyField
                 -0.25f * _c.LongMaxForce, 0f);
         }
 
-        float rEll     = gapErr / (s + _c.LongEpsilon);
+        float rEll    = gapErr / (s + _c.LongEpsilon);
         float potential = (mo * ri) / ((rEll + _c.LongEpsilon) * (rEll + _c.LongEpsilon));
-        float wDist    = Mathf.Exp(-gapErr / _c.LongDistanceDecay);
-        float wVel     = Mathf.Exp(Mathf.Max(0f, vRel) / 5f);
-        float wRisk    = 1f + dr;
-        return Mathf.Min(potential * wDist * wVel * wRisk, _c.LongMaxForce);
+        float wDist   = Mathf.Exp(-gapErr / _c.LongDistanceDecay);
+        float wVel    = Mathf.Exp(Mathf.Max(0f, vRel) / 5f);
+        float wRisk   = 1f + dr;
+        float elliptic = potential * wDist * wVel * wRisk;
+
+        // TTC floor: the elliptic potential has a dead zone at large gapErr
+        // (force collapses to near-zero between EmergencyDist and desGap).
+        // This floor ensures force rises monotonically as TTC falls,
+        // so authority λ does not drop while the ego is closing on the leader.
+        float ttc     = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+        float ttcFrac = 1f - Mathf.Clamp01(
+            (ttc - _c.LongTtcCritical) /
+            Mathf.Max(_c.LongTtcWarn - _c.LongTtcCritical, 1e-3f));
+        float ttcFloor = ttcFrac * _c.LongMaxForce;
+
+        return Mathf.Min(Mathf.Max(elliptic, ttcFloor), _c.LongMaxForce);
     }
 
     float FollowerForceRaw(
         AdvancedBicycleModel ego, AdvancedBicycleModel follower,
         float s, float mo, float ri, float dr, float desGap)
     {
-        float gapR = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength();
+        float gapR = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength() / 2f - follower.GetLength() / 2f;
 
         // Locked follower overtook ego (fast platoon passed stationary ego).
         // gapR < 0 means the vehicle is now ahead of ego — no follower force applies.
