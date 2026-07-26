@@ -344,7 +344,9 @@ public class AdvancedBicycleModel : MonoBehaviour
 
         // Eq. 3.11a: contact forces enter via cosδ; body resistances subtract directly (no cosδ)
         // m_eff = m + Iw/r² (Belousov Eq. 3.8)
-        float vxDot = vyS * psiDotS + (Fx_contact * cosD - Fyf * sinD - Fx_resist) / m_eff;
+        // fv gates the centripetal coupling vyS·ψ̇: physically valid at speed but
+        // undefined near vx=0 where vy/ψ̇ retain inertial values → explosion without gating.
+        float vxDot = fv * vyS * psiDotS + (Fx_contact * cosD - Fyf * sinD - Fx_resist) / m_eff;
 
         float k_vy  = vehicleParams.tireFrictionCoefficient * vehicleParams.gravity / 0.5f;
         float k_psi = vehicleParams.tireFrictionCoefficient * vehicleParams.mass
@@ -352,7 +354,9 @@ public class AdvancedBicycleModel : MonoBehaviour
                     / (4f * vehicleParams.Iz * 0.3f);
 
         // Eq. 3.11b: only front contact-patch force contributes via sinδ
-        float vyDot = (Fyf * cosD + Fyr + Fxf_contact * sinD) / m - vxS * psiDotS
+        // fv gates -vxS·ψ̇ for the same reason as vyS·ψ̇ in vxDot: near vx=0 this
+        // coupling loses physical meaning and amplifies vy/ψ̇ residuals.
+        float vyDot = (Fyf * cosD + Fyr + Fxf_contact * sinD) / m - fv * vxS * psiDotS
                     - (1f - fv) * k_vy * vyS;
 
         // Eq. 3.11c: only front contact-patch force generates yaw moment via sinδ
@@ -472,45 +476,77 @@ public class AdvancedBicycleModel : MonoBehaviour
         return Fx_tot / vehicleParams.mass;
     }
 
-    // Physical acceleration bounds [m/s²] derived from Eq. 3.11a (δ≈0, vy·ψ̇≈0):
-    //   m_eff · v̇x = Fx_contact − Fx_resist
-    // aMax: full-throttle net (Fxf_engine_max − Faero − Rr) / m_eff
-    // aMin: full-brake + engine braking (−FbrakeMax − F_engBrk − Faero − Rr) / m_eff
-    // Uses m_eff (Belousov Eq. 3.8) and the same resistance terms as FixedUpdate.
+    // Physical acceleration bounds [m/s²] from the coupled Eq. 3.11a:
+    //   m·(v̇x − vy·ψ̇) = Fxf·cosδ + Fxr − Fyf·sinδ − Ra − Rr
+    // aMax: full-throttle net (Fxf_engine_max·cosδ − Faero − Rr + F_couple) / m
+    // aMin: full-brake + engine braking (−FbrakeMax − F_engBrk − Faero − Rr + F_couple) / m
     public void GetPhysicalAccelBounds(out float aMin, out float aMax)
     {
+        float m     = vehicleParams.mass;
+        float delta = angles.average;
+        float cosD  = Mathf.Cos(delta);
+        float sinD  = Mathf.Sin(delta);
+
+        float vxSafe = Mathf.Max(Mathf.Abs(vx), 1.0f);
+        float fv     = ((float)System.Math.Tanh(10.0 * Mathf.Abs(vx) - 8.0) + 1f) / 2f;
+        float alphaF = fv * (delta - Mathf.Atan2(vyBody + vehicleParams.lf * psiDot, vxSafe));
+        float mu     = vehicleParams.tireFrictionCoefficient;
+        float Fz_f   = m * vehicleParams.gravity * vehicleParams.lr
+                     / (vehicleParams.lf + vehicleParams.lr) / 2f;
+        float Fyf    = 2f * TireForce(alphaF, vehicleParams.Caf, mu, Fz_f);
+
         float Faero = 0.5f * 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea * vx * vx;
         float Cr    = 0.012f * (1f + vx * 0.008f);
-        float Frr   = vehicleParams.mass * vehicleParams.gravity * Cr; // Rxf + Rxr
+        float Frr   = m * vehicleParams.gravity * Cr;
 
-        float Fxf_max   = powertrain.CalculateMaxForceAtCurrentSpeed(vx);
-        aMax = (Fxf_max - Faero - Frr) / m_eff;
+        float F_couple = m * vyBody * psiDot - Fyf * sinD;
+
+        float Fxf_max = powertrain.CalculateMaxForceAtCurrentSpeed(vx);
+        aMax = (Fxf_max * cosD - Faero - Frr + F_couple) / m;
         aMax = Mathf.Max(aMax, 0f);
 
         float Fbrake_max  = brakeSystem.CalculateBrakeForce(1.0f, vx);
         float F_eng_coast = powertrain.GetEngineBrakingForce(vx);
-        aMin = -(Fbrake_max + F_eng_coast + Faero + Frr) / m_eff;
+        aMin = (-Fbrake_max - F_eng_coast - Faero - Frr + F_couple) / m;
         aMin = Mathf.Min(aMin, 0f);
     }
 
-    // a_des [m/s²] → (throttle, brake) ∈ [0,1]
+    // Control input u = a_des [m/s²] → (throttle, brake) ∈ [0,1]
     // Three zones: throttle | coast (engine braking sufficient) | brake
-    public (float throttle, float brake) AccelerationToInputs(float a_des) {
+    // Inverts the coupled Eq. 3.11a: F_need = m·a_des − F_couple + Ra + Rr
+    // In the throttle zone divides by cosδ to recover Fxf from its projected value.
+    public (float throttle, float brake) AccelerationToInputs(float a_des)
+    {
+        float m     = vehicleParams.mass;
+        float delta = angles.average;
+        float cosD  = Mathf.Cos(delta);
+        float sinD  = Mathf.Sin(delta);
+
+        float vxSafe = Mathf.Max(Mathf.Abs(vx), 1.0f);
+        float fv     = ((float)System.Math.Tanh(10.0 * Mathf.Abs(vx) - 8.0) + 1f) / 2f;
+        float alphaF = fv * (delta - Mathf.Atan2(vyBody + vehicleParams.lf * psiDot, vxSafe));
+        float mu     = vehicleParams.tireFrictionCoefficient;
+        float Fz_f   = m * vehicleParams.gravity * vehicleParams.lr
+                     / (vehicleParams.lf + vehicleParams.lr) / 2f;
+        float Fyf    = 2f * TireForce(alphaF, vehicleParams.Caf, mu, Fz_f);
+
         float Faero = 0.5f * 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea * vx * vx;
         float Cr    = 0.012f * (1f + vx * 0.008f);
-        float Frr   = vehicleParams.mass * vehicleParams.gravity * Cr;
+        float Frr   = m * vehicleParams.gravity * Cr;
 
-        float F_net = a_des * vehicleParams.mass + Faero + Frr;
-        float F_eng = -GetCoastDeceleration(vx) * vehicleParams.mass - Faero - Frr;
+        float F_couple = m * vyBody * psiDot - Fyf * sinD;
+        float F_need   = m * a_des - F_couple + Faero + Frr;
+        float F_eng    = powertrain.GetEngineBrakingForce(vx) + Faero + Frr;
 
-        if (F_net >= 0f) {
-            float maxF = powertrain.CalculateMaxForceAtCurrentSpeed(vx);
-            return (Mathf.Clamp01(maxF > 1f ? F_net / maxF : 0f), 0f);
-        } else if (F_net >= -F_eng)
+        if (F_need >= 0f) {
+            float Fxf_need = cosD > 0.01f ? F_need / cosD : F_need;
+            float maxF     = powertrain.CalculateMaxForceAtCurrentSpeed(vx);
+            return (Mathf.Clamp01(maxF > 1f ? Fxf_need / maxF : 0f), 0f);
+        } else if (F_need >= -F_eng)
             return (0f, 0f);
         else {
             float maxBrakeF = brakeSystem.CalculateBrakeForce(1.0f, vx);
-            return (0f, Mathf.Clamp01(maxBrakeF > 1f ? (-F_net - F_eng) / maxBrakeF : 0f));
+            return (0f, Mathf.Clamp01(maxBrakeF > 1f ? (-F_need - F_eng) / maxBrakeF : 0f));
         }
     }
 }
