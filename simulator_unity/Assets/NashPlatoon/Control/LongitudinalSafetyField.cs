@@ -95,12 +95,21 @@ public class LongitudinalSafetyField
             fLeader = Mathf.Min(potential * wDist * wVel * wRisk, _c.LongMaxForce);
         }
 
-        // Soft transition: in Following phase, scale by (gapErr/threshold)²
-        if (phase == MergePhase.Following)
+        // Soft transition: quadratic fade near desGap to prevent saturated force at small gapErr.
+        // Following: fade threshold = FollowingGapErrorFactor × desGap (comfort, ~7.5m at 50m).
+        // Merge:     fade threshold = MergeGapErrorFactor × desGap (tighter, ~4m at 50m) so
+        //            full force is still used when gapErr is large (>4m) but fades as ego settles.
+        // Critically, FollowerForceRaw is NOT faded — follower safety is unconditional.
+        if (phase == MergePhase.Following || phase == MergePhase.Merge)
         {
-            float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
+            float factor = (phase == MergePhase.Following)
+                ? _c.FollowingGapErrorFactor : _c.MergeGapErrorFactor;
+            float thr = factor * Mathf.Max(desGap, 1f);
             if (thr > 0f)
-                fLeader *= Mathf.Min(1f, (Mathf.Abs(gapErr) / thr) * (Mathf.Abs(gapErr) / thr));
+            {
+                float absGapErr = Mathf.Abs(gapErr);
+                fLeader *= Mathf.Min(1f, (absGapErr / thr) * (absGapErr / thr));
+            }
         }
 
         float fFollowerRaw = follower != null
@@ -153,18 +162,24 @@ public class LongitudinalSafetyField
 
         float fFollower = _c.LongFollowerWeight * fFollowerRaw;
 
-        // Quadratic soft transition in FOLLOWING (mirrors _apply_soft_transition,
-        // applied SEPARATELY to leader and follower with their own gap errors).
-        if (phase == MergePhase.Following)
+        // Quadratic soft transition in FOLLOWING and MERGE.
+        // Prevents the elliptic potential (which is >> LongMaxForce for all gapErr>0)
+        // from saturating to LongMaxForce when the gap error is already small.
+        // Following: factor=FollowingGapErrorFactor (large threshold, comfort priority).
+        // Merge:     factor=MergeGapErrorFactor (smaller threshold so full force until ~4m err).
+        // FollowerForceRaw is intentionally NOT faded — follower safety is unconditional.
+        if (phase == MergePhase.Following || phase == MergePhase.Merge)
         {
-            float thr = _c.FollowingGapErrorFactor * Mathf.Max(desGap, 1f);
+            float factor = (phase == MergePhase.Following)
+                ? _c.FollowingGapErrorFactor : _c.MergeGapErrorFactor;
+            float thr = factor * Mathf.Max(desGap, 1f);
             if (thr > 0f && hasLeader)
             {
                 float gap    = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
                 float gapErr = Mathf.Abs(desGap - gap);
-                fLeader   *= Mathf.Min(1f, (gapErr / thr) * (gapErr / thr));
+                fLeader *= Mathf.Min(1f, (gapErr / thr) * (gapErr / thr));
             }
-            if (thr > 0f && hasFollower)
+            if (phase == MergePhase.Following && thr > 0f && hasFollower)
             {
                 float gapR    = ego.GetPosition().z - follower.GetPosition().z - ego.GetLength() / 2f - follower.GetLength() / 2f;
                 float gapErrR = Mathf.Abs(desGap - gapR);
@@ -251,6 +266,12 @@ public class LongitudinalSafetyField
     {
         float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
 
+        // Ego overtook its locked leader (gap < 0): return strong attractive (negative) force.
+        // Without this, gap<0 satisfies gap<LongMinSafeDist and returns +LongMaxForce (repulsive),
+        // which pushes ego further ahead and breaks the authority loop.
+        if (gap < 0f)
+            return Mathf.Clamp(gap / _c.LongDistanceDecay * _c.LongMaxForce, -_c.LongMaxForce, 0f);
+
         // Hard safety zones (inner = MIN_SAFE, outer = EMERGENCY_BRAKE)
         if (gap < _c.LongMinSafeDist)
             return _c.LongMaxForce;
@@ -279,12 +300,13 @@ public class LongitudinalSafetyField
         float wRisk   = 1f + dr;
         float elliptic = potential * wDist * wVel * wRisk;
 
-        // TTC floor: the elliptic potential has a dead zone at large gapErr
-        // (force collapses to near-zero between EmergencyDist and desGap).
-        // This floor ensures force rises monotonically as TTC falls,
-        // so authority λ does not drop while the ego is closing on the leader.
-        float ttc     = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
-        float ttcFrac = 1f - Mathf.Clamp01(
+        // TTC floor: active whenever gap < desGap (ego is too close relative to desired).
+        // This prevents overtaking the locked leader at any distance, not just when
+        // physically adjacent. Without this guard the ego accelerates past the leader
+        // during GapSearch because the elliptic potential alone is too weak at mid-range.
+        // TtcCritical = 1.5 s follows FHWA SSAM / Hayward (1972).
+        float ttc      = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+        float ttcFrac  = 1f - Mathf.Clamp01(
             (ttc - _c.LongTtcCritical) /
             Mathf.Max(_c.LongTtcWarn - _c.LongTtcCritical, 1e-3f));
         float ttcFloor = ttcFrac * _c.LongMaxForce;

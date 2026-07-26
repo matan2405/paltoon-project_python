@@ -189,7 +189,8 @@ public class LongitudinalReferenceGen
                              AdvancedBicycleModel leader,
                              MergePhase phase,
                              float targetVelocity,
-                             int Np, float dt)
+                             int Np, float dt,
+                             float idmPlanT = -1f)   // -1 → use config default
     {
         float aMax = _c.IdmAMax;
         float aMin = -8f;
@@ -254,10 +255,11 @@ public class LongitudinalReferenceGen
         }
         if (hasLeader)
         {
-            float gap   = leader.GetX() - x - leader.GetLength() / 2f - ego.GetLength() / 2f;
-            float dv    = vx - leader.GetVx();
-            float sStar = _c.IdmS0 + vx * _c.IdmPlanT
-                        + vx * dv / (2f * Mathf.Sqrt(Mathf.Max(aMax * _c.IdmPlanB, 1e-6f)));
+            float gap    = leader.GetX() - x - leader.GetLength() / 2f - ego.GetLength() / 2f;
+            float dv     = vx - leader.GetVx();
+            float planT  = idmPlanT > 0f ? idmPlanT : _c.IdmPlanT;
+            float sStar  = _c.IdmS0 + vx * planT
+                         + vx * dv / (2f * Mathf.Sqrt(Mathf.Max(aMax * _c.IdmPlanB, 1e-6f)));
             a_idm -= aMax * Mathf.Pow(Mathf.Max(sStar, 0f) / Mathf.Max(gap, 0.1f), 2f);
         }
         a_idm = Mathf.Clamp(a_idm, aMin, aMax);

@@ -1,14 +1,13 @@
 // LateralSafetyField — Wang et al. (2015/2016) / Li et al. (2019) elliptic DSF.
 //
-// Mirrors coordinator.py _lat_safety_force():
-//   Virtual mass:     M = DsfVehicleMass * (SpeedCoeff * |v|^SpeedExp + SpeedOffset)
-//   Elliptic dist:    r* = sqrt((dx/a)^2 + (dy/b)^2);  a = max(|Δv|·Ts, AMin), b = Tau
-//   Field strength:   E  = G * M_obs / r*
-//   Kinetic correction: E *= exp(K1 * v_obs * cos(θ_v))
-//   Field force:      Fr = E * M_ego * exp(-K2 * v_ego * cos(θ_i)) * (1 + DR)
-//   Direction:        Fr *= tanh(dy / sigma)  (sign: pushes ego away from obstacle)
-//   Road boundaries:  1/dist repulsion near lane edges
-//   Output:           EMA-filtered and clamped to ±LatMaxForce
+// Wang 2016 Eq.17:  M  = DsfVehicleMass * (SpeedCoeff * |v|^SpeedExp + SpeedOffset)
+// Li 2019 Eq.12-13: r* = sqrt((dx/a)^2 + (dy/b)^2);  a = max(|Δv|·Ts, AMin), b = Tau
+// Li 2019 Eq.11:    E  = G * R_obs * M_obs / r*
+// Li 2019 Eq.18:    E *= exp(K1 * v_obs * cos(θ_v))        (kinetic correction, obstacle)
+// Li 2019 Eq.21:    Fr = E * M_ego * R_ego * exp(-K2 * v_ego * cos(θ_i)) * (1 + DR)
+// Direction:        Fr *= tanh(dy / σ)  (smooth lateral sign; σ=LatDsfSigma=0.5m, mirrors Python lateral_safety_field.py)
+// Road boundaries:  1/dist repulsion near lane edges
+// Output:           EMA-filtered and clamped to ±LatMaxForce
 using UnityEngine;
 
 public class LateralSafetyField
@@ -39,7 +38,7 @@ public class LateralSafetyField
             float obsVx = pv.GetVx();
 
             float dx = egoX - obsX;    // positive = ego ahead
-            float dy = egoY - obsY;    // positive = ego to right
+            float dy = egoY - obsY;    // positive = ego LEFT of obstacle (Belousov convention)
 
             // Elliptic distance (Li 2019, Eq. 12-13)
             float a  = Mathf.Max(Mathf.Abs(egoVx - obsVx) * _c.LatDsfTs, _c.LatDsfAMin);
@@ -48,41 +47,45 @@ public class LateralSafetyField
             float dyb = dy / b;
             float rStar = Mathf.Max(Mathf.Sqrt(dxa * dxa + dyb * dyb), _c.DsfEpsilon);
 
-            // Elliptic gradient unit vector
+            // Elliptic gradient unit vector (r* direction, used for kinetic correction)
             float rStarUx = (dx / a) / rStar;
             float rStarUy = (dy / b) / rStar;
 
-            // Virtual mass of obstacle
+            // Virtual mass of obstacle (Wang 2016, Eq. 17)
             float mObs = _c.DsfVehicleMass
                        * (_c.DsfSpeedCoeff * Mathf.Pow(Mathf.Abs(obsVx), _c.DsfSpeedExponent)
                           + _c.DsfSpeedOffset);
 
-            // Field strength (Li 2019, Eq. 11)
-            float E = _c.LatDsfG * mObs / rStar;
+            // Field strength (Li 2019, Eq. 11) — includes R_obs road condition factor
+            float E = _c.LatDsfG * _c.LatRoadConditionObs * mObs / rStar;
 
-            // Kinetic correction (Eq. 18): obstacle velocity along gradient
-            float obsVxDir = obsVx > 0.1f ? 1f : 0f;  // unit vec [1,0] if moving
-            float cosThetaV = obsVxDir * rStarUx;      // dot([1,0], rStarU)
+            // Kinetic correction (Li 2019, Eq. 18): obstacle velocity projected onto gradient
+            float obsVxDir  = Mathf.Abs(obsVx) > 0.1f ? 1f : 0f;  // unit vec [1,0] if moving
+            float cosThetaV = obsVxDir * rStarUx;                   // dot([1,0], rStarU)
             E *= Mathf.Exp(_c.LatDsfK1 * Mathf.Abs(obsVx) * cosThetaV);
 
-            // Field force (Eq. 21): ego projection on Cartesian gradient
+            // Elliptic gradient ∇(r*²) (unnormalised) — used only for cos(θ_i) (Eq. 21)
             float fcx = dx / (a * a);
             float fcy = dy / (b * b);
             float fcNorm = Mathf.Sqrt(fcx * fcx + fcy * fcy);
             float fcUx = fcNorm > 1e-9f ? fcx / fcNorm : 0f;
-            // dot([1,0], fcU) — ego moves along x-axis
+
+            // cos(θ_i): ego velocity [1,0] projected onto gradient direction (Eq. 21)
             float cosThetaI = fcUx;
 
-            float Fr = E * mEgo
+            // Field force (Li 2019, Eq. 21) — includes R_ego road condition factor
+            float Fr = E * mEgo * _c.LatRoadConditionEgo
                      * Mathf.Exp(-_c.LatDsfK2 * Mathf.Abs(egoVx) * cosThetaI)
                      * (1f + _c.LatDsfDr);
 
-            // Lateral direction: smooth tanh (push ego away from obstacle)
+            // Lateral direction: tanh(dy/σ) — smooth sign function (mirrors Python lateral_safety_field.py).
+            // Li 2019 Eq.21 gives |Fr| only; this maps dy→±1 continuously so Fr=0 when dy=0
+            // (no lateral bias when ego is directly ahead/behind) and saturates beyond σ=0.5m.
             float latDir = (float)System.Math.Tanh(dy / _c.LatDsfSigma);
             total += Fr * latDir;
         }
 
-        // Road boundary forces (mirrors coordinator _lat_safety_force)
+        // Road boundary forces
         float distRight = _c.RoadHalfWidth - egoY;
         if (distRight > 0f && distRight < _c.BoundaryProximity)
         {
