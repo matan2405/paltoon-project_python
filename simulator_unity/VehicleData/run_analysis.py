@@ -218,15 +218,24 @@ if 'psi' in ego.columns:
     ax.set_title('(c) Lateral velocity')
     ax.legend(fontsize=7); ax.grid(True); ax.set_xlabel('Time (s)')
 
-    # (d) Steering: lambda raw from Unity (right steer = +)
+    # (d) Steering: front wheel angle delta [deg] (left axis) and steering norm (right axis)
+    # Note: ego_vehicle.csv column 'lambda' = angles.average = Ackermann avg wheel angle [rad]
     ax = axes[1, 1]
+    ax2d = ax.twinx()
     shade_phases(ax, t_gaps, phase_col)
     if 'lambda' in ego.columns:
-        ax.plot(t_ego, np.degrees(ego['lambda']), 'r-', label='λ wheel angle (deg)')
+        ax.plot(t_ego, np.degrees(ego['lambda']), 'r-', label='δ front wheel angle (deg)')
     if 'steering' in ego.columns:
-        ax.plot(t_ego, ego['steering'], 'b--', lw=0.8, label='steering input (norm)')
-    ax.set_ylabel('Steering  [right = +]'); ax.set_title('(d) Steering input & wheel angle')
+        ax2d.plot(t_ego, ego['steering'], 'b--', lw=0.8, label='steering input (norm)')
+        ax2d.set_ylabel('steering input (norm)', color='blue')
+        ax2d.tick_params(axis='y', labelcolor='blue')
+    ax.set_ylabel('δ front wheel angle (deg)', color='red')
+    ax.tick_params(axis='y', labelcolor='red')
+    ax.set_title('(d) Steering input & wheel angle')
     ax.axhline(0, color='k', ls=':', lw=0.8); ax.grid(True); ax.set_xlabel('Time (s)')
+    lines1, labs1 = ax.get_legend_handles_labels()
+    lines2, labs2 = ax2d.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labs1 + labs2, fontsize=7)
 
     plt.tight_layout()
     plt.savefig(os.path.join(FIG_DIR, '5_ego_lateral.png'), dpi=120)
