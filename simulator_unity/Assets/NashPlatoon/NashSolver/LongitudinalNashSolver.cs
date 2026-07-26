@@ -72,9 +72,12 @@ namespace NashPlatoon
             AdvancedBicycleModel vehicle)
         {
             var s = new LongitudinalNashSolver(w, t);
-            // Initialise physical bounds to config defaults until first UpdatePhysicalBounds call
-            s._u1Min = w.U1Min; s._u1Max = w.U1Max;
-            s._u2Min = w.U2Min; s._u2Max = w.U2Max;
+            // Seed with wide fallback ceilings until the first UpdatePhysicalBounds call
+            // (which happens before the first Nash solve in NashCoordinator).
+            // These values must be wide enough to never constrain the physical output of
+            // GetPhysicalAccelBounds() — they are NOT tuning knobs.
+            s._u1Min = w.U1Min; s._u1Max = w.U1Max;   // e.g. -20 / +10
+            s._u2Min = w.U1Min; s._u2Max = w.U1Max;   // same plant → same ceiling
             s.InitDoubleIntegratorC();              // builds C only
             s.UpdateLinearization(vehicle, t.NashDtLong);   // builds A,B from physics
             return s;
@@ -375,16 +378,19 @@ namespace NashPlatoon
             solver.UpdateBounds(l, u);
         }
 
-        // Tighten box bounds using physical vehicle limits (called each Nash step before IBR).
-        // Config bounds U1Min/U1Max and U2Min/U2Max act as hard safety ceilings;
-        // physics bounds further restrict within them based on current vx.
-        // Stores the result so SolveNashEquilibrium uses physical bounds, not config defaults.
+        // Set QP box bounds directly from physical vehicle limits (called each Nash step).
+        // aMin/aMax come from GetPhysicalAccelBounds() — they already encode Level 1
+        // (friction, motor peak) and Level 3 (safety envelope) limits applied by the
+        // caller (NashCoordinator).  W.U1Min/U1Max are wide fallback ceilings (e.g.
+        // ±20 m/s²) that only guard against pathological Physics output — they must
+        // NOT be tuned to express comfort or driving style (Levels 4-5 belong in cost).
+        // Both players share the same physical bounds: the vehicle has one brake system.
         public void UpdatePhysicalBounds(float aMin, float aMax, float du1, float du2)
         {
-            _u1Min = Mathf.Max(W.U1Min, aMin);
+            _u1Min = Mathf.Max(W.U1Min, aMin);   // W.U1Min is a wide safety ceiling only
             _u1Max = Mathf.Min(W.U1Max, aMax);
-            _u2Min = Mathf.Max(W.U2Min, aMin);
-            _u2Max = Mathf.Min(W.U2Max, aMax);
+            _u2Min = Mathf.Max(W.U1Min, aMin);   // same physical plant → same bounds as u1
+            _u2Max = Mathf.Min(W.U1Max, aMax);
 
             UpdateBoundsForCall(_s1, _u1Min, _u1Max, du1, (float)_u1Prev);
             for (int i = 0; i < _s2.Length; i++)

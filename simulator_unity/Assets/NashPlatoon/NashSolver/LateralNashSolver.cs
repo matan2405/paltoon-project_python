@@ -52,7 +52,8 @@ namespace NashPlatoon
         float _qyTermOverride   = -1f;
         float _qpsiTermOverride = -1f;
 
-        // ── Current adaptive R2 (set by UpdateR2; used by UpdateQ1 to avoid reset) ──
+        // ── Current adaptive R1/R2 (set by UpdateR1/R2; used by UpdateQ1 to avoid reset) ──
+        float _r1Current = -1f;
         float _r2Current = -1f;
 
         // ── Linearisation cache ───────────────────────────────────────────────
@@ -154,8 +155,10 @@ namespace NashPlatoon
             BuildConstraintMatrix();
             InitOsqpSolvers();
             // Re-apply runtime overrides that were active before re-linearisation.
-            // InitOsqpSolvers builds P2 from W.R2_lat; restore the adaptive R2/Q1 state
+            // InitOsqpSolvers builds P1/P2 from W.R1/R2_lat; restore R1/R2/Q1 state
             // so a vx-triggered rebuild does not silently discard coordinator updates.
+            if (_r1Current > 0f)
+                UpdateR1(_r1Current);
             if (_r2Current > 0f)
                 UpdateR2(_r2Current);
             if (_qyOverride > 0f)
@@ -356,6 +359,17 @@ namespace NashPlatoon
                 for (int k = 0; k < _ws2[i].Length; k++) _ws2[i][k] = driverDelta;
         }
 
+        /// Hot-path R1 update: rebuild P1 with new R1 value.
+        /// Uses osqp_update_data_mat — no re-factorisation required.
+        /// Call on GapSearch entry/exit to switch between effort regimes.
+        public void UpdateR1(float r1New)
+        {
+            _r1Current = r1New;
+            double[] P1 = BuildPMatrix((double)r1New, 1.0);
+            var (P1d, _, _) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
+            _s1.UpdateP(P1d);
+        }
+
         /// Hot-path R2 update: rebuild P2 for all λ levels with new R2 value.
         /// Uses osqp_update_data_mat — no re-factorisation required.
         public void UpdateR2(float r2New)
@@ -382,8 +396,9 @@ namespace NashPlatoon
             RebuildCostMatrices();
             ApplyGpRiskHessian();
 
-            // Rebuild P1 (uses current R1_lat from W, Q encoded in HQ1H)
-            double[] P1 = BuildPMatrix((double)W.R1_lat, 1.0);
+            // Rebuild P1 — use overridden R1 if active (e.g. GapSearch), else W default.
+            double r1 = _r1Current > 0f ? _r1Current : W.R1_lat;
+            double[] P1 = BuildPMatrix(r1, 1.0);
             var (P1d, _, _) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
             _s1.UpdateP(P1d);
 
