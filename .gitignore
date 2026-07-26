@@ -53,6 +53,7 @@ simulator_unity/Assets/_Recovery.meta
 *.unitypackage.meta
 .DS_Store
 Thumbs.db
+simulator_unity/sim.slnx
 
 # --- Media (Handled by LFS) ---
 # למרות שהגדרת LFS, מומלץ לא להתעלם מהם ב-gitignore כדי ש-Git ידע לעקוב אחריהם כ-Pointers

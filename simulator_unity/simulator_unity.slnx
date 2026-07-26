@@ -5,6 +5,7 @@
   <Project Path="MCPForUnity.Runtime.csproj" />
   <Project Path="Unity.ShaderGraph.Editor.csproj" />
   <Project Path="Unity.RenderPipelines.Core.Runtime.csproj" />
+  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Unity.Mathematics.csproj" />
   <Project Path="Unity.Timeline.Editor.csproj" />
   <Project Path="Unity.Multiplayer.Center.Editor.csproj" />
@@ -32,7 +33,6 @@
   <Project Path="Unity.VisualScripting.State.Editor.csproj" />
   <Project Path="Unity.Burst.CodeGen.csproj" />
   <Project Path="Unity.VisualScripting.Flow.csproj" />
-  <Project Path="Assembly-CSharp.csproj" />
   <Project Path="Unity.PerformanceTesting.csproj" />
   <Project Path="Unity.TextMeshPro.csproj" />
   <Project Path="Unity.TextMeshPro.Editor.csproj" />
