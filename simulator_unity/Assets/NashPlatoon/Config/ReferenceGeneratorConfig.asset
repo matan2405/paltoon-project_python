@@ -23,10 +23,10 @@ MonoBehaviour:
   MaxEmergDecel: -5
   CatchupMultiplier: 1.05
   FreeDelta: 4
-  IdmAMax: 1.5
+  IdmAMax: 0.553
   IdmS0: 3.416
   IdmDelta: 4
-  IdmPlanT: 2.585
+  IdmPlanT: 1.5
   IdmPlanB: 1.649
   VelocityOffset: 0
   HumanTlc: 4.5

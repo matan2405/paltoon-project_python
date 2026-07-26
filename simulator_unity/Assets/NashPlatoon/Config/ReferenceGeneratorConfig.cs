@@ -23,10 +23,10 @@ public class ReferenceGeneratorConfig : ScriptableObject {
     // HighD-calibrated values from Zhang & Sun 2024 (passenger cars, ~68 km/h steady-state).
     // T and b are driver-dependent (not speed-dependent) → applicable to MERGE/FOLLOWING phases.
     [Header("IDM — Human longitudinal reference (HighD, Zhang & Sun 2024)")]
-    public float IdmAMax           = 1.5f;    // MOBIL_IDM_A_MAX max acceleration [m/s²]
+    public float IdmAMax           = 0.553f;  // Zhang & Sun 2024 hierarchical MA-IDM population mean α [m/s²]
     public float IdmS0             = 3.416f;  // minimum gap [m]
     public float IdmDelta          = 4.0f;    // free-road exponent
-    public float IdmPlanT          = 2.585f;  // time headway [s]
+    public float IdmPlanT          = 1.5f;    // time headway [s] — Zhang & Sun 2024 population mean
     public float IdmPlanB          = 1.649f;  // comfortable deceleration [m/s²]
 
     // ── Driver profile (normal) — Lateral reference ───────────────────────────

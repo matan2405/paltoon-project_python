@@ -24,14 +24,16 @@ public class NashWeightsConfig : ScriptableObject {
     // activity in [0, 0.3] → scale ramps from 1 → R2ActivityMinScale.
     public float R2ActivityMinScale = 0.25f;
 
-    // Kennedy 2023 (MPC Human Platooning): a_min=-6, a_max=3 m/s² for all vehicles
-    // (autonomous and human-driven alike), "based on performance of an average passenger
-    // vehicle and comfort of passengers". Physical bounds from GetPhysicalAccelBounds()
-    // further tighten these per vx; uShared = Clamp(u1+u2, aMin, aMax) enforces the joint limit.
-    [Header("Long constraints (Kennedy 2023: a_min=-6, a_max=3 m/s²)")]
-    public float U1Min = -6f, U1Max = 3f;
-    public float U2Min = -6f, U2Max = 3f;
-    public float Du1Max = 15f, Du2Max = 2.0f;
+    // Level 1-2 safety ceilings — wide enough to never constrain GetPhysicalAccelBounds().
+    // DO NOT tighten these for comfort or style (use cost weights S1/S2 for that).
+    // U2Min/U2Max are intentionally unused: UpdatePhysicalBounds() mirrors u1 bounds onto
+    // u2 because both players act through the same physical vehicle.
+    // Du2Max intentionally tighter than Du1Max: human jerk is smoothed via cost (R2),
+    // but a hard rate cap of 0.2 m/s²/step prevents inter-step oscillation from u2.
+    [Header("Long constraints — Level 1/2 ceilings (wide, not tuning knobs)")]
+    public float U1Min = -20f, U1Max = 10f;
+    public float U2Min = -20f, U2Max = 10f;   // kept for serialisation; mirrored from U1 in solver
+    public float Du1Max = 15f, Du2Max = 2.0f; // Du2Max=2→0.2 m/s²/step cap prevents u2 inter-step oscillation
     public float VMin = 0f, VMax = 50f;
     public float GapMin = 7f;
 
@@ -47,6 +49,15 @@ public class NashWeightsConfig : ScriptableObject {
     // R increased 5× to damp IBR coupling: convergence requires ||HQ1H||/R < 1.
     // With vx≈30 m/s the H matrix has large entries from the -vx·ψ coupling in Ac.
     public float R1_lat = 250000f, R2_lat = 250000f;
+
+    [Header("Lat — GapSearch effort override")]
+    // During GapSearch the goal is ψ→0 only (hold y at _gsLockedY, no lane change).
+    // R1/R2 must be reduced so the solver can apply enough δ to damp a large entry ψ
+    // (e.g. ψ=25° from driver steering before J-press). At R1=250000 the solver
+    // produces δ≈−2° which is insufficient; R1_lat_GapSearch=25000 gives δ≈−20°.
+    // Restored to R1_lat/R2_lat on GapSearch→Merge transition.
+    public float R1_lat_GapSearch = 25000f;
+    public float R2_lat_GapSearch = 25000f;
 
     [Header("Lat — Adaptive R2 EMA (R2LatStart → R2LatFollow per l_n)")]
     // R2LatFollow < R1_lat so driver has higher authority once centred (Na et al. 2022).

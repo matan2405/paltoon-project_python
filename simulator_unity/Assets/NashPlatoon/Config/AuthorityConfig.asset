@@ -16,7 +16,21 @@ MonoBehaviour:
   LongLambdaMax: 100
   LongForceMidpoint: 400
   LongSteepness: 0.015
+  LongAlphaBase: 0.05
+  LongAlphaFast: 0.12
+  AuthGapErrorMax: 10
+  AuthVelErrorMax: 1.5
+  SigmoidM1: 2
+  SigmoidM2: 0.5
   LatLambdaMin: 0.1
   LatLambdaMax: 10
   LatForceMidpoint: 200
   LatSteepness: 0.025
+  LatAlphaBase: 0.02
+  LatAlphaFast: 0.08
+  LatAlphaFastThr: 1.5
+  LatAlphaBaseThr: 0.5
+  LongLambdaMaxFollowing: 20
+  LongAlphaFollowing: 0.05
+  AuthVelErrorMaxNoLeader: 15
+  LongLambdaMaxNoLeader: 2

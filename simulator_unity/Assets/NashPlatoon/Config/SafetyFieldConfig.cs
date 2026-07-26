@@ -23,13 +23,14 @@ public class SafetyFieldConfig : ScriptableObject {
     public float LaneWidth         = 3.5f;    // LANE_WIDTH              [m]
 
     // ── Lateral DSF (Wang et al. 2015/2016, Li et al. 2019) ───────────────────────
-    // Full formula (coordinator.py _lat_safety_force):
-    //   Virtual mass:    M = DsfVehicleMass * (DsfSpeedCoeff * |v|^DsfSpeedExp + DsfSpeedOffset)
-    //   Elliptic dist:   r* = sqrt((dx/a)² + (dy/b)²);  a = max(|Δv|·Ts, AMin),  b = Tau
-    //   Field strength:  E  = G * M_obs / r*
-    //   Kinetic corr:    E *= exp(K1 * v_obs * cos(θ_v))
-    //   Field force:     Fr = E * M_ego * exp(-K2 * v_ego * cos(θ_i)) * (1+DR)
-    //   Direction:       Fr *= tanh(dy / sigma)
+    // Wang 2016 Eq.17:  M  = DsfVehicleMass * (DsfSpeedCoeff * |v|^DsfSpeedExp + DsfSpeedOffset)
+    // Li 2019 Eq.12-13: r* = sqrt((dx/a)² + (dy/b)²);  a = max(|Δv|·Ts, AMin),  b = Tau
+    // Li 2019 Eq.11:    E  = G * R_obs * M_obs / r*
+    // Li 2019 Eq.18:    E *= exp(K1 * v_obs * cos(θ_v))
+    // Li 2019 Eq.21:    Fr = E * M_ego * R_ego * exp(-K2 * v_ego * cos(θ_i)) * (1+DR)
+    // Direction:        Fr *= tanh(dy / LatDsfSigma)  — smooth lateral sign (mirrors Python lateral_safety_field.py)
+    //   Li 2019 Eq.21 gives |Fr| only; lateral direction is not defined in the paper.
+    //   tanh(dy/σ): zero at dy=0, saturates to ±1 beyond σ — avoids binary sign switch at dy=0.
     [Header("Lat — Wang et al. DSF")]
     public float LatDsfTs          = 2.0f;        // LAT_DSF_TS    TTC margin      [s]
     public float LatDsfTau         = 2.0f;        // LAT_DSF_TAU   lateral radius  [m]
@@ -37,7 +38,10 @@ public class SafetyFieldConfig : ScriptableObject {
     public float LatDsfG           = 6e-3f;       // LAT_DSF_G     field scaling constant
     public float LatDsfK1          = 0.005f;      // LAT_DSF_K1    kinetic correction (obs)
     public float LatDsfK2          = 0.005f;      // LAT_DSF_K2    kinetic correction (ego)
-    public float LatDsfDr          = 0.5f;        // LAT_DSF_DR    driver risk factor
+    public float LatDsfDr          = 0.5f;        // LAT_DSF_DR    driver risk factor (Table 1)
+    public float LatDsfSigma       = 0.5f;        // DSF_SIGMA  tanh direction-smoothing width [m] (Python SAFETY_DIRECTION_SMOOTH_SIGMA)
+    public float LatRoadConditionObs = 1.0f;      // R_obs: road condition factor for obstacle (Li 2019 Eq.11, Table 1 default=1)
+    public float LatRoadConditionEgo = 1.0f;      // R_ego: road condition factor for ego    (Li 2019 Eq.21, Table 1 default=1)
     public float DsfVehicleMass    = 1304.0f;     // DSF_VEHICLE_MASS  [kg]
     public float DsfSpeedCoeff     = 1.566e-14f;  // DSF_SPEED_COEFF
     public float DsfSpeedExponent  = 6.687f;      // DSF_SPEED_EXPONENT
@@ -45,7 +49,6 @@ public class SafetyFieldConfig : ScriptableObject {
     public float DsfEpsilon        = 1e-3f;       // DSF_EPSILON   min elliptic dist [m]
     public float LatMaxForce       = 2000.0f;     // LAT_SAFETY_MAX_FORCE  [N]
     public float LatEmaAlpha       = 0.3f;        // LAT_SAFETY_FILTER_ALPHA
-    public float LatDsfSigma       = 0.5f;        // DSF_SIGMA  tanh direction-smoothing width [m]
 
     // ── Road boundary repulsion ───────────────────────────────────────────────
     [Header("Lat — Road boundaries")]
@@ -71,7 +74,7 @@ public class SafetyFieldConfig : ScriptableObject {
     // ttcForce = ttcFrac * LongMaxForce  →  merged as max(ellipticForce, ttcForce)
     [Header("Long — TTC force floor")]
     public float LongTtcWarn     = 8.0f;  // TTC [s] at which floor starts rising
-    public float LongTtcCritical = 2.0f;  // TTC [s] at which floor reaches LongMaxForce
+    public float LongTtcCritical = 1.5f;  // TTC [s] at which floor reaches LongMaxForce (FHWA SSAM / Hayward 1972)
 
     // ── Dynamic DSF position and velocity multipliers ─────────────────────────
     [Header("Long — Dynamic DSF multipliers")]
@@ -83,4 +86,5 @@ public class SafetyFieldConfig : ScriptableObject {
     public float LongPlatoonCoherence   = 1.5f;   // LONG_SAFETY_PLATOON_COHERENCE (Ri multiplier in middle)
     public float LongFollowerWeight     = 0.5f;   // LONG_SAFETY_FOLLOWER_WEIGHT
     public float FollowingGapErrorFactor = 0.15f; // FOLLOWING_GAP_ERROR_FACTOR (soft-transition threshold)
+    public float MergeGapErrorFactor     = 0.08f; // MERGE_GAP_ERROR_FACTOR: quadratic fade at gapErr < 8% of desGap (~4m at 52m)
 }
