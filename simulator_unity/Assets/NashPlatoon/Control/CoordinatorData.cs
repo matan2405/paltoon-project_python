@@ -25,6 +25,7 @@ public class CoordinatorData
     // Diagnostics (written by NashCoordinator, read by PlatoonDataVisualizer / NashHUD)
     public float GapToLeader;   // bumper-to-bumper gap [m], 999 when no leader
     public float TTC;           // time-to-collision [s], 999 when safe
+    public float THW;           // time headway (Wang 2016) [s], 999 when stationary
     public float LongForceRaw;  // DSF force before EMA [N]
     public float R1VTarget;     // system reference velocity at k=0 [m/s]
     public float R2VTarget;     // human  reference velocity at k=0 [m/s]

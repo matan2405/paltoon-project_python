@@ -288,7 +288,7 @@ public class NashCoordinator : MonoBehaviour
             float overrideGap = overrideLeader.GetPosition().z
                               - ego.GetPosition().z
                               - overrideLeader.GetLength() / 2f - ego.GetLength() / 2f;
-            if (overrideGap < settings.SafetyField.LongMinSafeDist)
+            if (overrideGap < settings.SafetyField.ComputeMinSafeDist(ego.GetVx()))
             {
                 ego.NashBrake      = 1f;
                 ego.NashThrottle   = 0f;
@@ -486,6 +486,7 @@ public class NashCoordinator : MonoBehaviour
 
         float diagGap = _longSafety.LastGap;
         float diagTTC = _longSafety.LastTTC;
+        float diagTHW = _longSafety.LastTHW;
         float diagRaw = _longSafety.LastRaw;
         float r1VTarget = r1.Length > 1 ? r1[1] : 0f;
         float r2VTarget = r2.Length > 1 ? r2[1] : 0f;
@@ -499,6 +500,7 @@ public class NashCoordinator : MonoBehaviour
         Data.LongLambda = LongLambda; Data.LongForce = force;  Data.Phase   = Phase;
         Data.GapToLeader  = diagGap;
         Data.TTC          = diagTTC;
+        Data.THW          = diagTHW;
         Data.LongForceRaw = diagRaw;
         Data.R1VTarget    = r1VTarget;
         Data.R2VTarget    = r2VTarget;

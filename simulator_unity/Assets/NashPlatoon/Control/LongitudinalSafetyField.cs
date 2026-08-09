@@ -25,6 +25,7 @@ public class LongitudinalSafetyField
     public float LastRaw      { get; private set; }  // raw force before EMA (for diagnostics)
     public float LastGap      { get; private set; }  // bumper-to-bumper gap to leader [m]
     public float LastTTC      { get; private set; }  // time-to-collision [s], 999 when safe
+    public float LastTHW      { get; private set; }  // time headway [s] (Wang 2016), 999 when stationary
 
     public LongitudinalSafetyField(SafetyFieldConfig cfg)
     {
@@ -61,7 +62,7 @@ public class LongitudinalSafetyField
         // Virtual mirrors Car1: gap < 0 means data inconsistency, not a real collision.
         if (gap < 0f)
         {
-            LastRaw = 0f; LastGap = gap; LastTTC = 999f;
+            LastRaw = 0f; LastGap = gap; LastTTC = 999f; LastTHW = 999f;
             _forceFilt = _c.LongEmaAlpha * 0f + (1f - _c.LongEmaAlpha) * _forceFilt;
             return _forceFilt;
         }
@@ -69,13 +70,16 @@ public class LongitudinalSafetyField
         float gapErr = desGap - gap;
         float vRel   = vx - virt.GetVx();
 
+        float minSafe   = _c.ComputeMinSafeDist(vx);
+        float emergDist = _c.ComputeEmergencyDist(vx);
+
         float fLeader;
-        if (gap < _c.LongMinSafeDist)
+        if (gap < minSafe)
             fLeader = _c.LongMaxForce;
-        else if (gap < _c.LongEmergencyDist)
+        else if (gap < emergDist)
         {
-            float t2 = 1f - (gap - _c.LongMinSafeDist) /
-                       Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            float t2 = 1f - (gap - minSafe) /
+                       Mathf.Max(emergDist - minSafe, 1e-3f);
             fLeader = t2 * _c.LongMaxForce;
         }
         else if (gapErr <= 0f)
@@ -130,6 +134,7 @@ public class LongitudinalSafetyField
         LastRaw = raw;
         LastGap = gap;
         LastTTC = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+        LastTHW = (vx > 0.1f && gap > 0f) ? gap / vx : 999f;
 
         _forceFilt = _c.LongEmaAlpha * raw + (1f - _c.LongEmaAlpha) * _forceFilt;
         return _forceFilt;
@@ -190,18 +195,20 @@ public class LongitudinalSafetyField
         float raw = fLeader + fFollower;
         LastRaw = raw;
 
-        // Update gap/TTC diagnostics from leader
+        // Update gap/TTC/THW diagnostics from leader
         if (hasLeader)
         {
+            float vx  = ego.GetVx();
             float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
-            float vRel = ego.GetVx() - leader.GetVx();
+            float vRel = vx - leader.GetVx();
             LastGap = gap;
             LastTTC = (vRel > 0.1f && gap > 0f) ? gap / vRel : 999f;
+            LastTHW = (vx > 0.1f && gap > 0f) ? gap / vx : 999f;
 
             // Bypass EMA in emergency zone — filter lag causes the authority allocator
             // to see an attenuated force (0.2×Max on the first step), giving the Nash
             // insufficient authority to brake hard before impact.
-            if (gap < _c.LongEmergencyDist)
+            if (gap < _c.ComputeEmergencyDist(vx))
             {
                 _forceFilt = raw;
                 return _forceFilt;
@@ -211,6 +218,7 @@ public class LongitudinalSafetyField
         {
             LastGap = 999f;
             LastTTC = 999f;
+            LastTHW = 999f;
         }
 
         _forceFilt = _c.LongEmaAlpha * raw + (1f - _c.LongEmaAlpha) * _forceFilt;
@@ -267,18 +275,21 @@ public class LongitudinalSafetyField
         float gap = leader.GetPosition().z - ego.GetPosition().z - leader.GetLength() / 2f - ego.GetLength() / 2f;
 
         // Ego overtook its locked leader (gap < 0): return strong attractive (negative) force.
-        // Without this, gap<0 satisfies gap<LongMinSafeDist and returns +LongMaxForce (repulsive),
+        // Without this, gap<0 satisfies gap<minSafe and returns +LongMaxForce (repulsive),
         // which pushes ego further ahead and breaks the authority loop.
         if (gap < 0f)
             return Mathf.Clamp(gap / _c.LongDistanceDecay * _c.LongMaxForce, -_c.LongMaxForce, 0f);
 
+        float minSafe   = _c.ComputeMinSafeDist(ego.GetVx());
+        float emergDist = _c.ComputeEmergencyDist(ego.GetVx());
+
         // Hard safety zones (inner = MIN_SAFE, outer = EMERGENCY_BRAKE)
-        if (gap < _c.LongMinSafeDist)
+        if (gap < minSafe)
             return _c.LongMaxForce;
-        if (gap < _c.LongEmergencyDist)
+        if (gap < emergDist)
         {
-            float t = 1f - (gap - _c.LongMinSafeDist) /
-                      Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            float t = 1f - (gap - minSafe) /
+                      Mathf.Max(emergDist - minSafe, 1e-3f);
             return t * _c.LongMaxForce;
         }
 
@@ -324,12 +335,15 @@ public class LongitudinalSafetyField
         // gapR < 0 means the vehicle is now ahead of ego — no follower force applies.
         if (gapR < 0f) return 0f;
 
-        if (gapR < _c.LongMinSafeDist)
+        float minSafeF   = _c.ComputeMinSafeDist(follower.GetVx());
+        float emergDistF = _c.ComputeEmergencyDist(follower.GetVx());
+
+        if (gapR < minSafeF)
             return _c.LongMaxForce;
-        if (gapR < _c.LongEmergencyDist)
+        if (gapR < emergDistF)
         {
-            float t = 1f - (gapR - _c.LongMinSafeDist) /
-                      Mathf.Max(_c.LongEmergencyDist - _c.LongMinSafeDist, 1e-3f);
+            float t = 1f - (gapR - minSafeF) /
+                      Mathf.Max(emergDistF - minSafeF, 1e-3f);
             return t * _c.LongMaxForce;
         }
 

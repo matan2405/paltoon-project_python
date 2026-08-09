@@ -40,7 +40,6 @@ public class LongitudinalReferenceGen
         float x  = ego.GetX();
         float vx = ego.GetVx();
 
-        float desGap = _sf.StandstillDist + _c.RajamaniH * vx;
         float detectionRange = _c.DetectionRange;
 
         float lx, lv, lHalfLen;
@@ -76,8 +75,9 @@ public class LongitudinalReferenceGen
         // velocity tracking error at every step and saturates at U1Max.
         if (leader != null || (virtualLeader != null && virtualLeader.IsActive))
         {
-            float initGap = lx - x - lHalfLen - ego.GetLength() / 2f;
-            if ((initGap > 2f * desGap && lv > vx + 2f) || lv > vx + _c.CatchupVelThreshold)
+            float initGap    = lx - x - lHalfLen - ego.GetLength() / 2f;
+            float initDesGap = _sf.StandstillDist + _c.RajamaniH * vx;
+            if ((initGap > 2f * initDesGap && lv > vx + 2f) || lv > vx + _c.CatchupVelThreshold)
             {
                 float xk = x;
                 for (int k = 0; k < Np; k++)
@@ -93,7 +93,8 @@ public class LongitudinalReferenceGen
         for (int k = 0; k < Np; k++)
         {
             float a;
-            float gap = lx - x - lHalfLen - ego.GetLength() / 2f;
+            float gap    = lx - x - lHalfLen - ego.GetLength() / 2f;
+            float desGap = _sf.StandstillDist + _c.RajamaniH * vx;
 
             if (gap > detectionRange)
             {
@@ -115,11 +116,20 @@ public class LongitudinalReferenceGen
                 float minCritGap = _c.MinCritGapOffset
                                  + lHalfLen
                                  + ego.GetLength() * 0.5f;
+                // THW-based safety zone (replaces disabled 100 Hz safety_override).
+                // Routes hard-brake demand through Player 1's reference so the Nash
+                // solver produces a bounded, cooperative deceleration instead of a
+                // discontinuous NashBrake=1 that violates ISO 11270 §5.4 (3 m/s²).
+                float minSafeDynamic = _sf.ComputeMinSafeDist(vx);
 
-                if (ttc < _c.TtcThreshold || gap < minCritGap)
+                if (ttc < _c.TtcThreshold || gap < minCritGap || gap < minSafeDynamic)
                 {
-                    // COLLISION_AVOIDANCE: emergency decel
-                    a = _c.MaxEmergDecel;
+                    // COLLISION_AVOIDANCE: request maximum physically achievable deceleration.
+                    // aMin already accounts for current speed, brake capacity, and road
+                    // friction via GetPhysicalAccelBounds(). Using a fixed constant would
+                    // either exceed physics (unachievable QP target) or waste braking
+                    // headroom on surfaces where the vehicle could stop harder.
+                    a = aMin;
                 }
                 else
                 {
