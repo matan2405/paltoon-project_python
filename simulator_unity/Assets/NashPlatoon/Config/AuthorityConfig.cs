@@ -10,7 +10,7 @@ public class AuthorityConfig : ScriptableObject {
     //   3. λ_raw = max(λ_s, λ_g);  then adaptive EMA with AlphaBase/Fast
     [Header("Long — sigmoid on risk force")]
     public float LongLambdaMin     = 0.1f;    // LONG_AUTHORITY_LAMBDA_MIN
-    public float LongLambdaMax     = 100.0f;  // LONG_AUTHORITY_LAMBDA_MAX
+    public float LongLambdaMax     = 50.0f;   // LONG_AUTHORITY_LAMBDA_MAX (matches NashSolverBase.LongLambdaLevels top level)
     public float LongForceMidpoint = 400.0f;  // LONG_AUTHORITY_FORCE_MIDPOINT [N]
     public float LongSteepness     = 0.015f;  // LONG_AUTHORITY_K_STEEPNESS
     public float LongAlphaBase     = 0.05f;   // LONG_AUTHORITY_ALPHA_BASE  (slow EMA)

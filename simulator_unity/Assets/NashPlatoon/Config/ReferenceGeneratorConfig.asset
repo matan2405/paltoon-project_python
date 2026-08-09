@@ -18,7 +18,7 @@ MonoBehaviour:
   K1Ctg: 0.05
   K2Ctg: 0.4
   DetectionRange: 300
-  TtcThreshold: 1.2
+  TtcThreshold: 3
   MinCritGapOffset: 2
   MaxEmergDecel: -5
   CatchupMultiplier: 1.05

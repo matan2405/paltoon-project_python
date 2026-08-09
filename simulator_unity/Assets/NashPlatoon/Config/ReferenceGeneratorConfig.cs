@@ -11,7 +11,7 @@ public class ReferenceGeneratorConfig : ScriptableObject {
     public float K1Ctg             = 0.05f;   // CTG position feedback gain
     public float K2Ctg             = 0.4f;    // CTG velocity feedback gain
     public float DetectionRange    = 300.0f;  // free-road cruise threshold [m]
-    public float TtcThreshold      = 1.2f;    // TTC below this → collision avoidance [s]
+    public float TtcThreshold      = 3.0f;    // Lee 2004: Urgency 3 "forced" threshold → collision avoidance [s]
     public float MinCritGapOffset  = 2.0f;    // min critical gap = offset + L/2 [m]
     public float MaxEmergDecel     = -5.0f;   // emergency deceleration cap [m/s²]
     public float CatchupMultiplier    = 1.05f;  // cruise target = V_platoon × this

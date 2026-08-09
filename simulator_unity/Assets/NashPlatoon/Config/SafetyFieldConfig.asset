@@ -16,6 +16,9 @@ MonoBehaviour:
   LongEmergencyDist: 8
   LongMaxForce: 800
   LongEmaAlpha: 0.2
+  LongMinSafeThw: 1
+  LongMinSafeDistFloor: 5
+  LongEmergencyOffset: 1
   PlatoonTimeGap: 1.5
   StandstillDist: 2
   VehicleLength: 4.177
@@ -49,12 +52,12 @@ MonoBehaviour:
   LongEpsilon: 0.1
   LongDistanceDecay: 15
   LongFollowingSoftFactor: 0.35
-  LongTtcWarn: 8
-  LongTtcCritical: 1.5
+  LongTtcWarn: 5.5
+  LongTtcCritical: 3
   LongLeaderPosMult: 0.8
   LongMiddlePosMult: 1.2
   LongFollowerPosMult: 1
-  LongVelocityReference: 120
+  LongVelocityReference: 33.33
   LongVelocityScaling: 0.8
   LongPlatoonCoherence: 1.5
   LongFollowerWeight: 0.5

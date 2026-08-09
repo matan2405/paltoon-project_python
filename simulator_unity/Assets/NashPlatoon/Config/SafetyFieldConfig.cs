@@ -10,10 +10,22 @@ public class SafetyFieldConfig : ScriptableObject {
     //   gap ≥ MinSafe                → F = clip(gap_error/des_gap * Max, -0.25Max, Max)
     //   des_gap = StandstillDist + TimeGap * vx
     [Header("Long — piecewise gap force")]
-    public float LongMinSafeDist   = 7.0f;    // LONG_SAFETY_MIN_SAFE_DISTANCE  [m]
-    public float LongEmergencyDist = 8.0f;    // LONG_SAFETY_EMERGENCY_BRAKE_DIST [m]
+    public float LongMinSafeDist   = 7.0f;    // fallback only — use ComputeMinSafeDist(vx) [m]
+    public float LongEmergencyDist = 8.0f;    // fallback only — use ComputeEmergencyDist(vx) [m]
     public float LongMaxForce      = 800.0f;  // LONG_SAFETY_MAX_REPULSIVE_FORCE [N]
     public float LongEmaAlpha      = 0.2f;    // LONG_SAFETY_FILTER_ALPHA
+
+    // THW-based safety distance (Wang 2016: critical THW = 1s + critical TTC = 4s).
+    // Replaces the fixed 7m LongMinSafeDist so the safety zone scales with speed.
+    [Header("Long — THW-based safety (Wang 2016)")]
+    public float LongMinSafeThw       = 1.0f;   // critical THW [s]
+    public float LongMinSafeDistFloor = 5.0f;   // floor at low speed [m] (vehicle length + clearance)
+    public float LongEmergencyOffset  = 1.0f;   // emergency zone width above MinSafe [m]
+
+    public float ComputeMinSafeDist(float vx)   =>
+        Mathf.Max(LongMinSafeDistFloor, LongMinSafeThw * vx);
+    public float ComputeEmergencyDist(float vx) =>
+        ComputeMinSafeDist(vx) + LongEmergencyOffset;
 
     // ── Platoon geometry (shared by safety force and reference generators) ────────
     [Header("Platoon geometry")]
@@ -73,15 +85,15 @@ public class SafetyFieldConfig : ScriptableObject {
     // ttcFrac = 1 - clamp((TTC - TtcCritical) / (TtcWarn - TtcCritical), 0, 1)
     // ttcForce = ttcFrac * LongMaxForce  →  merged as max(ellipticForce, ttcForce)
     [Header("Long — TTC force floor")]
-    public float LongTtcWarn     = 8.0f;  // TTC [s] at which floor starts rising
-    public float LongTtcCritical = 1.5f;  // TTC [s] at which floor reaches LongMaxForce (FHWA SSAM / Hayward 1972)
+    public float LongTtcWarn     = 5.5f;  // Lee 2004: warning boundary (Urgency 2 upper) [s]
+    public float LongTtcCritical = 3.0f;  // Lee 2004: Urgency 3 "forced" threshold [s]
 
     // ── Dynamic DSF position and velocity multipliers ─────────────────────────
     [Header("Long — Dynamic DSF multipliers")]
     public float LongLeaderPosMult      = 0.8f;   // LONG_SAFETY_LEADER_POSITION_MULT
     public float LongMiddlePosMult      = 1.2f;   // LONG_SAFETY_MIDDLE_POSITION_MULT
     public float LongFollowerPosMult    = 1.0f;   // LONG_SAFETY_FOLLOWER_POSITION_MULT
-    public float LongVelocityReference  = 120.0f; // LONG_SAFETY_VELOCITY_REFERENCE [m/s, same as split module]
+    public float LongVelocityReference  = 33.33f;  // LONG_SAFETY_VELOCITY_REFERENCE [m/s] ≈ 120 km/h cruise speed
     public float LongVelocityScaling    = 0.8f;   // LONG_SAFETY_VELOCITY_SCALING
     public float LongPlatoonCoherence   = 1.5f;   // LONG_SAFETY_PLATOON_COHERENCE (Ri multiplier in middle)
     public float LongFollowerWeight     = 0.5f;   // LONG_SAFETY_FOLLOWER_WEIGHT
