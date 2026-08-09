@@ -10,11 +10,13 @@ public class BrakeSystem
     }
 
     // Calculate brake force based on brake input and vehicle velocity.
-    // Level 1 (physical): friction-limited by μ·N per axle, with quasi-static
-    // weight transfer derived from the actual braking deceleration (iterative
-    // one-step approximation).  The old code used a hardcoded 1.25 g for the
-    // weight-transfer estimate, which created a circular ceiling and capped
-    // Fbrake_max at ~50 % of the physical limit.
+    // Ideal brake distribution (Rajamani §4.3): each axle is independently limited
+    // to μ·N_axle, where N_axle is the instantaneous normal force after weight
+    // transfer.  This removes the fixed brakeBalance split and allows the total
+    // braking force to reach μ·(Nf+Nr) = μ·m·g ≈ 7.85 m/s² at full pedal.
+    //
+    // Implementation uses the same one-step weight-transfer approximation as before,
+    // but the per-axle force is now brakeInput·μ·N_axle (not balance·brakeInput·μ·N).
     public float CalculateBrakeForce(float brakeInput, float vx)
     {
         float g            = vehicleParams.gravity;
@@ -22,26 +24,21 @@ public class BrakeSystem
         float mu           = vehicleParams.tireFrictionCoefficient;
         float staticWeight = m * g;
 
-        // Static axle loads (symmetric wheelbase assumed)
+        // Static axle loads
         float Nf0 = staticWeight * vehicleParams.lr / vehicleParams.wheelbase;
         float Nr0 = staticWeight * vehicleParams.lf / vehicleParams.wheelbase;
 
-        // Maximum friction-limited brake force with static loads (no weight transfer)
-        float Ff0 = Nf0 * mu * vehicleParams.brakeBalance       * brakeInput;
-        float Fr0 = Nr0 * mu * (1f - vehicleParams.brakeBalance) * brakeInput;
-        float F0  = Ff0 + Fr0;
-
-        // One-step weight-transfer correction: use the deceleration implied by F0
-        // instead of a hardcoded 1.25 g.  This avoids the circular assumption and
-        // correctly scales with μ, brake balance, and pedal input.
-        float decel        = F0 / m;   // first-order estimate [m/s²]
-        float weightTransfer = (m * decel * vehicleParams.height * 0.5f) / vehicleParams.wheelbase;
+        // First-order weight-transfer estimate using static loads
+        float F0_static      = (Nf0 + Nr0) * mu * brakeInput;   // ideal upper bound
+        float decel0         = F0_static / m;
+        float weightTransfer = (m * decel0 * vehicleParams.height * 0.5f) / vehicleParams.wheelbase;
 
         float frontNormalForce = Nf0 + weightTransfer;
-        float rearNormalForce  = Mathf.Max(Nr0 - weightTransfer, 0f);   // rear never negative
+        float rearNormalForce  = Mathf.Max(Nr0 - weightTransfer, 0f);
 
-        float actualFrontBrakeForce = frontNormalForce * mu * vehicleParams.brakeBalance       * brakeInput;
-        float actualRearBrakeForce  = rearNormalForce  * mu * (1f - vehicleParams.brakeBalance) * brakeInput;
+        // Ideal distribution: each axle at its own friction limit (Rajamani §4.3)
+        float actualFrontBrakeForce = frontNormalForce * mu * brakeInput;
+        float actualRearBrakeForce  = rearNormalForce  * mu * brakeInput;
 
         return actualFrontBrakeForce + actualRearBrakeForce;
     }
@@ -49,7 +46,7 @@ public class BrakeSystem
     // Returns (front, rear) brake forces separately.
     // Used by Derivatives6D to correctly assign Fxf/Fxr per Belousov Eq. 3.11b/c:
     // only the front contact-patch force enters the sinδ terms.
-    // Uses the same one-step weight-transfer approximation as CalculateBrakeForce.
+    // Uses ideal brake distribution (same as CalculateBrakeForce).
     public (float front, float rear) CalculateBrakeForceSplit(float brakeInput, float vx)
     {
         float g            = vehicleParams.gravity;
@@ -60,16 +57,15 @@ public class BrakeSystem
         float Nf0 = staticWeight * vehicleParams.lr / vehicleParams.wheelbase;
         float Nr0 = staticWeight * vehicleParams.lf / vehicleParams.wheelbase;
 
-        float Ff0 = Nf0 * mu * vehicleParams.brakeBalance       * brakeInput;
-        float Fr0 = Nr0 * mu * (1f - vehicleParams.brakeBalance) * brakeInput;
-        float decel        = (Ff0 + Fr0) / m;
-        float weightTransfer = (m * decel * vehicleParams.height * 0.5f) / vehicleParams.wheelbase;
+        float F0_static      = (Nf0 + Nr0) * mu * brakeInput;
+        float decel0         = F0_static / m;
+        float weightTransfer = (m * decel0 * vehicleParams.height * 0.5f) / vehicleParams.wheelbase;
 
         float frontNormalForce = Nf0 + weightTransfer;
         float rearNormalForce  = Mathf.Max(Nr0 - weightTransfer, 0f);
 
-        float front = frontNormalForce * mu * vehicleParams.brakeBalance       * brakeInput;
-        float rear  = rearNormalForce  * mu * (1f - vehicleParams.brakeBalance) * brakeInput;
+        float front = frontNormalForce * mu * brakeInput;
+        float rear  = rearNormalForce  * mu * brakeInput;
 
         return (front, rear);
     }

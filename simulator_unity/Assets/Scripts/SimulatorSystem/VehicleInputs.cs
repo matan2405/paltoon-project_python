@@ -91,7 +91,7 @@ public class VehicleInputs : MonoBehaviour
     {
         if (SteeringWheel == null || SteeringWheelPivot == null || PlayerCar == null) return;
 
-        float targetAngle = steerInput * maxSteeringWheelAngle;
+        float targetAngle = -steerInput * maxSteeringWheelAngle;
         float deltaAngle  = targetAngle - appliedWheelAngle;
         SteeringWheel.RotateAround(SteeringWheelPivot.position, PlayerCar.forward, deltaAngle);
         appliedWheelAngle = targetAngle;

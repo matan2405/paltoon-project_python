@@ -187,11 +187,20 @@ public class AdvancedBicycleModel : MonoBehaviour
         float slopeRadians = vehicleParams.roadSlope * Mathf.Deg2Rad;
         float slopeForce = vehicleParams.mass * vehicleParams.gravity * Mathf.Sin(slopeRadians);
 
+        // Engine braking always acts when throttle is released and vehicle is moving.
+        // In the coast zone (no brake) it is lumped with naturalDeceleration.
+        // When the brake pedal is pressed it still acts — drivetrain compression does
+        // not disappear just because the friction brakes are also engaged.
+        float Fengbrk = 0f;
         float naturalDeceleration = 0f;
-        if (throttleInput < 0.001f && brakeInput < 0.001f && vx > 0.1f)
+        if (throttleInput < 0.001f && vx > 0.1f)
         {
-            naturalDeceleration = powertrain.CalculateNaturalDeceleration(vx, powertrain.EngineRpm);
-            naturalDeceleration += vx * vx * 0.01f;
+            Fengbrk = powertrain.GetEngineBrakingForce(vx);
+            if (brakeInput < 0.001f)
+            {
+                naturalDeceleration = powertrain.CalculateNaturalDeceleration(vx, powertrain.EngineRpm);
+                naturalDeceleration += vx * vx * 0.01f;
+            }
         }
 
         // Fxf_contact / Fxr_contact: forces at each axle contact patch (Belousov Eq. 3.11b/c).
@@ -204,7 +213,7 @@ public class AdvancedBicycleModel : MonoBehaviour
         // Fx_contact: contact-patch forces only — these are coupled to steering angle (enter cosδ/sinδ)
         // Fx_resist:  body-level resistances — act along vehicle body axis, NOT coupled to wheel angle
         float Fx_contact = Fxf_contact + Fxr_contact;
-        float Fx_resist  = Faero + Rxf + Rxr + slopeForce + naturalDeceleration;
+        float Fx_resist  = Faero + Rxf + Rxr + slopeForce + naturalDeceleration + Fengbrk;
         Fx_tot    = Fx_contact - Fx_resist;  // kept for GetFx_tot() / AutoMode RPM update
         _fxContact = Fx_contact;
         _fxResist  = Fx_resist;
