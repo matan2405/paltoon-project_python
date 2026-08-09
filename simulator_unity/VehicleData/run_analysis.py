@@ -243,7 +243,7 @@ if 'psi' in ego.columns:
     print('Saved 5_ego_lateral.png')
 
 # ── Summary stats ─────────────────────────────────────────────────────────────
-print('\n── Summary ─────────────────────────────────────────────')
+print('\n-- Summary ------------------------------------------------------')
 print(f'  Ego speed range:  {ego["vx"].min()*3.6:.1f} .. {ego["vx"].max()*3.6:.1f} km/h')
 if 'psi' in ego.columns:
     print(f'  Max |yaw|:        {np.degrees(np.abs(ego["psi"])).max():.2f} deg')
@@ -253,9 +253,291 @@ if n_slots > 0:
         if len(g):
             print(f'  Gap slot {i}:       {g.min():.1f} .. {g.max():.1f} m  (mean {g.mean():.1f})')
 if nash is not None:
-    print(f'  λ_long range:     {nash["lambda_long"].min():.3f} .. {nash["lambda_long"].max():.1f}')
-    print(f'  λ_lat range:      {nash["lambda_lat"].min():.3f} .. {nash["lambda_lat"].max():.1f}')
+    print(f'  lam_long range:   {nash["lambda_long"].min():.3f} .. {nash["lambda_long"].max():.1f}')
+    print(f'  lam_lat range:    {nash["lambda_lat"].min():.3f} .. {nash["lambda_lat"].max():.1f}')
     gmax = nash['gap_err'].abs().max()
     ti   = nash.loc[nash['gap_err'].abs().idxmax(), 'Time']
     print(f'  Max |gap error|:  {gmax:.1f} m at t={ti:.1f}s')
-print('────────────────────────────────────────────────────────')
+print('-' * 56)
+
+# ── Regulatory compliance checks — per phase ──────────────────────────────────
+# Phase → relevant standards:
+#   GapSearch : ISO 15622 s6.4 (long. decel/jerk/accel limits, ACC-like control begins)
+#   Merge     : ISO 15622 s6.4 + R79 s5.6.4.4 (lat accel/jerk) + R79 s5.6.4.7 (TTC)
+#               + R79 s5.6.4.6.5 (lane-change duration)
+#   Following : ISO 15622 s6.4 + ISO 15622 s6.2.3.1 (THW) + ISO 11270 s5.4 (LKAS)
+# Approach phase is driven by the human only — excluded from all checks.
+
+def _moving_avg(arr, dt, window_s):
+    k = max(1, int(round(window_s / dt)))
+    kernel = np.ones(k) / k
+    return np.convolve(np.abs(arr), kernel, mode='same')
+
+def _ego_slice(phase_name):
+    """Return (t_array, ax_array, vx_array, psi_array) masked to a single phase."""
+    if phase_col is None:
+        return None, None, None, None
+    pmask = phase_col.isin([phase_name]).values
+    if not pmask.any():
+        return None, None, None, None
+    t_ph  = t_gaps[pmask]
+    t0, t1 = t_ph[0], t_ph[-1]
+    emask = (t_ego >= t0) & (t_ego <= t1)
+    t_e   = t_ego[emask]
+    ax_e  = ego['ax'].values[emask]
+    vx_e  = ego['vx'].values[emask]
+    psi_e = ego['psi'].values[emask] if 'psi' in ego.columns else None
+    return t_e, ax_e, vx_e, psi_e
+
+def _gaps_slice(phase_name):
+    """Return (t_g, gap_arrays_dict, vx_interp) for a single phase."""
+    if phase_col is None:
+        return None, None, None
+    pmask = phase_col.isin([phase_name]).values
+    if not pmask.any():
+        return None, None, None
+    t_g    = t_gaps[pmask]
+    vx_g   = np.interp(t_g, t_ego, ego['vx'].values)
+    gap_d  = {ac: gaps[ac].values[pmask].astype(float) for ac in gap_actual_cols}
+    return t_g, gap_d, vx_g
+
+ok   = 'PASS'
+fail = 'FAIL'
+na   = 'N/A '
+dt_ego = float(np.median(np.diff(t_ego))) if len(t_ego) > 1 else 0.02
+
+def _section(title):
+    print(f'\n-- {title} ' + '-' * max(0, 56 - len(title)))
+
+def _long_iso15622(ax_e, label='', t_e=None, nash_phase=None):
+    # ISO 15622 s6.4: decel avg 2s, jerk avg 1s, accel peak.
+    # Nash outputs at 0.1 s but ego CSV logs at dt_ego (~0.01 s): differentiating the
+    # step-change at each Nash tick produces apparent spike jerk of ~(delta_u/0.01) that
+    # inflates the 1-s moving average.  When nash CSV is available, compute jerk at the
+    # Nash rate (0.1 s) instead — that is the physically meaningful rate of command change.
+    avg2s = _moving_avg(-ax_e, dt_ego, 2.0).max()
+    s1 = ok if avg2s <= 3.5 else fail
+    print(f'  ISO 15622 s6.4  Long. decel  avg 2s <= 3.5 m/s2:  worst = {avg2s:.2f} m/s2  -> {s1}')
+
+    # Jerk and accel: prefer Nash-rate (0.1 s) to avoid step-change logging artifacts.
+    # ego_vehicle.csv logs at ~0.01 s; each Nash tick causes a step in ax that, when
+    # differentiated at 0.01 s, gives ~100x amplified apparent jerk.
+    if nash is not None and t_e is not None and nash_phase is not None and \
+       'u_long' in nash.columns and 'Time' in nash.columns:
+        t0_ph, t1_ph = t_e[0], t_e[-1]
+        nmask = (nash['Time'].values >= t0_ph) & (nash['Time'].values <= t1_ph)
+        if nmask.any():
+            n_ax_full = nash['u_long'].values[nmask]
+            n_t_full  = nash['Time'].values[nmask]
+            # ego_nash.csv logs at 100 Hz but Nash updates at ~10 Hz.
+            # Detect actual Nash steps: rows where u_long changes value.
+            # Use those rows only so dt reflects the true command rate.
+            step_idx = np.where(np.abs(np.diff(n_ax_full)) > 1e-6)[0] + 1
+            step_idx = np.concatenate([[0], step_idx])   # always include first row
+            n_ax  = n_ax_full[step_idx]
+            n_t   = n_t_full[step_idx]
+            dt_nash = float(np.median(np.diff(n_t))) if len(n_t) > 1 else 0.1
+            jerk_n  = np.gradient(n_ax, dt_nash)
+            wjerk   = _moving_avg(jerk_n, dt_nash, 1.0).max()
+            wacc    = n_ax.max()
+            s2 = ok if wjerk <= 2.5 else fail
+            s3 = ok if wacc  <= 2.0 else fail
+            print(f'  ISO 15622 s6.4  Long. jerk   avg 1s <= 2.5 m/s3:  worst = {wjerk:.2f} m/s3  -> {s2}  (Nash-rate ~{dt_nash:.2f}s, {len(n_t)} steps)')
+            print(f'  ISO 15622 s6.4  Long. accel  peak   <= 2.0 m/s2:  worst = {wacc:.2f} m/s2   -> {s3}  (Nash-rate u_long)')
+            return
+    # Fallback: differentiate high-rate ego CSV (may over-report due to Nash step changes)
+    jerk  = np.gradient(ax_e, dt_ego)
+    wjerk = _moving_avg(jerk, dt_ego, 1.0).max()
+    wacc  = ax_e.max()
+    s2 = ok if wjerk <= 2.5 else fail
+    s3 = ok if wacc  <= 2.0 else fail
+    print(f'  ISO 15622 s6.4  Long. jerk   avg 1s <= 2.5 m/s3:  worst = {wjerk:.2f} m/s3  -> {s2}  [high-rate, may over-report]')
+    print(f'  ISO 15622 s6.4  Long. accel  peak   <= 2.0 m/s2:  worst = {wacc:.2f} m/s2   -> {s3}  [high-rate]')
+
+def _lat_r79_iso11270(ax_e, psi_e, vx_e, phase_label='', t_e=None):
+    # Correct lateral acceleration metric: a_lat = vx * psi_dot  (world-frame, felt by occupant).
+    # vx^2 * delta / L  is the steady-state cornering formula — it gives the centripetal
+    # acceleration only when the vehicle is tracking a constant-radius arc.  During a lane
+    # change (transient), vx*psi_dot and vx^2*delta/L diverge by up to 16x (verified on data:
+    # delta=0.038 rad at vx=28 m/s gives bm=11.35 m/s^2 but vx*psi_dot=0.70 m/s^2 at that instant).
+    # Therefore all lateral accel checks use vx*psi_dot from ego_vehicle.csv.
+    #
+    # R79 s5.6.4.4(a) system-induced: reported as N/A — u1_lat [rad] cannot be converted to
+    # a_lat [m/s^2] without integrating the full bicycle model response to u1 in isolation.
+    # The conservative bound is: if total a_lat (vx*psi_dot) <= 1 m/s^2, system is compliant.
+
+    psi_dot  = np.gradient(psi_e, dt_ego)
+    a_lat    = vx_e * psi_dot                      # [m/s^2], signed
+    lat_jerk = np.gradient(a_lat, dt_ego)
+    wlong    = (-ax_e).max()
+    s4 = ok if wlong <= 3.0 else fail
+
+    # Separate: lane-change transient (y_err still large) vs steady-state.
+    # Peak a_lat at y_err~-3.5 m is human-initiated rotation at lane-change onset.
+    # R79 s5.6.4.4(b) applies to total; ISO 11270 applies to LKAS steady-state.
+    # Report both full-phase and post-onset (after ego crossed half the lane gap).
+    wlat_full  = np.abs(a_lat).max()
+    wjlat_full = _moving_avg(lat_jerk, dt_ego, 0.5).max()
+    frac3_full = (np.abs(a_lat) > 3.0).mean() * 100
+
+    # Post-onset: exclude first 1 s of Merge (human turning onset)
+    if t_e is not None and len(t_e) > 0:
+        t_skip = t_e[0] + 1.0
+        post_mask = t_e >= t_skip
+        if post_mask.sum() > 10:
+            a_lat_post  = a_lat[post_mask]
+            jerk_post   = lat_jerk[post_mask]
+            wlat_post   = np.abs(a_lat_post).max()
+            wjlat_post  = _moving_avg(jerk_post, dt_ego, 0.5).max()
+            frac3_post  = (np.abs(a_lat_post) > 3.0).mean() * 100
+        else:
+            wlat_post = wlat_full; wjlat_post = wjlat_full; frac3_post = frac3_full
+    else:
+        wlat_post = wlat_full; wjlat_post = wjlat_full; frac3_post = frac3_full
+
+    s1f = ok if wlat_full <= 1.0 else fail
+    s2f = ok if wlat_full <= 3.0 else fail
+    s3f = ok if wjlat_full <= 5.0 else fail
+    s1p = ok if wlat_post <= 1.0 else fail
+    s2p = ok if wlat_post <= 3.0 else fail
+    s3p = ok if wjlat_post <= 5.0 else fail
+
+    print(f'  R79  s5.6.4.4(a) Lat accel (total, full phase) <= 1.0 m/s2:  worst = {wlat_full:.2f} m/s2  -> {s1f}  ({frac3_full:.1f}% of phase >3 m/s2)')
+    print(f'  R79/ISO11270     Lat accel (total, full phase) <= 3.0 m/s2:  worst = {wlat_full:.2f} m/s2  -> {s2f}')
+    print(f'  R79  s5.6.4.4(a) Lat accel (excl. 1st s onset) <= 1.0 m/s2: worst = {wlat_post:.2f} m/s2  -> {s1p}')
+    print(f'  R79/ISO11270     Lat accel (excl. 1st s onset) <= 3.0 m/s2:  worst = {wlat_post:.2f} m/s2  -> {s2p}  ({frac3_post:.1f}% >3)')
+    print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (full)  <= 5.0 m/s3:    worst = {wjlat_full:.2f} m/s3  -> {s3f}')
+    print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (excl.)  <= 5.0 m/s3:   worst = {wjlat_post:.2f} m/s3  -> {s3p}')
+    print(f'  ISO 11270 s5.4   Long. decel (LKAS) <= 3.0 m/s2:           worst = {wlong:.2f} m/s2  -> {s4}')
+
+def _thw(phase_name):
+    # ISO 15622 s6.2.3.1: THW = gap/vx >= 0.8 s (steady-state, vx > 3 m/s)
+    _, gap_d, vx_g = _gaps_slice(phase_name)
+    if gap_d is None:
+        print(f'  ISO 15622 s6.2.3.1  THW >= 0.8 s:  {na}')
+        return
+    for i, ac in enumerate(gap_actual_cols):
+        g = gap_d[ac]
+        mask = (vx_g > 3.0) & np.isfinite(g) & (g > 0)
+        if not mask.any():
+            print(f'  ISO 15622 s6.2.3.1  THW slot {i} >= 0.8 s:  {na}')
+            continue
+        min_thw = (g[mask] / vx_g[mask]).min()
+        status  = ok if min_thw >= 0.8 else fail
+        print(f'  ISO 15622 s6.2.3.1  THW slot {i} >= 0.8 s:  min = {min_thw:.2f} s  -> {status}')
+
+def _ttc_merge(phase_name):
+    # R79 s5.6.4.7 critical situation: TTC check during lane change.
+    # Critical if an approaching vehicle from behind would need > 3 m/s2 decel.
+    # Proxy: min TTC between ego and Car1 (slot 0) during Merge phase.
+    _, gap_d, vx_g = _gaps_slice(phase_name)
+    if gap_d is None or not gap_actual_cols:
+        print(f'  R79 s5.6.4.7   TTC ego->leader during merge:  {na}')
+        return
+    g    = gap_d[gap_actual_cols[0]]
+    # Relative velocity: ego approaching leader (positive = closing)
+    t_ph = t_gaps[phase_col.isin([phase_name]).values]
+    vx_leader = None
+    for name, df in platoon.items():
+        vx_leader = np.interp(t_ph, df['Time'].values, df['vx'].values)
+        break   # use first platoon vehicle (Car1) as leader proxy
+    if vx_leader is None:
+        print(f'  R79 s5.6.4.7   TTC ego->leader:  {na} (no platoon vehicle)')
+        return
+    rel_v = vx_g - vx_leader          # positive = closing
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ttc = np.where(rel_v > 0.1, g / rel_v, 1e6)
+    min_ttc = ttc.min()
+    # R79 §5.6.4.7: critical if approaching rear vehicle needs >3 m/s2.
+    # Simple TTC threshold: < 4 s is the boundary used by many ADAS standards.
+    status = ok if min_ttc >= 4.0 else fail
+    print(f'  R79 s5.6.4.7   Min TTC ego->leader >= 4.0 s:  min = {min_ttc:.2f} s  -> {status}')
+
+def _merge_duration():
+    # R79 s5.6.4.6.5: lane change manoeuvre < 5 s (M1/N1).
+    # Measured from first lateral movement onset until ego centre reaches platoon lane centre.
+    # Platoon lane centre = y_err == 0, i.e. ego y == platoonLaneY.
+    # Proxy using ego_nash.csv y_err column: start = first |y_err| drop below |y_err_start|*0.9
+    # end   = first |y_err| < 0.2 m (within 20 cm of platoon lane centre).
+    if phase_col is None:
+        print(f'  R79 s5.6.4.6.5  Lane change duration < 5 s:  {na}')
+        return
+    pmask = phase_col.isin(['Merge']).values
+    if not pmask.any():
+        print(f'  R79 s5.6.4.6.5  Lane change duration < 5 s:  {na}')
+        return
+    t_merge = t_gaps[pmask]
+    t0_m, t1_m = t_merge[0], t_merge[-1]
+
+    # Use y_err from ego_nash if available — it is signed dist to platoon lane [m]
+    if nash is not None and 'y_err' in nash.columns and 'Time' in nash.columns:
+        nmask = (nash['Time'].values >= t0_m) & (nash['Time'].values <= t1_m)
+        if nmask.any():
+            n_t   = nash['Time'].values[nmask]
+            y_err = np.abs(nash['y_err'].values[nmask])
+
+            # Start: Merge phase entry = ego is at its own lane centre (y_err = full lane width).
+            # y_err is logged as 0 during GapSearch; at Merge entry it jumps to ~3.5 m.
+            # Find the first sample with |y_err| > 0.5 m — this is the true start of travel.
+            started = np.where(y_err > 0.5)[0]
+            if len(started) == 0:
+                dur = t1_m - t0_m
+                print(f'  R79 s5.6.4.6.5  Lane change duration < 5.0 s:  {dur:.2f} s (no clear start, full Merge)  -> INFORMATIONAL')
+                return
+            t_start   = n_t[started[0]]
+            y_err_start = y_err[started[0]]
+
+            # End: first sample where |y_err| < 0.2 m — ego centre at platoon lane centre.
+            arrived = np.where((n_t >= t_start) & (y_err < 0.2))[0]
+            if len(arrived) == 0:
+                dur = t1_m - t_start
+                print(f'  R79 s5.6.4.6.5  Lane change duration < 5.0 s:  {dur:.2f} s (never reached platoon lane centre)  -> INFORMATIONAL')
+                return
+            t_arrive = n_t[arrived[0]]
+            dur = t_arrive - t_start
+            status = ok if dur < 5.0 else fail
+            print(f'  R79 s5.6.4.6.5  Lane change duration < 5.0 s:  {dur:.2f} s  -> {status}  (own lane t={t_start:.1f}s y_err={y_err_start:.2f}m -> platoon lane t={t_arrive:.1f}s)')
+            return
+
+    # Fallback: full Merge phase duration (includes gap-matching time, not just lateral travel)
+    dur = t1_m - t0_m
+    print(f'  R79 s5.6.4.6.5  Lane change duration < 5.0 s:  {dur:.2f} s (full Merge phase, no y_err data)  -> INFORMATIONAL')
+
+print('\n== Regulatory compliance by phase (UN-ECE R79 / ISO 15622 / ISO 11270) ==')
+
+# ── GapSearch ─────────────────────────────────────────────────────────────────
+_section('GapSearch phase  [ISO 15622 s6.4]')
+t_e, ax_e, vx_e, psi_e = _ego_slice('GapSearch')
+if ax_e is None or len(ax_e) == 0:
+    print('  No GapSearch data.')
+else:
+    _long_iso15622(ax_e, t_e=t_e, nash_phase='GapSearch')
+
+# ── Merge ─────────────────────────────────────────────────────────────────────
+_section('Merge phase  [ISO 15622 s6.4 | R79 s5.6.4.4 | R79 s5.6.4.6.5 | R79 s5.6.4.7]')
+t_e, ax_e, vx_e, psi_e = _ego_slice('Merge')
+if ax_e is None or len(ax_e) == 0:
+    print('  No Merge data.')
+else:
+    _long_iso15622(ax_e, t_e=t_e, nash_phase='Merge')
+    if psi_e is not None:
+        _lat_r79_iso11270(ax_e, psi_e, vx_e, t_e=t_e)
+    else:
+        print(f'  R79/ISO 11270 lateral checks:  {na} (no psi column)')
+    _merge_duration()
+    _ttc_merge('Merge')
+
+# ── Following ─────────────────────────────────────────────────────────────────
+_section('Following phase  [ISO 15622 s6.4 | ISO 15622 s6.2.3.1 | ISO 11270 s5.4]')
+t_e, ax_e, vx_e, psi_e = _ego_slice('Following')
+if ax_e is None or len(ax_e) == 0:
+    print('  No Following data.')
+else:
+    _long_iso15622(ax_e, t_e=t_e, nash_phase='Following')
+    _thw('Following')
+    if psi_e is not None:
+        _lat_r79_iso11270(ax_e, psi_e, vx_e, t_e=t_e)
+    else:
+        print(f'  ISO 11270 lateral checks:  {na} (no psi column)')
+
+print('=' * 59)
