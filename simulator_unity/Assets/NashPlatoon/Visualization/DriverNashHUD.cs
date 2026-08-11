@@ -104,7 +104,6 @@ public class DriverNashHUD : MonoBehaviour
         float gap = Gap();
         if (gap < 990f)
         {
-            string icon = gap > 15f ? "✓" : gap > 8f ? "▲" : "✕";
             _gapLabel.text  = $"Gap   {gap:F1} m   {icon}";
             _gapLabel.color = gap > 15f ? new Color(0.35f, 0.9f, 0.45f)
                             : gap > 8f  ? new Color(1f, 0.82f, 0.2f)
@@ -127,7 +126,7 @@ public class DriverNashHUD : MonoBehaviour
         prt.anchorMin        = new Vector2(1, 0);
         prt.anchorMax        = new Vector2(1, 0);
         prt.pivot            = new Vector2(1, 0);
-        prt.anchoredPosition = new Vector2(-370, 280); // tweak X/Y in Inspector to align with gauges
+        prt.anchoredPosition = new Vector2(-470, 325); // tweak X/Y in Inspector to align with gauges
         prt.sizeDelta        = new Vector2(PW, PH);
 
         // background
