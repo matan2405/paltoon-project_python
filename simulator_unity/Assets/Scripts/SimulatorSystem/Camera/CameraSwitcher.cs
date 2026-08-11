@@ -65,7 +65,7 @@ public class CameraSwitcher : MonoBehaviour
         // תקן את המצלמות ל-2 מסכים בלבד
         thirdPersonCamera.targetDisplay = 0;    // Third Person + Dashboard → Display 0 (מסך ראשי)
         firstPersonCamera.targetDisplay = 1;    // Driver + שעונים → Display 1 (מסך שני)
-        
+
         Debug.Log("📺 Fixed for 2 displays: Third Person + Dashboard → Display 0, Driver + Gauges → Display 1");
     }
 
@@ -95,39 +95,30 @@ public class CameraSwitcher : MonoBehaviour
     
     void UpdateDashboardDisplay()
     {
-        // הדשבורד יוצג על אותו מסך כמו מצלמת השלישי
-        VehicleDashboard dashboard = FindObjectOfType<VehicleDashboard>();
-        if (dashboard != null)
-        {
-            dashboard.targetDisplay = thirdPersonCamera.targetDisplay;
-            Debug.Log($"📊 Dashboard set to display {dashboard.targetDisplay} (same as Third Person camera)");
-        }
+        // VehicleDashboard uses OnGUI which renders on the same display as the active camera
     }
     
+    void OnGUI()
+    {
+        GUIStyle style = new GUIStyle(GUI.skin.label);
+        style.fontSize = 12;
+        style.normal.textColor = Color.yellow;
+        style.fontStyle = FontStyle.Bold;
+
+        string driverDisplay = $"Display {firstPersonCamera.targetDisplay}";
+        string thirdPersonDisplay = $"Display {thirdPersonCamera.targetDisplay}";
+        string info = $"Fixed Setup: Driver Camera → {driverDisplay} | Third Person + Dashboard → {thirdPersonDisplay}";
+
+        GUI.color = new Color(0, 0, 0, 0.8f);
+        GUI.DrawTexture(new Rect(5, Screen.height - 105, Screen.width - 10, 35), Texture2D.whiteTexture);
+        GUI.color = Color.white;
+        GUI.Label(new Rect(10, Screen.height - 100, Screen.width - 20, 30), info, style);
+    }
+
     // פונקציות ציבוריות למערכות אחרות
     public int GetDriverCameraDisplay() => firstPersonCamera.targetDisplay;
     public int GetDashboardCameraDisplay() => thirdPersonCamera.targetDisplay;
     public bool IsThirdPersonActive() => isThirdPerson;
     public Camera GetActiveCamera() => isThirdPerson ? thirdPersonCamera : firstPersonCamera;
     
-    void OnGUI()
-    {
-        // הצג מידע פשוט על המצב הקבוע
-        GUIStyle style = new GUIStyle(GUI.skin.label);
-        style.fontSize = 12;
-        style.normal.textColor = Color.yellow;
-        style.fontStyle = FontStyle.Bold;
-        
-        string driverDisplay = $"Display {firstPersonCamera.targetDisplay}";
-        string thirdPersonDisplay = $"Display {thirdPersonCamera.targetDisplay}";
-        
-        string info = $"Fixed Setup: Driver Camera → {driverDisplay} | Third Person + Dashboard → {thirdPersonDisplay}";
-        
-        // רקע כהה לטקסט
-        GUI.color = new Color(0, 0, 0, 0.8f);
-        GUI.DrawTexture(new Rect(5, Screen.height - 40, Screen.width - 10, 35), Texture2D.whiteTexture);
-        
-        GUI.color = Color.white;
-        GUI.Label(new Rect(10, Screen.height - 35, Screen.width - 20, 30), info, style);
-    }
 }

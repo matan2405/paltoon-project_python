@@ -1,600 +1,340 @@
 using UnityEngine;
-using System.Collections.Generic;
 
-/// <summary>
-/// לוח בקרה מלא תואם למערכת החלפת מסכים
-/// </summary>
 public class VehicleDashboard : MonoBehaviour
 {
-    [Header("Dashboard Settings")]
-    public bool showOnMainDisplay = true;
+    [Header("Wiring")]
+    public NashCoordinator coordinator;
+    public PlatoonManager  platoonManager;
     public KeyCode toggleDashboardKey = KeyCode.F1;
-    
-    [Header("Display Integration")]
-    public int targetDisplay = 0; // Display 0 - מסך ראשי עם Third Person
-    
+
+    [Header("Trial Info")]
+    public string controlMode   = "Nash-Shared";
+    public string trialGeometry = "Join-After";
+    public int    trialNumber   = 1;
+    public int    totalTrials   = 3;
+
+    [Header("Layout (pixels, adjust in Inspector)")]
+    public int dashboardY    = 100;
+    public int columnHeight  = 190;
+    public int headerHeight  = 28;
+    public int margin        = 6;
+    public int columnGap     = 6;
+
     private AdvancedBicycleModel vehicle;
-    private VehicleParameters vehicleParams;
-    private Powertrain powertrain;
-    private Transmission transmission;
-    private BrakeSystem brakeSystem;
-    private SteeringSystem steeringSystem;
-    
     private bool dashboardVisible = true;
-    
-    // GUI Styling
-    private GUIStyle titleStyle;
-    private GUIStyle labelStyle;
-    private GUIStyle boxStyle;
-    private GUIStyle headerStyle;
-    private GUIStyle bigTextStyle;
+
+    private GUIStyle titleStyle, labelStyle, headerStyle, bigStyle;
     private bool stylesInitialized = false;
-    
-    // Layout constants
-    private const float SCALE = 1.0f;
-    private const int COLUMN_WIDTH = 320;
-    private const int COLUMN_SPACING = 30;
-    private const int BASE_HEIGHT = 20;
-    private const int FONT_SIZE = 12;
-    private const int BIG_FONT_SIZE = 16;
+
+    private const int BH  = 16;
+    private const int FS  = 10;
+    private const int BFS = 13;
 
     void Start()
     {
-        // מצא את רכיב הרכב
-        vehicle = FindObjectOfType<AdvancedBicycleModel>();
-        if (vehicle == null)
-        {
-            Debug.LogError("AdvancedBicycleModel not found! Dashboard will not work.");
-            enabled = false;
-            return;
-        }
-        
-        vehicleParams = vehicle.GetVehicleParameters();
-        powertrain = vehicle.powertrain;
-        transmission = vehicle.GetTransmission();
-        brakeSystem = vehicle.GetBrakeSystem();
-        steeringSystem = vehicle.GetSteeringSystem();
-        
-        Debug.Log($"📊 Complete Dashboard initialized. Press {toggleDashboardKey} to toggle.");
+        if (coordinator    == null) coordinator    = FindObjectOfType<NashCoordinator>();
+        if (platoonManager == null) platoonManager = FindObjectOfType<PlatoonManager>();
+
+        if (platoonManager != null && platoonManager.egoVehicle != null)
+            vehicle = platoonManager.egoVehicle;
+        else
+            vehicle = FindObjectOfType<AdvancedBicycleModel>();
+
+        if (vehicle == null) { enabled = false; return; }
     }
-    
+
     void Update()
     {
         if (Input.GetKeyDown(toggleDashboardKey))
-        {
             dashboardVisible = !dashboardVisible;
-            Debug.Log($"📊 Dashboard visibility: {dashboardVisible}");
-        }
-        
-        // עדכן את targetDisplay לפי CameraSwitcher אם קיים
-        UpdateDisplayFromCameraSwitcher();
-        
-        // בדוק אם עדיין יש חיבור לרכב
-        if (vehicle == null)
-        {
-            vehicle = FindObjectOfType<AdvancedBicycleModel>();
-            if (vehicle != null)
-            {
-                powertrain = vehicle.powertrain;
-                transmission = vehicle.GetTransmission();
-                brakeSystem = vehicle.GetBrakeSystem();
-                steeringSystem = vehicle.GetSteeringSystem();
-                vehicleParams = vehicle.GetVehicleParameters();
-            }
-        }
     }
-    
-    void UpdateDisplayFromCameraSwitcher()
-    {
-        // אם יש CameraSwitcher, הדשבורד תמיד עוקב אחרי Third Person Camera
-        if (CameraSwitcher.Instance != null)
-        {
-            int thirdPersonDisplay = CameraSwitcher.Instance.GetDashboardCameraDisplay();
-            if (targetDisplay != thirdPersonDisplay)
-            {
-                targetDisplay = thirdPersonDisplay;
-                Debug.Log($"📊 Dashboard follows Third Person camera to display {targetDisplay}");
-            }
-        }
-    }
-    
-    void InitializeStyles()
-    {
-        if (stylesInitialized) return;
-        
-        // כותרת ראשית
-        titleStyle = new GUIStyle(GUI.skin.label);
-        titleStyle.fontSize = 18;
-        titleStyle.fontStyle = FontStyle.Bold;
-        titleStyle.normal.textColor = Color.cyan;
-        titleStyle.alignment = TextAnchor.MiddleCenter;
-        
-        // טקסט רגיל
-        labelStyle = new GUIStyle(GUI.skin.label);
-        labelStyle.fontSize = FONT_SIZE;
-        labelStyle.normal.textColor = Color.white;
-        labelStyle.alignment = TextAnchor.MiddleLeft;
-        
-        // טקסט גדול
-        bigTextStyle = new GUIStyle(GUI.skin.label);
-        bigTextStyle.fontSize = BIG_FONT_SIZE;
-        bigTextStyle.fontStyle = FontStyle.Bold;
-        bigTextStyle.normal.textColor = Color.white;
-        bigTextStyle.alignment = TextAnchor.MiddleLeft;
-        
-        // קופסאות
-        boxStyle = new GUIStyle(GUI.skin.box);
-        boxStyle.fontSize = FONT_SIZE;
-        
-        // כותרות קטגוריות
-        headerStyle = new GUIStyle(GUI.skin.label);
-        headerStyle.fontSize = FONT_SIZE + 2;
-        headerStyle.fontStyle = FontStyle.Bold;
-        headerStyle.normal.textColor = Color.yellow;
-        headerStyle.alignment = TextAnchor.MiddleLeft;
-        
-        stylesInitialized = true;
-    }
-    
+
     void OnGUI()
     {
         if (!dashboardVisible || vehicle == null) return;
-        
-        // הצג דשבורד רק כשמצלמת השלישי פעילה
-        if (CameraSwitcher.Instance != null && !CameraSwitcher.Instance.IsThirdPersonActive())
-        {
-            return; // אל תציג דשבורד כשמצלמת הנהג פעילה
-        }
-        
+        if (CameraSwitcher.Instance != null && !CameraSwitcher.Instance.IsThirdPersonActive()) return;
         InitializeStyles();
-        DrawCleanDashboard();
+        DrawDashboard();
     }
-    
-    bool ShouldShowOnCurrentDisplay()
+
+    void InitializeStyles()
     {
-        // הדשבורד מוצג תמיד כשמצלמת השלישי פעילה
-        // והוא תמיד יהיה על אותו מסך כמו מצלמת השלישי
-        return true; // פשוט הצג תמיד - ה-targetDisplay מטפל בזה
+        if (stylesInitialized) return;
+        titleStyle  = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+        titleStyle.normal.textColor  = Color.white;
+        headerStyle = new GUIStyle(GUI.skin.label) { fontSize = FS, fontStyle = FontStyle.Bold };
+        headerStyle.normal.textColor = Color.yellow;
+        labelStyle  = new GUIStyle(GUI.skin.label) { fontSize = FS };
+        labelStyle.normal.textColor  = Color.white;
+        bigStyle    = new GUIStyle(GUI.skin.label) { fontSize = BFS, fontStyle = FontStyle.Bold };
+        bigStyle.normal.textColor    = Color.white;
+        stylesInitialized = true;
     }
-    
-    void DrawCleanDashboard()
+
+    void DrawDashboard()
     {
-        // רקע כהה
-        GUI.color = new Color(0, 0, 0, 0.85f);
-        GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), Texture2D.whiteTexture);
-        GUI.color = Color.white;
-        
-        // כותרת ראשית
-        Rect titleRect = new Rect(20, 10, Screen.width - 40, 40);
-        GUI.Label(titleRect, "🚗 AUDI TT 2.0 TFSI - ADVANCED VEHICLE DASHBOARD 🏎️", titleStyle);
-        
-        // חשב מיקומי עמודות
-        int leftX = 20;
-        int centerX = leftX + COLUMN_WIDTH + COLUMN_SPACING;
-        int rightX = centerX + COLUMN_WIDTH + COLUMN_SPACING;
-        int startY = 70;
-        
-        // שלוש עמודות נפרדות - כמו במקור!
-        DrawVehicleColumn(leftX, startY);
-        DrawEngineColumn(centerX, startY);
-        DrawSystemColumn(rightX, startY);
-        
-        // סטטוס בר תחתון
-        DrawStatusBar();
+        string modeLabel = controlMode switch {
+            "Manual"        => "MANUAL",
+            "Full-Autonomy" => "FULL-AUTO",
+            _               => "NASH-SHARED"
+        };
+
+        int sw = Screen.width;
+        int cw = (sw - margin * 2 - columnGap * 3) / 4;
+
+        // Header bar
+        GUI.Box(new Rect(0, dashboardY, sw, headerHeight), "");
+        GUI.Label(new Rect(20, dashboardY + 4, sw - 40, headerHeight - 8),
+            $"SUPERVISOR  —  Trial {trialNumber}/{totalTrials}  |  {modeLabel}  |  {trialGeometry}",
+            titleStyle);
+
+        int y0 = dashboardY + headerHeight + 2;
+
+        int x1 = margin;
+        int x2 = x1 + cw + columnGap;
+        int x3 = x2 + cw + columnGap;
+        int x4 = x3 + cw + columnGap;
+
+        DrawVehicleColumn(x1, y0, cw, columnHeight);
+        DrawNashColumn   (x2, y0, cw, columnHeight);
+        DrawSafetyColumn (x3, y0, cw, columnHeight);
+        DrawPlatoonColumn(x4, y0, cw, columnHeight);
+
+        DrawStatusBar(y0 + columnHeight + 2);
     }
-    
-    void DrawVehicleColumn(int x, int y)
+
+    // ── Column 1: Vehicle / Phase ─────────────────────────────────────────────
+    void DrawVehicleColumn(int x, int y, int cw, int ch)
     {
-        // קופסה 1: מידע רכב בסיסי
-        int box1Height = 200;
-        GUI.Box(new Rect(x, y, COLUMN_WIDTH, box1Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "🚗 Vehicle Status", headerStyle);
-        
-        float vx = vehicle.GetVx();
-        float ax = vehicle.GetAx();
-        float totalForce = vehicle.GetFx_tot();
-        
-        // מהירות בגדול
-        GUI.color = vx > 50 ? Color.red : (vx > 25 ? Color.yellow : Color.green);
-        GUI.Label(new Rect(x + 10, y + 40, COLUMN_WIDTH - 20, 30), 
-                  $"🏁 Speed: {vx * 3.6f:F1} km/h", bigTextStyle);
-        GUI.color = Color.white;
-        
-        GUI.Label(new Rect(x + 10, y + 80, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"⚡ Acceleration: {ax:F2} m/s²", labelStyle);
-        GUI.Label(new Rect(x + 10, y + 100, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"💪 Total Force: {totalForce:F0} N", labelStyle);
-        
-        // הילוך נוכחי
-        GUI.color = transmission.IsShifting() ? Color.red : Color.cyan;
-        string gearText = transmission.IsShifting() ? 
-            $"Gear: {transmission.GetCurrentGear()} (Shifting...)" : 
-            $"Gear: {transmission.GetCurrentGear()}";
-        GUI.Label(new Rect(x + 10, y + 130, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"⚙️ {gearText}", labelStyle);
-        GUI.color = Color.white;
-        
-        // מצב מנוע
-        float throttle = VehicleInputs.Instance.ThrottleInput;
-        string engineMode = GetEngineMode(throttle, vx);
-        GUI.color = GetEngineColor(throttle, vx);
-        GUI.Label(new Rect(x + 10, y + 150, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🔧 Engine: {engineMode}", labelStyle);
-        GUI.color = Color.white;
-        
-        // קופסה 2: בקרות - כמו במקור!
-        int box2Y = y + box1Height + 20;
-        int box2Height = 180;
-        GUI.Box(new Rect(x, box2Y, COLUMN_WIDTH, box2Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, box2Y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "🎮 Vehicle Controls", headerStyle);
-        
-        DrawControlsOnly(x + 10, box2Y + 40, COLUMN_WIDTH - 20);
-        
-        // קופסה 3: דינמיקה רוחבית
-        int box3Y = box2Y + box2Height + 20;
-        int box3Height = 100;
-        GUI.Box(new Rect(x, box3Y, COLUMN_WIDTH, box3Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, box3Y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "↔️ Lateral Dynamics", headerStyle);
-        
-        GUI.Label(new Rect(x + 10, box3Y + 40, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"Lateral Speed: {vehicle.GetYDot():F2} m/s", labelStyle);
-        GUI.Label(new Rect(x + 10, box3Y + 60, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"Yaw Rate: {vehicle.GetPsiDot():F2} rad/s", labelStyle);
-    }
-    
-    void DrawEngineColumn(int x, int y)
-    {
-        // קופסה 1: מידע מנוע - כמו במקור!
-        int box1Height = 300;
-        GUI.Box(new Rect(x, y, COLUMN_WIDTH, box1Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "🏎️ Engine Analysis", headerStyle);
-        
-        if (powertrain == null) return;
-        
-        float rpm = powertrain.EngineRpm;
-        
-        // RPM בגדול
-        GUI.color = rpm > 6000 ? Color.red : (rpm > 4500 ? Color.yellow : Color.green);
-        GUI.Label(new Rect(x + 10, y + 40, COLUMN_WIDTH - 20, 30), 
-                  $"🔢 RPM: {rpm:F0}", bigTextStyle);
-        GUI.color = Color.white;
-        
-        GUI.Label(new Rect(x + 10, y + 80, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🎯 Zone: {GetEngineZoneDescription(rpm)}", labelStyle);
-        
-        // כוח ומומנט
-        float currentTorque = powertrain.GetCurrentEngineTorque();
-        float currentPowerKW = powertrain.GetCurrentEnginePowerKW();
-        float currentPowerPS = currentPowerKW * 1.36f;
-        
-        GUI.Label(new Rect(x + 10, y + 110, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"💪 Torque: {currentTorque:F0} Nm ({GetTorquePercentage(rpm):F0}%)", labelStyle);
-        GUI.Label(new Rect(x + 10, y + 130, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"⚡ Power: {currentPowerPS:F0} PS ({GetPowerPercentage(rpm):F0}%)", labelStyle);
-        
-        // השוואת מהירויות
-        float vx = vehicle.GetVx();
-        float theoreticalSpeed = powertrain.GetTheoreticalSpeed();
-        float wheelSlip = powertrain.GetWheelSlip(vx);
-        
-        GUI.Label(new Rect(x + 10, y + 160, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "--- Speed Comparison ---", headerStyle);
-        GUI.Label(new Rect(x + 10, y + 180, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"📊 Actual: {vx * 3.6f:F1} km/h", labelStyle);
-        GUI.Label(new Rect(x + 10, y + 200, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"📈 Theoretical: {theoreticalSpeed * 3.6f:F1} km/h", labelStyle);
-        
-        // wheel slip עם צבע
-        Color originalColor = GUI.color;
-        if (Mathf.Abs(wheelSlip) > 10f)
-            GUI.color = Color.red;
-        else if (Mathf.Abs(wheelSlip) > 5f)
-            GUI.color = Color.yellow;
-        else
-            GUI.color = Color.green;
-            
-        GUI.Label(new Rect(x + 10, y + 220, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🎯 Wheel Slip: {wheelSlip:F1}%", labelStyle);
-        GUI.color = originalColor;
-        
-        // אזור עבודה
-        DrawWorkingZone(x + 10, y + 250, COLUMN_WIDTH - 20, rpm);
-        
-        // קופסה 2: תיבת הילוכים - כמו במקור!
-        int box2Y = y + box1Height + 20;
-        int box2Height = 200;
-        GUI.Box(new Rect(x, box2Y, COLUMN_WIDTH, box2Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, box2Y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "⚙️ Transmission System", headerStyle);
-        
-        // הילוכים בקומפקטי
-        for (int i = 1; i <= 6; i++)
+        GUI.Box(new Rect(x, y, cw, ch), "");
+        GUI.Label(new Rect(x+6, y+3, cw-12, BH), "VEHICLE / PHASE", headerStyle);
+
+        float vx_kph = vehicle.GetVx() * 3.6f;
+        float ax     = vehicle.GetAx();
+
+        Color spdC = vx_kph > 95f ? Color.red : vx_kph > 85f ? Color.yellow : Color.white;
+        L(x, y+20, cw, "Speed:", spdC);
+        B(x, y+32, cw, $"{vx_kph:F1} km/h", spdC);
+        L(x, y+52, cw, $"Accel: {ax:F2} m/s²");
+
+        string phase  = "—";
+        Color  phaseC = new Color(0.5f, 0.5f, 0.5f);
+        if (coordinator != null && coordinator.NashActive)
         {
-            Color color = GUI.color;
-            if (i == transmission.GetCurrentGear())
-            {
-                GUI.color = transmission.IsShifting() ? Color.red : Color.green;
-                GUI.Label(new Rect(x + 10, box2Y + 30 + (i * 20), COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                          $"► {i}: {transmission.GetGearSpeedRange(i)} ◄", labelStyle);
-            }
-            else
-            {
-                GUI.color = Color.gray;
-                GUI.Label(new Rect(x + 10, box2Y + 30 + (i * 20), COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                          $"   {i}: {transmission.GetGearSpeedRange(i)}", labelStyle);
-            }
-            GUI.color = color;
+            phase  = coordinator.Phase.ToString().ToUpper();
+            phaseC = coordinator.Phase switch {
+                MergePhase.Approach  => new Color(0.6f,  0.6f,  0.6f),
+                MergePhase.GapSearch => new Color(1f,    0.75f, 0.15f),
+                MergePhase.Merge     => new Color(0.27f, 0.6f,  1f),
+                MergePhase.Following => new Color(0.27f, 0.85f, 0.4f),
+                _                    => Color.white
+            };
         }
-        
-        GUI.Label(new Rect(x + 10, box2Y + 170, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"Drive Mode: {transmission.GetDriveMode()}", labelStyle);
-    }
-    
-    void DrawSystemColumn(int x, int y)
-    {
-        // קופסה 1: פירוט כוחות - כמו במקור!
-        int box1Height = 280;
-        GUI.Box(new Rect(x, y, COLUMN_WIDTH, box1Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "🔧 Force Analysis (N)", headerStyle);
-        
-        float throttle = VehicleInputs.Instance.ThrottleInput;
-        float brake = VehicleInputs.Instance.BrakeInput;
-        float vx = vehicle.GetVx();
-        
-        // חשב כוחות
-        float engineForce = powertrain.CalculateEngineForce(throttle, vx);
-        float brakeForce = brakeSystem.CalculateBrakeForce(brake, vx);
-        float aeroForce = 0.5f * 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea * vx * vx;
-        float rollingForce = vx > 0.01f ? vehicleParams.mass * vehicleParams.gravity * 0.012f : 0;
-        float naturalDecel = (throttle < 0.001f && brake < 0.001f && vx > 0.1f) ? 
-            powertrain.CalculateNaturalDeceleration(vx, powertrain.EngineRpm) : 0;
-        float totalForce = vehicle.GetFx_tot();
-        
-        int yOffset = 40;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🚀 Engine Force: +{engineForce:F0}", labelStyle);
-        yOffset += 25;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🛑 Brake Force: -{brakeForce:F0}", labelStyle);
-        yOffset += 25;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"💨 Air Resistance: -{aeroForce:F0}", labelStyle);
-        yOffset += 25;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🛞 Rolling Resistance: -{rollingForce:F0}", labelStyle);
-        yOffset += 25;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🔧 Engine Braking: -{naturalDecel:F0}", labelStyle);
-        
-        yOffset += 40;
-        Color originalColor = GUI.color;
-        GUI.color = (totalForce > 0) ? Color.green : Color.red;
-        GUI.Label(new Rect(x + 10, y + yOffset, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"📊 NET TOTAL: {totalForce:F0} N", bigTextStyle);
-        GUI.color = originalColor;
-        
-        // מצב חיבור מנוע
-        yOffset += 40;
-        DrawEngineConnectionStatus(x + 10, y + yOffset, COLUMN_WIDTH - 20, throttle, vx);
-        
-        // קופסה 2: מידע מערכת
-        int box2Y = y + box1Height + 20;
-        int box2Height = 120;
-        GUI.Box(new Rect(x, box2Y, COLUMN_WIDTH, box2Height), "", boxStyle);
-        GUI.Label(new Rect(x + 10, box2Y + 10, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  "💻 System Information", headerStyle);
-        
-        GUI.Label(new Rect(x + 10, box2Y + 40, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"🖥️ Current Display: {targetDisplay}", labelStyle);
-        GUI.Label(new Rect(x + 10, box2Y + 60, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"📺 Total Displays: {Display.displays.Length}", labelStyle);
-        GUI.Label(new Rect(x + 10, box2Y + 80, COLUMN_WIDTH - 20, BASE_HEIGHT), 
-                  $"⚡ Current FPS: {(1.0f / Time.deltaTime):F0}", labelStyle);
+        L(x, y+68, cw, "Phase:");
+        B(x, y+80, cw, phase, phaseC);
+
+        float throttle = 0f, brake = 0f, steer = 0f;
+        if (VehicleInputs.Instance != null)
+        {
+            throttle = VehicleInputs.Instance.ThrottleInput;
+            brake    = VehicleInputs.Instance.BrakeInput;
+            steer    = VehicleInputs.Instance.SteeringInput;
+        }
+
+        int bw = (cw - 16 - 8) / 3;
+        L(x, y+100, cw, "Inputs:");
+        L(x+6,          y+114, bw, $"Gas {throttle*100:F0}%", new Color(0.4f,0.9f,0.4f));
+        L(x+6+bw+4,     y+114, bw, $"Brk {brake*100:F0}%",   new Color(0.9f,0.4f,0.4f));
+        L(x+6+2*(bw+4), y+114, bw, $"Str {steer:F2}",        new Color(0.5f,0.8f,1f));
+        DrawBar(x+6,           y+128, bw, 6, throttle, new Color(0.3f,0.85f,0.3f));
+        DrawBar(x+6+bw+4,      y+128, bw, 6, brake,    new Color(0.85f,0.3f,0.3f));
+        DrawSteeringBar(x+6+2*(bw+4), y+128, bw, 6, steer);
     }
 
-    void DrawControlsOnly(int x, int y, int width)
+    // ── Column 2: Nash / Authority ────────────────────────────────────────────
+    void DrawNashColumn(int x, int y, int cw, int ch)
     {
-        // רק נתוני הבקרות - כמו במקור!
-        float throttle = VehicleInputs.Instance.ThrottleInput;
-        float brake = VehicleInputs.Instance.BrakeInput;
-        float steering = VehicleInputs.Instance.SteeringInput;
+        GUI.Box(new Rect(x, y, cw, ch), "");
+        GUI.Label(new Rect(x+6, y+3, cw-12, BH), "NASH / AUTHORITY", headerStyle);
 
-        // דוושת גז
-        Color originalColor = GUI.color;
-        GUI.color = throttle > 0.8f ? Color.red : (throttle > 0.5f ? Color.yellow : Color.green);
-        GUI.Label(new Rect(x, y, 140, BASE_HEIGHT),
-                  $"🚀 Throttle: {throttle * 100:F0}%", labelStyle);
-        GUI.color = originalColor;
-        DrawInputBar(x + 150, y + 3, 120, 12, throttle, Color.green);
+        if (coordinator == null || !coordinator.NashActive)
+        {
+            L(x, y+22, cw, "Nash  INACTIVE", new Color(0.5f, 0.5f, 0.5f));
+            return;
+        }
 
-        // דוושת בלמים
-        GUI.color = brake > 0.7f ? Color.red : Color.white;
-        GUI.Label(new Rect(x, y + 25, 140, BASE_HEIGHT),
-                  $"🛑 Brake: {brake * 100:F0}%", labelStyle);
-        GUI.color = originalColor;
-        DrawInputBar(x + 150, y + 28, 120, 12, brake, Color.red);
+        float lLong  = coordinator.LongLambda;
+        float lLat   = coordinator.LatLambda;
+        float aLong  = lLong / (1f + lLong);
+        float aLat   = lLat  / (1f + lLat);
+        float aMax   = Mathf.Max(aLong, aLat);
+        float drvPct = (1f - aMax) * 100f;
+        float sysPct = aMax * 100f;
 
-        // הגה
-        var angles = steeringSystem.CalculateAckermanSteering(steering);
-        string steeringDirection = steering > 0.05f ? "RIGHT ➡️" : (steering < -0.05f ? "LEFT ⬅️" : "STRAIGHT ⬆️");
+        Color authC = sysPct > 70f ? new Color(0.27f,0.6f,1f)
+                    : sysPct > 40f ? new Color(1f,0.82f,0.2f)
+                                   : new Color(0.27f,0.85f,0.4f);
 
+        L(x, y+20, cw, "Your control:");
+        B(x, y+32, cw, $"{drvPct:F0}%", Color.white);
+        L(x, y+52, cw, $"System: {sysPct:F0}%", authC);
+        DrawFilledBar(x+6, y+66, cw-12, 7, aMax,
+            new Color(0.27f,0.6f,1f), new Color(0.27f,0.85f,0.4f));
 
-        GUI.Label(new Rect(x, y + 55, width, BASE_HEIGHT),
-                  $"🚗 Steering: {steeringDirection}", labelStyle);
-        GUI.Label(new Rect(x, y + 75, width, BASE_HEIGHT),
-                  $"🎯 Wheel Angle: {angles.average * Mathf.Rad2Deg:F1}°", labelStyle);
+        L(x, y+78,  cw, $"λ_long {lLong:F2}  α {aLong:F2}");
+        L(x, y+92,  cw, $"λ_lat  {lLat:F2}  α {aLat:F2}");
 
-        // בר הגה
-        DrawSteeringBar(x, y + 100, width, 15, steering);
-        
-        
-        GUI.Label(new Rect(x, y+120, 1450, BASE_HEIGHT),
-                  $"🚀 Wheel Steeing Angle: {vehicle.GetSteeringWheelAngle()}%", labelStyle);
-        GUI.color = originalColor;
+        float conflict = coordinator.Data.ConflictMav;
+        Color cflC = conflict > 0.5f ? Color.red : conflict > 0.2f ? Color.yellow : new Color(0.27f,0.85f,0.4f);
+        L(x, y+108, cw, $"Conflict MA: {conflict:F3}", cflC);
+
+        float lnSync = coordinator.Data.LnSync;
+        L(x, y+122, cw, $"Merge progress: {lnSync*100f:F0}%", new Color(0.27f,0.85f,0.4f));
+        DrawFilledBar(x+6, y+136, cw-12, 6, Mathf.Clamp01(lnSync),
+            new Color(0.27f,0.85f,0.4f), new Color(1f,0.75f,0.15f));
     }
-    
-    void DrawStatusBar()
+
+    // ── Column 3: Safety ─────────────────────────────────────────────────────
+    void DrawSafetyColumn(int x, int y, int cw, int ch)
     {
-        int barHeight = 35;
-        int startY = Screen.height - barHeight - 5;
-        
-        GUI.color = new Color(0, 0, 0, 0.8f);
-        GUI.DrawTexture(new Rect(0, startY, Screen.width, barHeight), Texture2D.whiteTexture);
+        GUI.Box(new Rect(x, y, cw, ch), "");
+        GUI.Label(new Rect(x+6, y+3, cw-12, BH), "SAFETY", headerStyle);
+
+        float ttc    = coordinator != null ? coordinator.Data.TTC    : 999f;
+        float thw    = coordinator != null ? coordinator.Data.THW    : 999f;
+        float velErr = coordinator != null ? coordinator.Data.VelErr : 0f;
+        float yErr   = coordinator != null ? coordinator.Data.YErr   : 0f;
+
+        string ttcStr;
+        Color  ttcC;
+        if      (ttc > 90f) { ttcStr = "—";               ttcC = new Color(0.5f,0.5f,0.5f); }
+        else if (ttc < 2f)  { ttcStr = $"{ttc:F1} s  !!"; ttcC = Color.red; }
+        else if (ttc < 4f)  { ttcStr = $"{ttc:F1} s";     ttcC = Color.yellow; }
+        else                { ttcStr = $"{ttc:F1} s";     ttcC = new Color(0.27f,0.85f,0.4f); }
+
+        Color thwC = thw < 0.8f ? Color.red : thw < 1.5f ? Color.yellow : new Color(0.27f,0.85f,0.4f);
+        Color rvC  = Mathf.Abs(velErr) > 5f ? Color.red : Mathf.Abs(velErr) > 2f ? Color.yellow : Color.white;
+        Color yC   = Mathf.Abs(yErr)   > 1f ? Color.red : Mathf.Abs(yErr)   > 0.3f ? Color.yellow : Color.white;
+
+        L(x, y+20, cw, "TTC:");
+        B(x, y+32, cw, ttcStr, ttcC);
+        L(x, y+52, cw, "THW:");
+        L(x, y+64, cw, thw < 990f ? $"{thw:F2} s" : "—", thwC);
+        L(x, y+80, cw, "Vel error:");
+        L(x, y+92, cw, $"{velErr:+0.00;-0.00} m/s", rvC);
+        L(x, y+108, cw, "Lat error:");
+        L(x, y+120, cw, $"{yErr:+0.00;-0.00} m", yC);
+
+        if (coordinator != null && coordinator.Data.SafetyOverride)
+            L(x, y+138, cw, "SAFETY OVERRIDE", Color.red);
+        if (ttc < 2f && ttc > 0f)
+            L(x, y+154, cw, "DANGER  TTC < 2s", Color.red);
+    }
+
+    // ── Column 4: Platoon ─────────────────────────────────────────────────────
+    void DrawPlatoonColumn(int x, int y, int cw, int ch)
+    {
+        GUI.Box(new Rect(x, y, cw, ch), "");
+        GUI.Label(new Rect(x+6, y+3, cw-12, BH), "PLATOON", headerStyle);
+
+        if (platoonManager == null)
+        {
+            L(x, y+22, cw, "PlatoonManager not wired", new Color(0.5f,0.5f,0.5f));
+            return;
+        }
+
+        float targetV = platoonManager.GetTargetVelocity();
+        L(x, y+20, cw, $"Target: {targetV*3.6f:F1} km/h");
+
+        var vehicles = platoonManager.GetPlatoonVehicles();
+        if (vehicles == null || vehicles.Length == 0)
+        {
+            L(x, y+36, cw, "No platoon vehicles", new Color(0.5f,0.5f,0.5f));
+            return;
+        }
+
+        int ly = y + 36;
+        for (int i = 0; i < vehicles.Length; i++)
+        {
+            if (vehicles[i] == null || ly > y + ch - BH - 4) break;
+            float spd  = vehicles[i].GetVx() * 3.6f;
+            string lbl = i == 0 ? $"Leader  {spd:F1} km/h" : $"Car {i+1}    {spd:F1} km/h";
+            L(x, ly, cw, lbl);                                            ly += BH;
+            if (i > 0 && ly <= y + ch - BH - 4)
+            {
+                float ag = platoonManager.GetActualGap(i);
+                float dg = platoonManager.GetDesiredGap(i);
+                Color gc = ag < 5f ? Color.red : ag < 10f ? Color.yellow : Color.white;
+                L(x, ly, cw, $"  gap {ag:F1} / des {dg:F1} m", gc);      ly += BH;
+            }
+        }
+
+        if (platoonManager.egoVehicle != null)
+        {
+            bool  inPlatoon = platoonManager._egoInPlatoon;
+            Color egoC      = inPlatoon ? new Color(0.27f,0.85f,0.4f) : Color.yellow;
+            L(x, y + ch - BH - 2, cw, $"Ego: [{(inPlatoon ? "IN PLATOON" : "OUT")}]", egoC);
+        }
+    }
+
+    // ── Status bar ────────────────────────────────────────────────────────────
+    void DrawStatusBar(int by)
+    {
+        GUI.Box(new Rect(0, by, Screen.width, 22), "");
+        GUIStyle s = new GUIStyle(labelStyle) { alignment = TextAnchor.MiddleCenter };
+        s.normal.textColor = new Color(0.6f, 0.6f, 0.6f);
+        GUI.Label(new Rect(0, by + 3, Screen.width, 16),
+            $"F1 Toggle  |  FPS {1f / Time.deltaTime:F0}", s);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    void L(int x, int y, int cw, string text) =>
+        GUI.Label(new Rect(x + 6, y, cw - 12, BH), text, labelStyle);
+
+    void L(int x, int y, int cw, string text, Color c)
+    {
+        GUIStyle s = new GUIStyle(labelStyle);
+        s.normal.textColor = c;
+        GUI.Label(new Rect(x + 6, y, cw - 12, BH), text, s);
+    }
+
+    void B(int x, int y, int cw, string text, Color c)
+    {
+        GUIStyle s = new GUIStyle(bigStyle);
+        s.normal.textColor = c;
+        GUI.Label(new Rect(x + 6, y, cw - 12, BH + 6), text, s);
+    }
+
+    void DrawFilledBar(int x, int y, int w, int h, float fill, Color fullC, Color emptyC)
+    {
+        GUI.color = new Color(0.15f, 0.15f, 0.15f);
+        GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+        GUI.color = Color.Lerp(emptyC, fullC, fill);
+        if (fill > 0f)
+            GUI.DrawTexture(new Rect(x, y, w * fill, h), Texture2D.whiteTexture);
         GUI.color = Color.white;
-        
-        GUIStyle statusStyle = new GUIStyle(labelStyle);
-        statusStyle.alignment = TextAnchor.MiddleCenter;
-        statusStyle.normal.textColor = Color.cyan;
-        
-        string controls = "F1: Toggle Dashboard | C: Switch Camera | F9: Swap Displays | WASD: Drive | Space: Brake";
-        GUI.Label(new Rect(0, startY + 5, Screen.width, 25), controls, statusStyle);
     }
-    
-    // Helper methods - כמו במקור!
-    void DrawInputBar(int x, int y, int width, int height, float value, Color color)
+
+    void DrawBar(int x, int y, int w, int h, float value, Color color)
     {
-        GUI.color = Color.gray;
-        GUI.DrawTexture(new Rect(x, y, width, height), Texture2D.whiteTexture);
-        
+        GUI.color = new Color(0.15f, 0.15f, 0.15f);
+        GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
         GUI.color = color;
-        int fillWidth = (int)(width * Mathf.Clamp01(value));
-        if (fillWidth > 0)
-        {
-            GUI.DrawTexture(new Rect(x, y, fillWidth, height), Texture2D.whiteTexture);
-        }
-        
-        GUI.color = Color.black;
-        DrawRect(new Rect(x, y, width, height), 1);
+        if (value > 0f)
+            GUI.DrawTexture(new Rect(x, y, w * Mathf.Clamp01(value), h), Texture2D.whiteTexture);
         GUI.color = Color.white;
     }
-    
-    void DrawSteeringBar(int x, int y, int width, int height, float steeringValue)
+
+    void DrawSteeringBar(int x, int y, int w, int h, float steer)
     {
-        GUI.color = Color.gray;
-        GUI.DrawTexture(new Rect(x, y, width, height), Texture2D.whiteTexture);
-        
-        int centerX = x + width / 2;
+        GUI.color = new Color(0.15f, 0.15f, 0.15f);
+        GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture);
+        int cx = x + w / 2;
+        GUI.color = new Color(0.4f, 0.4f, 0.4f);
+        GUI.DrawTexture(new Rect(cx - 1, y, 2, h), Texture2D.whiteTexture);
+        int sx = Mathf.Clamp(cx + (int)(steer * w / 2), x + 2, x + w - 2);
+        GUI.color = steer > 0.05f ? Color.cyan : steer < -0.05f ? Color.magenta : Color.green;
+        GUI.DrawTexture(new Rect(sx - 2, y - 1, 5, h + 2), Texture2D.whiteTexture);
         GUI.color = Color.white;
-        GUI.DrawTexture(new Rect(centerX - 1, y, 2, height), Texture2D.whiteTexture);
-        
-        int steeringX = centerX + (int)(steeringValue * width / 2);
-        GUI.color = steeringValue > 0 ? Color.blue : (steeringValue < 0 ? Color.red : Color.green);
-        GUI.DrawTexture(new Rect(steeringX - 3, y - 2, 6, height + 4), Texture2D.whiteTexture);
-        
-        GUI.color = Color.black;
-        DrawRect(new Rect(x, y, width, height), 1);
-        GUI.color = Color.white;
-    }
-    
-    void DrawRect(Rect rect, int thickness)
-    {
-        GUI.DrawTexture(new Rect(rect.x, rect.y, rect.width, thickness), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(rect.x, rect.y + rect.height - thickness, rect.width, thickness), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(rect.x, rect.y, thickness, rect.height), Texture2D.whiteTexture);
-        GUI.DrawTexture(new Rect(rect.x + rect.width - thickness, rect.y, thickness, rect.height), Texture2D.whiteTexture);
-    }
-    
-    string GetEngineZoneDescription(float rpm)
-    {
-        if (rpm < 800) return "Engine Off";
-        else if (rpm < 1200) return "Idle/Low";
-        else if (rpm < 1600) return "Torque Rise";
-        else if (rpm < 4300) return "Torque Plateau";
-        else if (rpm < 4500) return "Power Transition";
-        else if (rpm < 6200) return "Power Plateau";
-        else if (rpm < 6700) return "Above Max Power";
-        else return "Redline!";
-    }
-    
-    float GetTorquePercentage(float rpm)
-    {
-        if (powertrain == null) return 0f;
-        float currentTorque = powertrain.GetCurrentEngineTorque();
-        return (currentTorque / 370f) * 100f;
-    }
-    
-    float GetPowerPercentage(float rpm)
-    {
-        if (powertrain == null) return 0f;
-        float currentPowerKW = powertrain.GetCurrentEnginePowerKW();
-        return (currentPowerKW / 169f) * 100f;
-    }
-    
-    string GetEngineMode(float throttle, float vx)
-    {
-        if (throttle > 0.001f)
-            return "🚀 Driving";
-        else if (vx > 0.1f)
-            return "🛑 Engine Braking";
-        else
-            return "⭕ Idle";
-    }
-    
-    Color GetEngineColor(float throttle, float vx)
-    {
-        if (throttle > 0.001f)
-            return Color.green;
-        else if (vx > 0.1f)
-            return Color.yellow;
-        else
-            return Color.gray;
-    }
-    
-    void DrawWorkingZone(int x, int y, int width, float rpm)
-    {
-        Color originalColor = GUI.color;
-        if (rpm >= 1600 && rpm <= 4300)
-        {
-            GUI.color = Color.green;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "✅ Max Torque Zone", labelStyle);
-        }
-        else if (rpm >= 4500 && rpm <= 6200)
-        {
-            GUI.color = Color.blue;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "⚡ Max Power Zone", labelStyle);
-        }
-        else if (rpm >= 1200 && rpm < 1600)
-        {
-            GUI.color = Color.yellow;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "📈 Rising Zone", labelStyle);
-        }
-        else if (rpm > 6200)
-        {
-            GUI.color = Color.red;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "⚠️ High RPM", labelStyle);
-        }
-        else
-        {
-            GUI.color = Color.gray;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "⭕ Low Zone", labelStyle);
-        }
-        GUI.color = originalColor;
-    }
-    
-    void DrawEngineConnectionStatus(int x, int y, int width, float throttle, float vx)
-    {
-        Color originalColor = GUI.color;
-        if (throttle < 0.001f && vx > 0.1f)
-        {
-            GUI.color = Color.yellow;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "🔗 Engine Connected", labelStyle);
-            GUI.Label(new Rect(x, y + 20, width, BASE_HEIGHT), "Engine Braking Active", labelStyle);
-        }
-        else if (throttle > 0.001f)
-        {
-            GUI.color = Color.green;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "🚀 Engine Driving", labelStyle);
-        }
-        else
-        {
-            GUI.color = Color.gray;
-            GUI.Label(new Rect(x, y, width, BASE_HEIGHT), "⭕ Engine at Rest", labelStyle);
-        }
-        GUI.color = originalColor;
     }
 }
