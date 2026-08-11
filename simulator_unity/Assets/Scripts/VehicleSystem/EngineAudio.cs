@@ -1,9 +1,6 @@
-﻿using UnityEngine;
+using UnityEngine;
 using System.Collections;
 
-/// <summary>
-/// Handles all engine-related audio effects including engine start, running, and idle sounds
-/// </summary>
 public class EngineAudio : MonoBehaviour
 {
     [Header("Audio Sources")]
@@ -32,167 +29,149 @@ public class EngineAudio : MonoBehaviour
     public float LimiterFrequency = 3f;
     public float LimiterEngage = 0.8f;
 
-    private float speedRatio;
+    [Header("Audio Enable")]
+    [SerializeField] private bool enableAudio = true;
+
     private float revLimiter;
     private AdvancedBicycleModel vehicle;
     private VehicleParameters vehicleParams;
     private Powertrain powertrain;
-    
-    // ✅ IMPROVED: Better volume transition control
+    private bool audioReady = false;
+
     private float currentRunningVolume = 0f;
-    private float targetRunningVolume = 0f;
     private float currentIdleVolume = 0f;
-    private float volumeTransitionSpeed = 2f; // How fast volume changes (NEW)
+    private float volumeTransitionSpeed = 2f;
+
+    void Awake()
+    {
+        if (!enableAudio) return;
+
+        if (startingSound == null) startingSound = gameObject.AddComponent<AudioSource>();
+        if (runningSound  == null) runningSound  = gameObject.AddComponent<AudioSource>();
+        if (idleSound     == null) idleSound     = gameObject.AddComponent<AudioSource>();
+        if (reverseSound  == null) reverseSound  = gameObject.AddComponent<AudioSource>();
+
+        _spatialBlend = CompareTag("Player") ? 0f : 1f;
+    }
+    private float _spatialBlend = 0f;
 
     void Start()
     {
-        // We need to wait a frame to ensure AdvancedBicycleModel has initialized
+        if (!enableAudio) return;
         StartCoroutine(InitializeAudio());
     }
 
     private IEnumerator InitializeAudio()
     {
-        // Wait for the next frame to ensure AdvancedBicycleModel is initialized
         yield return null;
 
         vehicle = GetComponent<AdvancedBicycleModel>();
-        if (vehicle == null)
-        {
-            Debug.LogError("AdvancedBicycleModel not found!");
-            yield break;
-        }
+        if (vehicle == null) { Debug.LogError("[EngineAudio] " + gameObject.name + ": AdvancedBicycleModel not found!"); yield break; }
 
         powertrain = vehicle.powertrain;
-        if (powertrain == null)
-        {
-            Debug.LogError("Powertrain not found!");
-            yield break;
-        }
+        if (powertrain == null) { Debug.LogError("[EngineAudio] " + gameObject.name + ": Powertrain not found!"); yield break; }
 
         vehicleParams = new VehicleParameters();
 
-        // Configure audio sources
-        SetupAudioSource(startingSound, engineStartClip, false);
-        SetupAudioSource(runningSound, engineRunningClip, true);
-        SetupAudioSource(idleSound, engineIdleClip, true);
-        SetupAudioSource(reverseSound, engineReverseClip, true);
+        // Borrow clips from another EngineAudio if this vehicle has none in Inspector
+        if (engineStartClip == null || engineRunningClip == null || engineIdleClip == null)
+        {
+            EngineAudio[] all = FindObjectsByType<EngineAudio>(FindObjectsSortMode.None);
+            foreach (EngineAudio other in all)
+            {
+                if (other == this) continue;
+                if (other.engineStartClip != null)
+                {
+                    engineStartClip   = other.engineStartClip;
+                    engineRunningClip = other.engineRunningClip;
+                    engineIdleClip    = other.engineIdleClip;
+                    engineReverseClip = other.engineReverseClip;
+                    Debug.Log("[EngineAudio] " + gameObject.name + ": borrowed clips from " + other.gameObject.name);
+                    break;
+                }
+            }
+        }
 
-        SetAllVolumesToZero();
+        ConfigureSource(startingSound, engineStartClip,   false);
+        ConfigureSource(runningSound,  engineRunningClip, true);
+        ConfigureSource(idleSound,     engineIdleClip,    true);
+        ConfigureSource(reverseSound,  engineReverseClip, true);
 
-        Debug.Log("Audio initialization complete");
+        startingSound.volume = 0f;
+        runningSound.volume  = 0f;
+        idleSound.volume     = 0f;
+        reverseSound.volume  = 0f;
+
+        if (idleSound.clip    != null) idleSound.Play();
+        if (runningSound.clip != null) runningSound.Play();
+
+        audioReady = true;
+        Debug.Log("[EngineAudio] " + gameObject.name + ": audio ready. idleClip=" + (idleSound.clip != null ? idleSound.clip.name : "NULL"));
     }
 
-    private void SetupAudioSource(AudioSource source, AudioClip clip, bool shouldLoop)
+    private void ConfigureSource(AudioSource src, AudioClip clip, bool loop)
     {
-        if (source && clip)
-        {
-            Debug.Log($"Setting up {source.name} with clip {clip.name}");
-            source.clip = clip;
-            source.loop = shouldLoop;
-            source.playOnAwake = false;
-            source.spatialBlend = 0f; // Force 2D sound
-            Debug.Log($"Audio source {source.name} setup complete. Loop: {source.loop}, Volume: {source.volume}");
-        }
-        else
-        {
-            Debug.LogError($"Missing audio setup: Source: {(source != null ? source.name : "null")}, Clip: {(clip != null ? clip.name : "null")}");
-        }
-    }
-
-    private void SetAllVolumesToZero()
-    {
-        if (idleSound) idleSound.volume = 0;
-        if (runningSound) runningSound.volume = 0;
-        if (reverseSound) reverseSound.volume = 0;
+        if (src == null) return;
+        src.clip         = clip;
+        src.loop         = loop;
+        src.playOnAwake  = false;
+        src.spatialBlend = _spatialBlend;
+        src.maxDistance  = 60f;
+        src.minDistance  = 2f;
+        src.rolloffMode  = AudioRolloffMode.Linear;
+        src.volume       = 0f;
     }
 
     void FixedUpdate()
     {
-        if (vehicle == null || powertrain == null) return;  // Safety check for required components
-
-        float currentSpeed = vehicle.GetVx();
-        float maxSpeed = vehicleParams.maxVelocity / 3.6f; // Convert km/h to m/s
-        speedRatio = Mathf.Abs(currentSpeed / maxSpeed);
-
-        // ✅ UPDATED: Calculate rev limiter effect based on actual engine RPM
-        float rpmRatio = Mathf.Clamp01(powertrain.EngineRpm / 6700f);
-        if (rpmRatio > LimiterEngage)
-        {
-            revLimiter = (Mathf.Sin(Time.time * LimiterFrequency) + 1f) * LimiterSound * (rpmRatio - LimiterEngage);
-        }
+        if (!audioReady || powertrain == null) return;
 
         UpdateEngineSounds();
     }
 
-    // ✅ IMPROVED: Better engine sound logic with smoother transitions
     private void UpdateEngineSounds()
     {
-        if (powertrain.EngineState == 2) // Engine running
+        if (powertrain.EngineState == 2)
         {
-            // ✅ UPDATED: Use actual engine RPM instead of speed-based calculation
-            float rpmRatio = Mathf.Clamp01(powertrain.EngineRpm / 6700f);
+            float rpmRatio     = Mathf.Clamp01(powertrain.EngineRpm / 6700f);
             float currentSpeed = Mathf.Abs(vehicle.GetVx());
-            float acceleration = vehicle.GetAx();
-            float throttleInput = VehicleInputs.Instance.ThrottleInput;
+            float throttle     = vehicle.GetThrottleInput();
+            float speedFactor  = Mathf.Clamp01(currentSpeed / 2f);
 
-            // ✅ IMPROVED: Better speed factor calculation
-            float speedFactor = Mathf.Clamp01(currentSpeed / 2f); // Normalize for better audio response
+            if (rpmRatio > LimiterEngage)
+                revLimiter = (Mathf.Sin(Time.time * LimiterFrequency) + 1f) * LimiterSound * (rpmRatio - LimiterEngage);
+            else
+                revLimiter = 0f;
 
-            // ✅ IMPROVED: Idle sound with smoother transitions
             if (idleSound)
             {
                 if (!idleSound.isPlaying) idleSound.Play();
-
-                // Idle sound plays when RPM is low or speed is very low
-                float targetIdleVolume = (powertrain.EngineRpm < 1500f || currentSpeed < 2f) ? 
-                    idleMaxVolume * (1f - rpmRatio * 0.7f) : 0f;
-
-                // ✅ NEW: Smooth volume transitions
-                currentIdleVolume = Mathf.Lerp(currentIdleVolume, targetIdleVolume, 
-                    Time.deltaTime * volumeTransitionSpeed);
-                
+                float target = (powertrain.EngineRpm < 1500f || currentSpeed < 2f)
+                    ? idleMaxVolume * (1f - rpmRatio * 0.7f) : 0f;
+                currentIdleVolume = Mathf.Lerp(currentIdleVolume, target, Time.deltaTime * volumeTransitionSpeed);
                 idleSound.volume = currentIdleVolume;
-                
-                // ✅ IMPROVED: Idle pitch varies slightly with RPM
-                idleSound.pitch = Mathf.Lerp(0.8f, 1.2f, rpmRatio * 0.3f);
+                idleSound.pitch  = Mathf.Lerp(0.8f, 1.2f, rpmRatio * 0.3f);
             }
 
-            // ✅ IMPROVED: Running sound with better response to engine state
             if (runningSound)
             {
-                if (!runningSound.isPlaying && (throttleInput > 0 || powertrain.EngineRpm > 1200f)) 
-                    runningSound.Play();
-
-                // ✅ IMPROVED: Volume based on RPM and throttle, not just acceleration
-                float baseVolume = Mathf.Lerp(0.1f, runningMaxVolume, rpmRatio);
-                
-                // ✅ NEW: Throttle response - more volume when accelerating
-                float throttleEffect = Mathf.Lerp(0.3f, 1.0f, throttleInput);
-                
-                // ✅ NEW: Speed effect for highway sound
-                float speedEffect = Mathf.Lerp(0.7f, 1.0f, speedFactor);
-                
-                targetRunningVolume = baseVolume * throttleEffect * speedEffect;
-
-                // ✅ NEW: Smooth volume transitions
-                currentRunningVolume = Mathf.Lerp(currentRunningVolume, targetRunningVolume, 
-                    Time.deltaTime * volumeTransitionSpeed);
-                
+                if (!runningSound.isPlaying) runningSound.Play();
+                float baseVol    = Mathf.Lerp(0.1f, runningMaxVolume, rpmRatio);
+                float throttleEf = Mathf.Lerp(0.3f, 1.0f, throttle);
+                float speedEf    = Mathf.Lerp(0.7f, 1.0f, speedFactor);
+                float target     = baseVol * throttleEf * speedEf;
+                currentRunningVolume = Mathf.Lerp(currentRunningVolume, target, Time.deltaTime * volumeTransitionSpeed);
                 runningSound.volume = currentRunningVolume;
-                
-                // ✅ IMPROVED: Pitch based on actual RPM with rev limiter effect
-                float basePitch = Mathf.Lerp(0.8f, runningMaxPitch, rpmRatio);
-                runningSound.pitch = basePitch + revLimiter * 0.1f; // Add rev limiter crackling
+                runningSound.pitch  = Mathf.Lerp(0.8f, runningMaxPitch, rpmRatio) + revLimiter * 0.1f;
             }
 
-            // ✅ IMPROVED: Better reverse sound handling (if needed in future)
             if (reverseSound)
             {
-                if (currentSpeed < -0.1f) // Moving backwards
+                if (vehicle.GetVx() < -0.1f)
                 {
                     if (!reverseSound.isPlaying) reverseSound.Play();
                     reverseSound.volume = Mathf.Lerp(0f, reverseMaxVolume, rpmRatio);
-                    reverseSound.pitch = Mathf.Lerp(0.5f, reverseMaxPitch, rpmRatio);
+                    reverseSound.pitch  = Mathf.Lerp(0.5f, reverseMaxPitch, rpmRatio);
                 }
                 else
                 {
@@ -203,21 +182,8 @@ public class EngineAudio : MonoBehaviour
         }
         else
         {
-            // ✅ IMPROVED: Smooth fade out when engine stops
-            if (idleSound)
-            {
-                currentIdleVolume = Mathf.Lerp(currentIdleVolume, 0f, Time.deltaTime * volumeTransitionSpeed);
-                idleSound.volume = currentIdleVolume;
-                if (currentIdleVolume < 0.01f) idleSound.Stop();
-            }
-
-            if (runningSound)
-            {
-                currentRunningVolume = Mathf.Lerp(currentRunningVolume, 0f, Time.deltaTime * volumeTransitionSpeed);
-                runningSound.volume = currentRunningVolume;
-                if (currentRunningVolume < 0.01f) runningSound.Stop();
-            }
-
+            FadeOut(ref currentIdleVolume,    idleSound);
+            FadeOut(ref currentRunningVolume, runningSound);
             if (reverseSound)
             {
                 reverseSound.volume = Mathf.Lerp(reverseSound.volume, 0f, Time.deltaTime * volumeTransitionSpeed);
@@ -226,45 +192,32 @@ public class EngineAudio : MonoBehaviour
         }
     }
 
-    // ✅ IMPROVED: Better engine start sequence
+    private void FadeOut(ref float vol, AudioSource src)
+    {
+        if (src == null) return;
+        vol        = Mathf.Lerp(vol, 0f, Time.deltaTime * volumeTransitionSpeed);
+        src.volume = vol;
+        if (vol < 0.01f) src.Stop();
+    }
+
     public IEnumerator StartEngine()
     {
-        Debug.Log("Starting engine sequence");
-
-        // Play the initial starting sound
-        if (startingSound && engineStartClip)
-        {
+        Debug.Log("[EngineAudio] " + gameObject.name + ": Starting engine sequence");
+        yield return new WaitUntil(() => audioReady);
+        if (startingSound != null && engineStartClip != null)
             startingSound.PlayOneShot(engineStartClip);
-        }
-
-        yield return new WaitForSeconds(0.6f);
-
-        // ✅ IMPROVED: Start idle sound at appropriate volume
-        if (idleSound)
-        {
-            idleSound.volume = idleMaxVolume * 0.6f; // Start at 60% of max idle volume
-            idleSound.Play();
-        }
     }
 
-    public void StopEngine()
-    {
-        StopAllSounds();
-    }
+    public void StopEngine() { StopAllSounds(); }
 
     private void StopAllSounds()
     {
-        if (idleSound && idleSound.isPlaying) idleSound.Stop();
+        if (idleSound    && idleSound.isPlaying)    idleSound.Stop();
         if (runningSound && runningSound.isPlaying) runningSound.Stop();
         if (reverseSound && reverseSound.isPlaying) reverseSound.Stop();
-        
-        // ✅ NEW: Reset volume variables
-        currentIdleVolume = 0f;
+        currentIdleVolume    = 0f;
         currentRunningVolume = 0f;
     }
 
-    void OnDisable()
-    {
-        StopAllSounds();
-    }
+    void OnDisable() { StopAllSounds(); }
 }
