@@ -104,7 +104,7 @@ public class DriverNashHUD : MonoBehaviour
         float gap = Gap();
         if (gap < 990f)
         {
-            _gapLabel.text  = $"Gap   {gap:F1} m   {icon}";
+            _gapLabel.text  = $"Gap   {gap:F1} m";
             _gapLabel.color = gap > 15f ? new Color(0.35f, 0.9f, 0.45f)
                             : gap > 8f  ? new Color(1f, 0.82f, 0.2f)
                                         : new Color(1f, 0.3f, 0.3f);
