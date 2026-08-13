@@ -11,13 +11,15 @@ public class PlatoonManager : MonoBehaviour
 
     [Header("Platoon Parameters")]
     // These parameters define the behavior of the platoon.
-    public float platoonMaxVelocity = 250 / 3.6f;
+    public float platoonMaxVelocity    = 250 / 3.6f;
     public float platoonTargetVelocity = 50 / 3.6f; // Target speed 50 km/h converted to m/s
-    public float MaxAcceleration = 2.5f;
+    public float MaxAcceleration       = 2.5f;
+    public float PlatoonTimeHeadway    = 1.5f;  // [s] — single source of truth; pushed to Nash configs on Start
+    public float PlatoonStandstillDist = 2.0f;  // [m] — single source of truth; pushed to Nash configs on Start
 
-    // Pulled from NashCoordinator.settings so both stay in sync — no duplicate Inspector field needed
-    public float TimeGap        => nashCoordinator != null ? nashCoordinator.Settings.SafetyField.PlatoonTimeGap : 1.5f;
-    public float StandstillDist => nashCoordinator != null ? nashCoordinator.Settings.SafetyField.StandstillDist : 2.0f;
+    // Both read directly from Inspector fields — single source of truth, no Nash dependency
+    public float TimeGap        => PlatoonTimeHeadway;
+    public float StandstillDist => PlatoonStandstillDist;
     
     [Header("Control Inputs")]
     private float[] ThrottleInput;
@@ -47,8 +49,19 @@ public class PlatoonManager : MonoBehaviour
     [Header("Nash")]
     public NashCoordinator nashCoordinator;   // Assign in Inspector — activated on J
 
+    void PushToNashConfigs()
+    {
+        if (nashCoordinator == null) return;
+        nashCoordinator.Settings.SafetyField.PlatoonTimeGap = PlatoonTimeHeadway;
+        nashCoordinator.Settings.SafetyField.StandstillDist = PlatoonStandstillDist;
+        nashCoordinator.Settings.RefGen.RajamaniH           = PlatoonTimeHeadway;
+    }
+
+    void OnValidate() => PushToNashConfigs();
+
     void Start()
     {
+        PushToNashConfigs();
         SetupPlatoon();
         InitializeDataLogging();
         InitializeVehicleStates();
