@@ -1,16 +1,24 @@
 ﻿using System;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
-public class Readme : ScriptableObject
+namespace HMI.Utilities
 {
-    public Texture2D icon;
-    public string title;
-    public Section[] sections;
-    public bool loadedLayout;
 
-    [Serializable]
-    public class Section
+
+    public class Readme : ScriptableObject
     {
-        public string heading, text, linkText, url;
+        public Texture2D icon;
+        public string title;
+        public Section[] sections;
+        public bool loadedLayout;
+        public Scene[] scenes;
+
+        [Serializable]
+        public class Section
+        {
+            public string heading, text, linkText, url;
+        }
     }
+
 }
