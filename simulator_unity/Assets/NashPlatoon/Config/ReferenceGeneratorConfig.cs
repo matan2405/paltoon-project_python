@@ -17,7 +17,15 @@ public class ReferenceGeneratorConfig : ScriptableObject {
     public float CatchupMultiplier    = 1.05f;  // cruise target = V_platoon × this
     public float FreeDelta            = 4.0f;   // IDM exponent for free-road acceleration
     public float CatchupVelThreshold  = 5.0f;   // vel diff above this always triggers CATCHUP [m/s]
-    public float FollowingGapDeadband = 3.0f;   // gap error below this in FOLLOWING → velocity-only tracking [m]
+    // Gap deadband: gap errors SMALLER than (desGap × Frac) are treated as settled →
+    // only KV velocity tracking, no parabolic correction. Relative to desGap so the
+    // deadband scales correctly with speed (desGap = s0 + H*vx).
+    // Following: 3% (≈0.55 m at 120 km/h) — suppresses parabolic limit cycle in steady-state.
+    // Merge:     0% (always active parabola) — full pursuit of gap error until Following.
+    //            Non-zero Merge deadband can leave a static offset if the system does not
+    //            transition to Following.
+    public float FollowingGapDeadbandFrac = 0.03f;
+    public float MergeGapDeadbandFrac     = 0.00f;
 
     // ── IDM — Human longitudinal reference ───────────────────────────────────
     // HighD-calibrated values from Zhang & Sun 2024 (passenger cars, ~68 km/h steady-state).

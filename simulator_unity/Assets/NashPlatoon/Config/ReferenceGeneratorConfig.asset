@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b77d82c5277322f4cb96ef0ecf46cd76, type: 3}
   m_Name: ReferenceGeneratorConfig
   m_EditorClassIdentifier: Assembly-CSharp::ReferenceGeneratorConfig
-  RajamaniH: 1.5
+  RajamaniH: 0.5
   AComfort: 1.5
   KV: 0.4
   K1Ctg: 0.05

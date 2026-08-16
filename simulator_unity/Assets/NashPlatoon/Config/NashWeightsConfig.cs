@@ -7,8 +7,12 @@ public class NashWeightsConfig : ScriptableObject {
     public float Q_pos_terminal = 50000f, Q_vel_terminal = 6000f;
 
     [Header("Long effort")]
-    // Q_vel/R1 ≈ 0.02 (= Python current B1 Pareto: Q_vel=1500, R1=75000).
+    // R1_long: GapSearch — CATCHUP vel_err is large (≥10 m/s), QP clips to aMax regardless of R1.
+    //          R1=75000 safe here (same u1 output as R1=10000 after aMax clip).
+    // R1_long_Merge: vel_err≈0 when speeds matched but gap_err=14m. R1=75000 → u1=0.32 m/s² (too weak).
+    //          R1=10000 → u1=1.36 m/s² (closes 14m gap). Mirrors R1_lat_GapSearch pattern.
     public float R1_long = 75000f, R2_long = 120000f;
+    public float R1_long_Merge = 10000f;  // replaces R1_long on GapSearch→Merge transition
 
     [Header("Long — Adaptive R2 EMA (R2LongStart → R2LongFollow per l_n)")]
     // R2LongStart: system leads when joining. R2LongFollow: human leads in steady-state.
@@ -22,7 +26,11 @@ public class NashWeightsConfig : ScriptableObject {
     // When driver actively presses pedals, R2 scales down to R2LongFollow × R2ActivityMinScale,
     // amplifying u2 and giving the driver stronger authority during intentional inputs.
     // activity in [0, 0.3] → scale ramps from 1 → R2ActivityMinScale.
-    public float R2ActivityMinScale = 0.25f;
+    // Phase-dependent: system-led during Merge, driver-led during Following.
+    //   Merge:     1.0 — no R2 reduction; system retains authority for platoon join.
+    //   Following: 0.5 — driver has meaningful authority in steady-state.
+    public float R2ActivityMinScale          = 0.5f;   // Following default
+    public float R2ActivityMinScale_Merge    = 1.0f;   // Merge — no driver amplification
 
     // Level 1-2 safety ceilings — wide enough to never constrain GetPhysicalAccelBounds().
     // DO NOT tighten these for comfort or style (use cost weights S1/S2 for that).

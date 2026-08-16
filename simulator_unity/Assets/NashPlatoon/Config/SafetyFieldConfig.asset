@@ -16,10 +16,10 @@ MonoBehaviour:
   LongEmergencyDist: 8
   LongMaxForce: 800
   LongEmaAlpha: 0.2
-  LongMinSafeThw: 1
+  LongMinSafeThw: 0.5
   LongMinSafeDistFloor: 5
   LongEmergencyOffset: 1
-  PlatoonTimeGap: 1.5
+  PlatoonTimeGap: 0.5
   StandstillDist: 2
   VehicleLength: 4.177
   LaneWidth: 3.5

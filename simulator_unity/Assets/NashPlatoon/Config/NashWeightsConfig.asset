@@ -17,12 +17,13 @@ MonoBehaviour:
   Q_pos_terminal: 50000
   Q_vel_terminal: 6000
   R1_long: 75000
-  R2_long: 120000
-  R2LongStart: 120000
-  R2LongFollow: 40000
+  R1_long_Merge: 10000
+  R2_long: 100000
+  R2LongStart: 100000
+  R2LongFollow: 75000
   R2LongEmaAlpha: 0.05
-  R2LongUpdateThreshold: 50
-  R2ActivityMinScale: 0.25
+  R2LongUpdateThreshold: 1000
+  R2ActivityMinScale: 0.5
   U1Min: -20
   U1Max: 10
   U2Min: -20
@@ -54,8 +55,8 @@ MonoBehaviour:
   Q_LatUpdateThreshold: 500
   DeltaMin: -0.436
   DeltaMax: 0.436
-  LatJerkMaxHuman: 5
-  LatJerkMaxSystem: 7
+  LatJerkMaxHuman: 3
+  LatJerkMaxSystem: 4
   LatJerkTransientSec: 2
   IbrMaxIter: 15
   IbrTol: 0.0001
