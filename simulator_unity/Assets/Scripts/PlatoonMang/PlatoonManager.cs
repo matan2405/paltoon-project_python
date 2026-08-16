@@ -36,7 +36,7 @@ public class PlatoonManager : MonoBehaviour
     private float[] acc;
     private float[] vx;
     private float[] _prevAcc;
-    private const float JerkMax = 2.0f; // ISO 15622 [m/s³]
+    private const float JerkMax = 5.0f; // ISO 15622 §A.1 comfort limit [m/s³]
 
     [Header("Ego Vehicle (Join Trigger)")]
     public AdvancedBicycleModel egoVehicle;   // Assign in Inspector — starts outside platoon

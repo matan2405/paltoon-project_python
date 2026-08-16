@@ -19,12 +19,12 @@ public class Powertrain
     private const float idleRPM = 800f;        // Engine idle RPM
     private const float redlineRPM = 6700f;    // Engine redline
 
-    // Accurate RPM points from the graphs
-    private const float torqueRiseStartRPM = 1200f;
-    private const float torqueRiseEndRPM = 1600f;
-    private const float torquePlateauEndRPM = 4300f;
-    private const float powerPeakStartRPM = 4500f;
-    private const float powerPeakEndRPM = 6200f;
+    // RPM breakpoints: idle→1000 and 1000→1600 from dyno graph; plateau from official spec; power peak end from graph
+    private const float torqueRiseStartRPM  = 1000f;  // graph: rapid rise begins ~1000 rpm (~240 Nm)
+    private const float torqueRiseEndRPM    = 1600f;  // spec:  370 Nm plateau starts at 1600 rpm
+    private const float torquePlateauEndRPM = 4300f;  // spec:  370 Nm plateau ends at 4300 rpm
+    private const float powerPeakStartRPM   = 4500f;  // spec:  power-limited zone starts
+    private const float powerPeakEndRPM     = 6400f;  // graph: power plateau ends at ~6400 rpm
 
     // Engine response characteristics
     private float engineRpmAcceleration = 2500f; // FASTER RPM increases
@@ -33,9 +33,12 @@ public class Powertrain
 
     private float angularVelocity;
 
-    // ✅ MUCH STRONGER: Engine braking for realistic deceleration
-    private const float engineBrakingCoefficient = 0.8f; // Increased significantly from 0.5f
-    private const float compressionBrakingForce = 400f;   // DOUBLED from 200f
+    // Rajamani Eq. 9.1.3 quadratic engine friction coefficients (Tf = a0·ωe² + a1·ωe + a2).
+    // Calibrated so Fengbrk ≈ 50–70 N at highway RPM (~2900 rpm, 33 m/s in 5th gear),
+    // giving total coast decel ≈ 0.65–0.75 m/s² (literature: 0.2–1.0 m/s²).
+    private const float engBrkA0 = 0.0008f; // quadratic [N/(rpm²)] → ~6.8 N at 2900 rpm contribution
+    private const float engBrkA1 = 0.008f;  // linear    [N/rpm]   → ~23 N at 2900 rpm contribution
+    private const float engBrkA2 = 15f;     // constant  [N]       → 15 N base drag
 
     public float EngineRpm { get; private set; }
     public int EngineState
@@ -119,10 +122,12 @@ public class Powertrain
 
         if (rpm <= torqueRiseStartRPM)
         {
+            // 800–1000 rpm: gentle rise from idle torque to ~240 Nm (graph)
             return Mathf.Lerp(180f, 240f, (rpm - idleRPM) / (torqueRiseStartRPM - idleRPM));
         }
         else if (rpm <= torqueRiseEndRPM)
         {
+            // 1000–1600 rpm: rapid rise to peak 370 Nm (graph + spec)
             return Mathf.Lerp(240f, maxTorque, (rpm - torqueRiseStartRPM) / (torqueRiseEndRPM - torqueRiseStartRPM));
         }
         else if (rpm <= torquePlateauEndRPM)
@@ -157,31 +162,22 @@ public class Powertrain
         return (torque * angularVelocity) / 1000f; // Power in kW
     }
 
-    // ✅ MUCH STRONGER: Engine braking that provides realistic deceleration
+    // Rajamani Eq. 9.1.3: Tf = a0·ωe² + a1·ωe + a2, scaled by gear ratio.
+    // Physical interpretation: viscous drag (quadratic) + dry friction (linear) + constant pumping loss.
+    // Gear factor: higher gear = less engine braking (engine sees lower RPM per wheel rev).
     private float CalculateEngineBrakingForce(float currentRpm, float vx)
     {
         if (engineState != 2 || Mathf.Abs(vx) < 0.1f) return 0f;
 
-        float rpmFactor = Mathf.Clamp01((currentRpm - idleRPM) / (redlineRPM - idleRPM));
-        float speedFactor = Mathf.Clamp01(Mathf.Abs(vx) / 35f);
+        float N = currentRpm / 1000f; // normalise to kRPM for numerical stability
+        float Tf = engBrkA0 * N * N + engBrkA1 * N + engBrkA2;
 
-        // ✅ MUCH STRONGER: Realistic engine braking forces
-        float compressionBraking = compressionBrakingForce * rpmFactor * speedFactor;
-        float internalFriction = engineBrakingCoefficient * currentRpm * 0.25f; // Doubled friction
-        float turboEffect = 60f * rpmFactor * speedFactor; // Doubled turbo effect
+        // Scale by overall gear ratio (higher gear = lower engine torque at wheels).
+        // GetCurrentGearReduction() returns overall ratio (≈3.2 in 5th); divide by top-gear ratio
+        // so Fengbrk is roughly constant in top gear and larger in low gears.
+        float gearFactor = transmission.GetCurrentGearReduction() / 3.2f;
 
-        // ✅ STRONGER: Gear-based multiplier with more effect
-        float gearMultiplier = transmission.GetCurrentGearReduction() / 6f; // More braking effect (was /8f)
-
-        // ✅ SPEED-BASED: More braking at higher speeds
-        float speedMultiplier = 1f + (speedFactor * 0.8f); // Increased from 0.5f
-
-        // ✅ NEW: RPM-based multiplier - higher RPM = more braking
-        float rpmMultiplier = 1f + (rpmFactor * 1.2f);
-
-        float totalBraking = (compressionBraking + internalFriction + turboEffect) * gearMultiplier * speedMultiplier * rpmMultiplier;
-
-        return totalBraking;
+        return Mathf.Max(0f, Tf * gearFactor);
     }
 
     public float CalculateEngineForce(float throttle, float vx)
@@ -241,8 +237,9 @@ public class Powertrain
             // Convert torque to force at wheel contact patch
             float engineForce = torqueAtWheels / vehicleParams.wheelRadius;
 
-            // Apply throttle scaling
-            return engineForce * throttle;
+            // Clamp by power and traction limits
+            float maxF = CalculateMaxForceAtCurrentSpeed(vx);
+            return Mathf.Min(engineForce * throttle, maxF);
         }
         else
         {
@@ -333,13 +330,24 @@ public class Powertrain
     /// Calculate maximum possible force at current speed
     public float CalculateMaxForceAtCurrentSpeed(float vx)
     {
-        // Calculate maximum force in current gear
-        float maxTorque = 370f; // Maximum engine torque
+        // Torque-limited force: actual engine torque at current RPM × gear reduction → wheel contact patch
         float totalGearReduction = transmission.GetCurrentGearReduction();
-        float maxTorqueAtWheels = maxTorque * totalGearReduction;
-        float maxForce = maxTorqueAtWheels / vehicleParams.wheelRadius;
-        
-        return maxForce;
+        float fTorque = (CalculateEngineTorque(EngineRpm) * totalGearReduction) / vehicleParams.wheelRadius;
+
+        // Power-limited force: F = P(rpm) / vx — uses actual power at current RPM, not peak.
+        // Clamp denominator to avoid unrealistically large values at near-zero speed.
+        float vRef   = Mathf.Max(Mathf.Abs(vx), 7f);
+        float fPower = (CalculateEnginePower(EngineRpm) * 1000f) / vRef;
+
+        // Traction limit (FWD): only front axle drives.
+        // Front axle static load = mass × 0.62 (62/38 weight split, VehicleParameters).
+        // μ = tireFrictionCoefficient (0.8, dry asphalt, VehicleParameters).
+        // Under acceleration load transfers rearward → static split is an upper bound.
+        float fTraction = vehicleParams.tireFrictionCoefficient
+                        * vehicleParams.mass * 0.62f
+                        * vehicleParams.gravity;
+
+        return Mathf.Min(fTorque, Mathf.Min(fPower, fTraction));
     }
     // Engine braking force at a given speed, without side effects (read-only)
     public float GetEngineBrakingForce(float vx) {

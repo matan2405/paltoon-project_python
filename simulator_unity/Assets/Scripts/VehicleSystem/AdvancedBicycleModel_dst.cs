@@ -489,6 +489,41 @@ public class AdvancedBicycleModel : MonoBehaviour
     //   m·(v̇x − vy·ψ̇) = Fxf·cosδ + Fxr − Fyf·sinδ − Ra − Rr
     // aMax: full-throttle net (Fxf_engine_max·cosδ − Faero − Rr + F_couple) / m
     // aMin: full-brake + engine braking (−FbrakeMax − F_engBrk − Faero − Rr + F_couple) / m
+    // Prediction-horizon variant: evaluates bounds at an arbitrary vxQuery without
+    // mutating vehicle state. All lateral terms (vyBody, psiDot, delta) are taken
+    // from the current vehicle state — the best available approximation for future
+    // horizon steps, and correct for k=0.
+    public void GetPhysicalAccelBounds_Pred(float vxQuery, out float aMin, out float aMax)
+    {
+        float m     = vehicleParams.mass;
+        float delta = angles.average;
+        float cosD  = Mathf.Cos(delta);
+        float sinD  = Mathf.Sin(delta);
+
+        float vxSafe = Mathf.Max(Mathf.Abs(vxQuery), 1.0f);
+        float fv     = ((float)System.Math.Tanh(10.0 * Mathf.Abs(vxQuery) - 8.0) + 1f) / 2f;
+        float alphaF = fv * (delta - Mathf.Atan2(vyBody + vehicleParams.lf * psiDot, vxSafe));
+        float mu     = vehicleParams.tireFrictionCoefficient;
+        float Fz_f   = m * vehicleParams.gravity * vehicleParams.lr
+                     / (vehicleParams.lf + vehicleParams.lr) / 2f;
+        float Fyf    = 2f * TireForce(alphaF, vehicleParams.Caf, mu, Fz_f);
+
+        float Faero = 0.5f * 1.225f * vehicleParams.dragCoefficient * vehicleParams.frontalArea * vxQuery * vxQuery;
+        float Cr    = 0.012f * (1f + vxQuery * 0.008f);
+        float Frr   = m * vehicleParams.gravity * Cr;
+
+        float F_couple = m * vyBody * psiDot - Fyf * sinD;
+
+        float Fxf_max = powertrain.CalculateMaxForceAtCurrentSpeed(vxQuery);
+        aMax = (Fxf_max * cosD - Faero - Frr + F_couple) / m;
+        aMax = Mathf.Max(aMax, 0f);
+
+        float Fbrake_max  = brakeSystem.CalculateBrakeForce(1.0f, vxQuery);
+        float F_eng_coast = powertrain.GetEngineBrakingForce(vxQuery);
+        aMin = (-Fbrake_max - F_eng_coast - Faero - Frr + F_couple) / m;
+        aMin = Mathf.Min(aMin, 0f);
+    }
+
     public void GetPhysicalAccelBounds(out float aMin, out float aMax)
     {
         float m     = vehicleParams.mass;
