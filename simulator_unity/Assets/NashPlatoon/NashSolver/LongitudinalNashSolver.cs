@@ -47,6 +47,10 @@ namespace NashPlatoon
         // ── Physical box bounds (updated each Nash step from vehicle model) ────
         float _u1Min, _u1Max, _u2Min, _u2Max;
 
+        // ── Active R1/R2 (survive re-linearisation) ───────────────────────────
+        float _r1Active;
+        float _r2Active;
+
         // ── Statistics (read-only) ────────────────────────────────────────────
         public int   LastIbrIters { get; private set; }
         public bool  LastConverged { get; private set; }
@@ -78,6 +82,8 @@ namespace NashPlatoon
             // GetPhysicalAccelBounds() — they are NOT tuning knobs.
             s._u1Min = w.U1Min; s._u1Max = w.U1Max;   // e.g. -20 / +10
             s._u2Min = w.U1Min; s._u2Max = w.U1Max;   // same plant → same ceiling
+            s._r1Active = w.R1_long;
+            s._r2Active = w.R2_long;
             s.InitDoubleIntegratorC();              // builds C only
             s.UpdateLinearization(vehicle, t.NashDtLong);   // builds A,B from physics
             return s;
@@ -187,7 +193,7 @@ namespace NashPlatoon
             DisposeOsqp();
 
             // Player 1 — P1 = 2*(HQ1H + R1·I)
-            double[] P1 = BuildPMatrix((double)W.R1_long, 1.0);
+            double[] P1 = BuildPMatrix((double)_r1Active, 1.0);
             var (P1d, P1i, P1p) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
 
             double[] q0 = new double[Nu];
@@ -202,7 +208,7 @@ namespace NashPlatoon
             for (int i = 0; i < LambdaLevels.Length; i++)
             {
                 double alpha = PustilnikAlpha(LambdaLevels[i]);
-                double[] P2 = BuildPMatrix((double)W.R2_long, alpha);
+                double[] P2 = BuildPMatrix((double)_r2Active, alpha);
                 var (P2d, P2i, P2p) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
 
                 double[] l2 = new double[_mCon], u2 = new double[_mCon];
@@ -244,11 +250,9 @@ namespace NashPlatoon
             double[] HQ1r1 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r1, zFree));
             double[] HQ1r2 = MatrixOps.MV(HtQ1, Nu, rLen, MatrixOps.Sub(r2, zFree));
 
-            // Update jerk-from-prev bounds using physical box limits set by UpdatePhysicalBounds
-            float du1 = W.Du1Max * T.NashDtLong;
-            float du2 = W.Du2Max * T.NashDtLong;
-            UpdateBoundsForCall(_s1, _u1Min, _u1Max, du1, (float)_u1Prev);
-            UpdateBoundsForCall(_s2[lamIdx], _u2Min, _u2Max, du2, (float)_u2Prev);
+            // Bounds already set by UpdatePhysicalBounds (called from NashCoordinator with
+            // phase-aware du1). Do NOT recompute from W.Du1Max here — that would overwrite
+            // the Following-phase reduction to 0.5 m/s²/s and reintroduce chattering.
 
             // Warm-start: inject shifted-horizon solution from previous Nash step
             InjectWarmStart(_s1,       _ws1);
@@ -325,10 +329,21 @@ namespace NashPlatoon
                     _ws2[i][k] = ax;
         }
 
+        /// Hot-path R1 update: rebuild P1 with new R1 value.
+        /// Persisted in _r1Active so re-linearisation does not revert to W.R1_long.
+        public void UpdateR1(float r1New)
+        {
+            _r1Active = r1New;
+            double[] P1 = BuildPMatrix((double)r1New, 1.0);
+            var (P1d, _, _) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
+            _s1.UpdateP(P1d);
+        }
+
         /// Hot-path R2 update: rebuild P2 for all λ levels with new R2 value.
-        /// Uses osqp_update_data_mat — no re-factorisation required.
+        /// Persisted in _r2Active so re-linearisation does not revert to W.R2_long.
         public void UpdateR2(float r2New)
         {
+            _r2Active = r2New;
             for (int i = 0; i < LambdaLevels.Length; i++)
             {
                 double alpha = PustilnikAlpha(LambdaLevels[i]);
@@ -365,8 +380,12 @@ namespace NashPlatoon
                         float duStep, float uPrev)
         {
             for (int k = 0; k < Nu; k++) { l[k] = uMin; u[k] = uMax; }
-            l[Nu] = uPrev - duStep;
-            u[Nu] = uPrev + duStep;
+            // Clamp jerk-from-prev to box so the QP is always feasible.
+            // Without clamping, uPrev outside [uMin,uMax] makes l[Nu] > u[Nu]
+            // → OSQP returns infeasible → IBR breaks early → u frozen at warm-start.
+            l[Nu] = Math.Max(uPrev - duStep, uMin);
+            u[Nu] = Math.Min(uPrev + duStep, uMax);
+            if (l[Nu] > u[Nu]) l[Nu] = u[Nu];  // uPrev far out of bounds → clamp to uMax
             for (int k = 1; k < Nu; k++) { l[Nu + k] = -duStep; u[Nu + k] = duStep; }
         }
 
