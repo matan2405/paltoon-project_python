@@ -419,11 +419,15 @@ public class NashCoordinator : MonoBehaviour
                         + (1f - settings.Nash.R2LongEmaAlpha) * _r2LongCurrent;
         // Activity-based R2 scaling (Lazcano et al. 2021): when driver presses pedals,
         // reduce R2 to amplify u2 — gives perceptible authority during intentional inputs.
+        // Phase-dependent min scale: Merge=1.0 (system-led join), Following=0.5 (driver-led).
         float pedalThr = VehicleInputs.Instance != null ? VehicleInputs.Instance.ThrottleInput : 0f;
         float pedalBrk = VehicleInputs.Instance != null ? VehicleInputs.Instance.BrakeInput    : 0f;
         float longActivity = Mathf.Max(pedalThr, pedalBrk);
+        float actMinScale = (Phase == MergePhase.Merge || Phase == MergePhase.GapSearch)
+                          ? settings.Nash.R2ActivityMinScale_Merge
+                          : settings.Nash.R2ActivityMinScale;
         float longActScale = 1f - Mathf.Clamp01(longActivity / 0.3f)
-                                * (1f - settings.Nash.R2ActivityMinScale);
+                                * (1f - actMinScale);
         float r2LongEffective = _r2LongCurrent * longActScale;
         if (Mathf.Abs(r2LongEffective - _r2LongPrev) > settings.Nash.R2LongUpdateThreshold)
         {
@@ -448,11 +452,24 @@ public class NashCoordinator : MonoBehaviour
                 _driverCalib.UpdateFollowing(ego.GetVx(), _longSafety.LastGap, dv);
         }
 
+        // Phase-aware R1:
+        //   GapSearch (vel_err small) / Merge : R1_long_Merge (10000) — closes gap error aggressively
+        //   Following                         : R1_long (75000)       — quiet steady-state, less chattering
+        if (Phase == MergePhase.Following)
+        {
+            _longNash.UpdateR1(settings.Nash.R1_long);
+        }
+        else if (Phase == MergePhase.GapSearch &&
+                 Mathf.Abs(velErr) < settings.RefGen.CatchupVelThreshold)
+        {
+            _longNash.UpdateR1(settings.Nash.R1_long_Merge);
+        }
+
         // Reference trajectories
         float[] r1 = _longRef.SystemRef(
             ego, leader,
             platoonManager.GetTargetVelocity(),
-            Phase, aMin, aMax,
+            Phase,
             settings.Timing.NashNp, settings.Timing.NashDtLong,
             usingVirtual ? _virtualLeader : null);
 
@@ -461,9 +478,24 @@ public class NashCoordinator : MonoBehaviour
             settings.Timing.NashNp, settings.Timing.NashDtLong,
             _driverCalib.T);
 
-        // Tighten box constraints to physical vehicle limits before solving
+        // Tighten box constraints to physical vehicle limits before solving.
+        // Du1Max is the per-step jerk limit passed to the QP solver.
+        // Following: tight 0.5 m/s³ (ISO 15622:2018 §A.1 ACC comfort) — steady-state.
+        // Merge, near steady-state (|vel_err|<0.5, |gap_err|<3m): 1.5 m/s³ — soft cap
+        //   damps residual chattering while preserving enough authority for late corrections.
+        // Merge/GapSearch, transient: full Du1Max (15) — emergency catchup, comfort secondary.
+        float du1Max;
+        if (Phase == MergePhase.Following)
+            du1Max = 0.5f;
+        else if (Phase == MergePhase.Merge &&
+                 Mathf.Abs(velErr) < 0.5f &&
+                 Mathf.Abs(gapErr) < 3f)
+            du1Max = 1.5f;
+        else
+            du1Max = settings.Nash.Du1Max;
+        float du1 = Mathf.Min(settings.Nash.Du1Max, du1Max) * settings.Timing.NashDtLong;
         _longNash.UpdatePhysicalBounds(aMin, aMax,
-            settings.Nash.Du1Max * settings.Timing.NashDtLong,
+            du1,
             settings.Nash.Du2Max * settings.Timing.NashDtLong);
 
         // Nash solve
@@ -777,6 +809,10 @@ public class NashCoordinator : MonoBehaviour
                         _prevGapErr     = 0f;
                         _prevGapErrTime = t;
                         _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        // Switch to Merge R1: vel_err≈0 at this point so R1=75000 gives u1≈0.32 m/s²
+                        // (insufficient to close gap_err≈14m). R1_long_Merge=10000 gives u1≈1.36 m/s².
+                        // GapSearch used R1_long=75000 safely: large vel_err clips to aMax regardless of R1.
+                        _longNash.UpdateR1(settings.Nash.R1_long_Merge);
                         Phase = MergePhase.Merge;
                         Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s (velErr={gsVelErr:F2} m/s) | " +
                                   $"Calibrator end-of-GapSearch: {_driverCalib.GetStatusString()}");

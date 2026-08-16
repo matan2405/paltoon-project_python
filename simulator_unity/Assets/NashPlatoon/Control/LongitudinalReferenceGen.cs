@@ -33,7 +33,6 @@ public class LongitudinalReferenceGen
         AdvancedBicycleModel leader,
         float platoonTargetVelocity,
         MergePhase phase,
-        float aMin, float aMax,
         int Np, float dt,
         VirtualLeaderVehicle virtualLeader = null)
     {
@@ -79,12 +78,17 @@ public class LongitudinalReferenceGen
             float initDesGap = _sf.StandstillDist + _c.RajamaniH * vx;
             if ((initGap > 2f * initDesGap && lv > vx + 2f) || lv > vx + _c.CatchupVelThreshold)
             {
-                float xk = x;
+                // Velocity target = lv (creates large tracking error → QP saturates at aMax).
+                // Position integrates with physically bounded acceleration so the position
+                // reference is consistent with what the vehicle can actually achieve.
+                float xk = x, vxk = vx;
                 for (int k = 0; k < Np; k++)
                 {
-                    xk += lv * dt;
+                    ego.GetPhysicalAccelBounds_Pred(vxk, out float aMinK, out float aMaxK);
+                    vxk += Mathf.Clamp((lv - vxk) / dt, aMinK, aMaxK) * dt;
+                    xk  += vxk * dt;
                     ref_[2 * k]     = xk;
-                    ref_[2 * k + 1] = lv;
+                    ref_[2 * k + 1] = lv;   // velocity reference stays at lv to keep large error
                 }
                 return ref_;
             }
@@ -92,6 +96,9 @@ public class LongitudinalReferenceGen
 
         for (int k = 0; k < Np; k++)
         {
+            // Recompute physical bounds at the predicted vx for this horizon step.
+            ego.GetPhysicalAccelBounds_Pred(vx, out float aMinK, out float aMaxK);
+
             float a;
             float gap    = lx - x - lHalfLen - ego.GetLength() / 2f;
             float desGap = _sf.StandstillDist + _c.RajamaniH * vx;
@@ -105,7 +112,7 @@ public class LongitudinalReferenceGen
                 a = _c.K1Ctg > 0
                     ? Mathf.Clamp(
                         _c.IdmAMax * (1f - Mathf.Pow(ratio, _c.FreeDelta)),
-                        aMin, aMax)
+                        aMinK, aMaxK)
                     : 0f;
             }
             else
@@ -125,22 +132,23 @@ public class LongitudinalReferenceGen
                 if (ttc < _c.TtcThreshold || gap < minCritGap || gap < minSafeDynamic)
                 {
                     // COLLISION_AVOIDANCE: request maximum physically achievable deceleration.
-                    // aMin already accounts for current speed, brake capacity, and road
-                    // friction via GetPhysicalAccelBounds(). Using a fixed constant would
-                    // either exceed physics (unachievable QP target) or waste braking
-                    // headroom on surfaces where the vehicle could stop harder.
-                    a = aMin;
+                    // aMinK accounts for predicted speed, brake capacity, and road friction.
+                    a = aMinK;
                 }
                 else
                 {
                     // TRANSITIONAL: Rajamani parabolic + CTG
                     float gapError  = gap - desGap;     // >0 too far, <0 too close
 
-                    // In FOLLOWING with small gap error: skip gap correction and track
-                    // leader velocity only. Prevents R1 from generating non-zero acceleration
-                    // while the driver (correctly) releases the pedal, which would cause
-                    // permanent u1/u2 cancellation at near-zero net output.
-                    if (phase == MergePhase.Following && Mathf.Abs(gapError) < _c.FollowingGapDeadband)
+                    // When gap error is small, pure velocity tracking replaces the parabola.
+                    // The parabola sets vTarget = lv ± sqrt(2·a·|e|), which overshoots vx
+                    // every Nash step and creates a limit cycle when |e| is small.
+                    // Merge default 0% (always parabola — full pursuit until Following);
+                    // Following default 3% (suppress steady-state limit cycle).
+                    float deadbandFrac = (phase == MergePhase.Following)
+                                       ? _c.FollowingGapDeadbandFrac
+                                       : _c.MergeGapDeadbandFrac;
+                    if (Mathf.Abs(gapError) < desGap * deadbandFrac)
                     {
                         a = _c.KV * (lv - vx);
                     }
@@ -164,12 +172,12 @@ public class LongitudinalReferenceGen
                             a = aParabola;
                         }
                     }
-                    a = Mathf.Clamp(a, aMin, aMax);
+                    a = Mathf.Clamp(a, aMinK, aMaxK);
                 }
             }
 
-            vx = Mathf.Clamp(vx + a * dt, 0f, 50f);
-            x += vx * dt;
+            vx += a * dt;
+            x  += vx * dt;
             lx += lv * dt;
 
             ref_[2 * k]     = x;
@@ -283,8 +291,13 @@ public class LongitudinalReferenceGen
         float[] ref_ = new float[Np * 2];
         for (int k = 0; k < Np; k++)
         {
+            // Recompute physical bounds at the predicted vx for this horizon step.
+            ego.GetPhysicalAccelBounds_Pred(vx, out float aMinK, out float aMaxK);
+
             if (k < 5)
-                ak = Mathf.Clamp(ar1 * ak + (1f - ar1) * a_idm, aMin, aMax);
+                ak = Mathf.Clamp(ar1 * ak + (1f - ar1) * a_idm, aMinK, aMaxK);
+            else
+                ak = Mathf.Clamp(ak, aMinK, aMaxK);  // k >= 5: frozen but still bounded
             // k >= 5: ak stays frozen at value reached at k=4
 
             vx = Mathf.Clamp(vx + ak * dt, 0f, targetVelocity * 1.2f);
