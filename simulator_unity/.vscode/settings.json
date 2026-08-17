@@ -56,5 +56,5 @@
         "temp/": true,
         "Temp/": true
     },
-    "dotnet.defaultSolution": "simulator_unity.slnx"
+    "dotnet.defaultSolution": "sim.slnx"
 }
