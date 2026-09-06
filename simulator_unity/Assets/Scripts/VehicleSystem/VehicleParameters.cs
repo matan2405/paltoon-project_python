@@ -5,7 +5,7 @@ public class VehicleParameters
     [Header("Audi TT 2.0 TFSI - Official Specifications")]
     public float steeringRatio = 14.6f;       // From specs: 14.6:1
     public float maxSteeringWheelAngle = 450f; // Typical ±450 degrees (1.25 turns each way)
-    public float maxWheelAngle = 30.0f;       // Maximum wheel angle in degrees
+    public float maxWheelAngle = 25.0f;       // Bicycle-model centre-wheel angle [deg]; derived from Ackermann geometry with L=2.505m, W=1.572m → turning circle 10.96m per Audi TT specs
     public float maxSteeringAngle = 40.0f;    // Maximum steering wheel angle in degrees
     public float maxVelocity = 249f;          // From specs: 155 mph = 249 km/h
 
