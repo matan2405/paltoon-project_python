@@ -143,8 +143,6 @@ public class NashCoordinator : MonoBehaviour
         _driverCalib = new LongitudinalDriverCalibrator(
             s0:        rc.IdmS0,
             aMax:      rc.IdmAMax,
-            beta:      rc.IdmPlanB,
-            delta:     rc.IdmDelta,
             fallbackT: sf.PlatoonTimeGap,
             v0:        sf.LongVelocityReference / 3.6f);
     }
@@ -446,8 +444,7 @@ public class NashCoordinator : MonoBehaviour
         {
             float dv = ego.GetVx() - leader.GetVx();
             if (Phase == MergePhase.GapSearch || Phase == MergePhase.Merge)
-                _driverCalib.UpdateGapSearch(ego.GetVx(), ego.GetAx(),
-                                             _longSafety.LastGap, dv);
+                _driverCalib.UpdateGapSearch(ego.GetVx(), _longSafety.LastGap, dv);
             else if (Phase == MergePhase.Following)
                 _driverCalib.UpdateFollowing(ego.GetVx(), _longSafety.LastGap, dv);
         }
@@ -791,7 +788,7 @@ public class NashCoordinator : MonoBehaviour
                 {
                     var gsLeader   = _mergeLocked ? _lockedLeader : FindLeader(platoon);
                     float gsVelErr = gsLeader != null ? gsLeader.GetVx() - ego.GetVx() : 0f;
-                    bool velReady  = Mathf.Abs(gsVelErr) < settings.RefGen.CatchupVelThreshold;
+                    bool velReady  = Mathf.Abs(gsVelErr) < settings.Timing.MergeVelThreshold;
 
                     bool gapReady = true;
                     if (gsLeader != null)

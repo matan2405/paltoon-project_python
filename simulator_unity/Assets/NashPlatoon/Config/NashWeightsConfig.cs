@@ -12,7 +12,8 @@ public class NashWeightsConfig : ScriptableObject {
     // R1_long_Merge: vel_err≈0 when speeds matched but gap_err=14m. R1=75000 → u1=0.32 m/s² (too weak).
     //          R1=10000 → u1=1.36 m/s² (closes 14m gap). Mirrors R1_lat_GapSearch pattern.
     public float R1_long = 75000f, R2_long = 120000f;
-    public float R1_long_Merge = 10000f;  // replaces R1_long on GapSearch→Merge transition
+    public float R1_long_Merge     = 10000f;  // replaces R1_long on GapSearch→Merge transition
+    public float R1_long_Following = 20000f;  // replaces R1_long in Following (stronger than 75000 to close residual gap)
 
     [Header("Long — Adaptive R2 EMA (R2LongStart → R2LongFollow per l_n)")]
     // R2LongStart: system leads when joining. R2LongFollow: human leads in steady-state.

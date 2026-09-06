@@ -1,26 +1,24 @@
 // LongitudinalDriverCalibrator — Online IDM time-headway (T) estimation.
 //
-// Two calibration modes feeding the same circular buffer:
+// All phases use the same direct headway formula:
+//   T = (gap - s0) / vx
 //
-//   GAP_SEARCH / MERGE — IDM inversion:
-//     T = [gap×√(freeTerm - a/aMax) - s0 - vx×dv/(2√(aMax×β))] / vx
-//     Valid only when |dv| < 2 m/s. Breaks down at vx ≈ v0 (freeTerm → 0).
+// Rationale: IDM inversion (used previously in GapSearch/Merge) assumes the driver
+// is near IDM equilibrium, which is never true during catch-up or lane change.
+// Direct headway makes no equilibrium assumption — it reads the gap the driver
+// is currently accepting and asks: "if they held this gap at this speed, what T?"
 //
-//   FOLLOWING — direct headway:
-//     T = (gap - s0) / vx
-//     Uses the actual gap the driver is maintaining right now as the IDM attractor.
-//     This is valid because HumanRef is computed independently of Nash — R2 sees
-//     only driver inputs and real sensor data (gap, vx), so there is no circular
-//     dependency with the Nash output. T here means: "the driver is holding this
-//     gap, predict that they will continue to hold it."
-//     Filters: |dv| < 1 m/s (speed-matched), vx > 5 m/s.
-//     No ax filter — the driver may press pedals; what matters is the gap they
-//     choose to maintain, not whether they are momentarily accelerating.
+// Phase-specific filters:
+//   GapSearch : no |dv| filter — driver is intentionally closing, gap is informative.
+//               Measures the natural approach headway (typically 1.0–2.0 s).
+//   Merge     : no |dv| filter — driver is executing a lane change.
+//   Following : |dv| < 1 m/s — speed-matched steady-state only.
 //
-// The circular buffer runs continuously. In Following, steady-state samples
-// quickly evict the noisier Merge inversion samples (window=20, ~2s to refill).
+// The circular buffer (window=20) runs continuously. Following samples at platoon
+// headway (~0.4 s) quickly evict the larger GapSearch/Merge values, so T
+// converges to the platoon-synchronised headway within ~2 s of Following entry.
 //
-// Fallback: until IsReady, T = fallbackT (Zhang 2024 population mean = 1.5 s).
+// Fallback: T = fallbackT (1.5 s population mean, Zhang 2024) until first sample.
 //
 // aMax fixed at 0.553 m/s² (Zhang & Sun 2024). Not calibrated from HITL.
 
@@ -30,22 +28,19 @@ public class LongitudinalDriverCalibrator
 {
     // ── Fixed IDM parameters (not calibrated) ────────────────────────────────
     readonly float _s0;        // jam spacing [m]
-    readonly float _aMax;      // fixed comfortable acceleration [m/s²] (Zhang 2024 pop. mean)
-    readonly float _beta;      // comfortable deceleration [m/s²]
-    readonly float _delta;     // free-road exponent (default 4)
+    readonly float _aMax;      // fixed comfortable acceleration [m/s²] (Zhang 2024 pop. mean) — for diagnostics
     readonly float _fallbackT; // T used if calibration insufficient
     readonly float _v0;        // target velocity [m/s] (from constructor)
 
     // ── Calibration bounds ────────────────────────────────────────────────────
-    const float T_MIN = 0.5f;
+    // T_MIN = 0.3 s: CACC/SAE J3016 minimum platooning THW — allows Following samples
+    // at platoon headway (0.4–0.5 s) to be accepted and evict the pre-join 1.5 s estimate.
+    const float T_MIN = 0.3f;
     const float T_MAX = 3.0f;
 
-    // ── T running-mean window (GapSearch + Merge) ────────────────────────────
-    // Window of 20 samples. At 10 Hz Nash rate with |dv|<2 + rhs>0 filters,
-    // empirically ~50 valid samples arrive across GapSearch+Merge (~30s),
-    // but only ~22 pass all filters before Following — 20 is achievable and
-    // still averages out transients (std≈0.4s → SE≈0.09s at n=20).
-    // IsReady triggers only when the window is full → 20 valid samples.
+    // ── T running-mean window ─────────────────────────────────────────────────
+    // Window of 20 samples at 10 Hz Nash rate → ~2 s to fill.
+    // IsReady triggers when full; _tEst updates from the first sample onward.
     const int WINDOW_T = 20;
 
     // ── State ─────────────────────────────────────────────────────────────────
@@ -65,13 +60,10 @@ public class LongitudinalDriverCalibrator
     public int   GapSearchSamples => _tWindowCount;
 
     // ── Constructor ───────────────────────────────────────────────────────────
-    public LongitudinalDriverCalibrator(float s0, float aMax, float beta, float delta,
-                                        float fallbackT, float v0)
+    public LongitudinalDriverCalibrator(float s0, float aMax, float fallbackT, float v0)
     {
         _s0        = s0;
         _aMax      = aMax;
-        _beta      = beta;
-        _delta     = delta;
         _fallbackT = fallbackT;
         _v0        = v0;
 
@@ -90,38 +82,24 @@ public class LongitudinalDriverCalibrator
         _tWindowSum   = 0f;
     }
 
-    // ── GAP_SEARCH update — estimate T via running mean ───────────────────────
+    // ── GAP_SEARCH / MERGE update — direct headway T = (gap - s0) / vx ─────────
     //
-    // Called every Nash tick (10 Hz) during GapSearch/Merge when leader is visible.
-    // Filters:
-    //   gap ∈ [2, 200] m, vx > 5 m/s, |dv| < 2 m/s (near-equilibrium),
-    //   rhs > 0 (IDM physically consistent), tSample ∈ [T_MIN, T_MAX].
-    public void UpdateGapSearch(float vx, float aActual, float gap, float dv)
+    // No |dv| filter: driver is intentionally closing gap (GapSearch) or executing
+    // a lane change (Merge). The gap they accept at this moment reflects their
+    // natural approach headway — informative even out of IDM equilibrium.
+    // IDM inversion is not used: it requires near-equilibrium and breaks down
+    // when aActual >> aMax (catch-up) or when freeTerm → 0 (vx ≈ v0).
+    public void UpdateGapSearch(float vx, float gap, float dv)
     {
-        if (gap < 2f || gap > 200f)  return;
-        if (vx < 5f)                 return;
-        if (Mathf.Abs(dv) > 2f)     return;   // near-equilibrium only
+        if (gap < 2f || gap > 200f) return;
+        if (vx < 5f)                return;
+        if (dv <= 0f)               return;   // ego not closing → not informative
 
-        float v0 = Mathf.Max(_v0, 1f);
-
-        float freeTerm = 1f - Mathf.Pow(vx / v0, _delta);
-        float rhs      = freeTerm - aActual / _aMax;
-        if (rhs < 0f) return;
-
-        float sStar   = gap * Mathf.Sqrt(rhs);
-        float dvTerm  = vx * dv / (2f * Mathf.Sqrt(Mathf.Max(_aMax * _beta, 1e-6f)));
-        float tSample = (sStar - _s0 - dvTerm) / Mathf.Max(vx, 1f);
-
+        float tSample = (gap - _s0) / Mathf.Max(vx, 1f);
         if (tSample < T_MIN || tSample > T_MAX) return;
 
-        // Circular buffer running mean
-        if (_tWindowCount == WINDOW_T)
-            _tWindowSum -= _tWindow[_tWindowHead];   // evict oldest
-        else
-            _tWindowCount++;
-
         AddSample(tSample);
-        DebugLog($"[Calibrator/IDM] T={_tEst:F3}  sample={tSample:F3}  n={_tWindowCount}/{WINDOW_T}  gap={gap:F1}  dv={dv:F2}");
+        DebugLog($"[Calibrator/GapSearch] T={_tEst:F3}  sample={tSample:F3}  n={_tWindowCount}/{WINDOW_T}  gap={gap:F1}  dv={dv:F2}");
     }
 
     // ── Following update — direct headway T = (gap - s0) / vx ────────────────
