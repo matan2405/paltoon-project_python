@@ -167,7 +167,8 @@ public class DriverNashHUD : MonoBehaviour
             BuildPanel(ovCanvas.transform);
         }
 
-        _audio = GetComponent<AudioSource>() ?? gameObject.AddComponent<AudioSource>();
+        _audio = GetComponent<AudioSource>();
+        if (_audio == null) _audio = gameObject.AddComponent<AudioSource>();
         _audio.playOnAwake = false; _audio.spatialBlend = 0f;
     }
 
