@@ -309,7 +309,7 @@ dt_ego = float(np.median(np.diff(t_ego))) if len(t_ego) > 1 else 0.02
 def _section(title):
     print(f'\n-- {title} ' + '-' * max(0, 56 - len(title)))
 
-def _long_iso15622(ax_e, label='', t_e=None, nash_phase=None):
+def _long_iso15622(ax_e, t_e=None, nash_phase=None):
     # ISO 15622 s6.4: decel avg 2s, jerk avg 1s, accel peak.
     # Nash outputs at 0.1 s but ego CSV logs at dt_ego (~0.01 s): differentiating the
     # step-change at each Nash tick produces apparent spike jerk of ~(delta_u/0.01) that
@@ -354,7 +354,7 @@ def _long_iso15622(ax_e, label='', t_e=None, nash_phase=None):
     print(f'  ISO 15622 s6.4  Long. jerk   avg 1s <= 2.5 m/s3:  worst = {wjerk:.2f} m/s3  -> {s2}  [high-rate, may over-report]')
     print(f'  ISO 15622 s6.4  Long. accel  peak   <= 2.0 m/s2:  worst = {wacc:.2f} m/s2   -> {s3}  [high-rate]')
 
-def _lat_r79_iso11270(ax_e, psi_e, vx_e, phase_label='', t_e=None, is_merge=True):
+def _lat_r79_iso11270(ax_e, psi_e, vx_e, t_e=None, is_merge=True):
     # Correct lateral acceleration metric: a_lat = vx * psi_dot  (world-frame, felt by occupant).
     # vx^2 * delta / L  is the steady-state cornering formula — it gives the centripetal
     # acceleration only when the vehicle is tracking a constant-radius arc.  During a lane
@@ -362,34 +362,69 @@ def _lat_r79_iso11270(ax_e, psi_e, vx_e, phase_label='', t_e=None, is_merge=True
     # delta=0.038 rad at vx=28 m/s gives bm=11.35 m/s^2 but vx*psi_dot=0.70 m/s^2 at that instant).
     # Therefore all lateral accel checks use vx*psi_dot from ego_vehicle.csv.
     #
+    # Jerk is computed at Nash-rate (0.1 s) using delta_lat steps from ego_nash.csv to avoid
+    # spike amplification from differentiating the high-rate ego CSV.  a_lat at Nash-ticks is
+    # interpolated from vx*psi_dot at those timestamps.  Falls back to full-rate if Nash CSV
+    # unavailable.
+    #
     # is_merge=True:  R79 s5.6.4.4 lane-change framing (full + excl. 1st-s onset).
     # is_merge=False: ISO 11270 s5.4 LKAS steady-state framing (full phase only).
 
     psi_dot  = np.gradient(psi_e, dt_ego)
-    a_lat    = vx_e * psi_dot                      # [m/s^2], signed
-    lat_jerk = np.gradient(a_lat, dt_ego)
+    a_lat    = vx_e * psi_dot                      # [m/s^2], signed, high-rate
     wlong    = (-ax_e).max()
     s4 = ok if wlong <= 3.0 else fail
 
     wlat_full  = np.abs(a_lat).max()
-    wjlat_full = _moving_avg(lat_jerk, dt_ego, 0.5).max()
     frac3_full = (np.abs(a_lat) > 3.0).mean() * 100
 
+    # Jerk: prefer Nash-rate u1_lat steps to avoid step-change artifacts.
+    # u1_lat (system lateral command) changes only at each Nash solve tick (~0.1 s),
+    # unlike delta_lat which is the integrated wheel angle updated every frame.
+    jerk_rate_note = '[high-rate, may over-report]'
+    lat_jerk = np.gradient(a_lat, dt_ego)
+    wjlat_full = _moving_avg(lat_jerk, dt_ego, 0.5).max()
+    n_t = None; a_lat_n = None; dt_nash = 0.1   # will be overwritten if Nash available
+    if nash is not None and t_e is not None and \
+       'u1_lat' in nash.columns and 'Time' in nash.columns:
+        t0_ph, t1_ph = t_e[0], t_e[-1]
+        nmask = (nash['Time'].values >= t0_ph) & (nash['Time'].values <= t1_ph)
+        if nmask.any():
+            n_u1_full = nash['u1_lat'].values[nmask]
+            n_t_full  = nash['Time'].values[nmask]
+            step_idx  = np.where(np.abs(np.diff(n_u1_full)) > 1e-7)[0] + 1
+            step_idx  = np.concatenate([[0], step_idx])
+            if len(step_idx) > 2:
+                n_t     = n_t_full[step_idx]
+                dt_nash = float(np.median(np.diff(n_t))) if len(n_t) > 1 else 0.1
+                # a_lat at Nash timestamps: interpolate from high-rate vx*psi_dot
+                a_lat_n = np.interp(n_t, t_e, a_lat)
+                jerk_n  = np.gradient(a_lat_n, dt_nash)
+                wjlat_full = _moving_avg(jerk_n, dt_nash, 0.5).max()
+                jerk_rate_note = f'Nash-rate ~{dt_nash:.2f}s, {len(n_t)} steps'
+
     if is_merge:
-        # R79 s5.6.4.4: report full phase AND post-onset (excl. first 1 s human turning onset)
+        # R79 s5.6.4.4: report full phase AND post-onset (excl. first 1 s human turning onset).
+        # Post-onset jerk also computed at Nash-rate using the same n_t / a_lat_n arrays if
+        # available, to avoid double-counting step-change artifacts.
+        wlat_post = wlat_full; wjlat_post = wjlat_full; frac3_post = frac3_full
         if t_e is not None and len(t_e) > 0:
             t_skip = t_e[0] + 1.0
             post_mask = t_e >= t_skip
             if post_mask.sum() > 10:
                 a_lat_post  = a_lat[post_mask]
-                jerk_post   = lat_jerk[post_mask]
                 wlat_post   = np.abs(a_lat_post).max()
-                wjlat_post  = _moving_avg(jerk_post, dt_ego, 0.5).max()
                 frac3_post  = (np.abs(a_lat_post) > 3.0).mean() * 100
-            else:
-                wlat_post = wlat_full; wjlat_post = wjlat_full; frac3_post = frac3_full
-        else:
-            wlat_post = wlat_full; wjlat_post = wjlat_full; frac3_post = frac3_full
+                # Jerk post-onset at Nash-rate if available, else high-rate fallback
+                if jerk_rate_note.startswith('Nash-rate'):
+                    post_nash_mask = n_t >= t_skip
+                    if post_nash_mask.sum() > 2:
+                        jerk_post_n = np.gradient(a_lat_n[post_nash_mask], dt_nash)
+                        wjlat_post  = _moving_avg(jerk_post_n, dt_nash, 0.5).max()
+                    # else keep wjlat_post = wjlat_full
+                else:
+                    jerk_post   = np.gradient(a_lat_post, dt_ego)
+                    wjlat_post  = _moving_avg(jerk_post, dt_ego, 0.5).max()
 
         s1f = ok if wlat_full <= 1.0 else fail
         s2f = ok if wlat_full <= 3.0 else fail
@@ -402,8 +437,8 @@ def _lat_r79_iso11270(ax_e, psi_e, vx_e, phase_label='', t_e=None, is_merge=True
         print(f'  R79/ISO11270     Lat accel (total, full phase) <= 3.0 m/s2:  worst = {wlat_full:.2f} m/s2  -> {s2f}')
         print(f'  R79  s5.6.4.4(a) Lat accel (excl. 1st s onset) <= 1.0 m/s2: worst = {wlat_post:.2f} m/s2  -> {s1p}')
         print(f'  R79/ISO11270     Lat accel (excl. 1st s onset) <= 3.0 m/s2:  worst = {wlat_post:.2f} m/s2  -> {s2p}  ({frac3_post:.1f}% >3)')
-        print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (full)  <= 5.0 m/s3:    worst = {wjlat_full:.2f} m/s3  -> {s3f}')
-        print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (excl.)  <= 5.0 m/s3:   worst = {wjlat_post:.2f} m/s3  -> {s3p}')
+        print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (full)  <= 5.0 m/s3:    worst = {wjlat_full:.2f} m/s3  -> {s3f}  ({jerk_rate_note})')
+        print(f'  ISO 11270 s5.4   Lat jerk avg 0.5s (excl.)  <= 5.0 m/s3:   worst = {wjlat_post:.2f} m/s3  -> {s3p}  ({jerk_rate_note})')
         print(f'  ISO 11270 s5.4   Long. decel (LKAS) <= 3.0 m/s2:           worst = {wlong:.2f} m/s2  -> {s4}')
     else:
         # ISO 11270 s5.4 LKAS steady-state (Following phase): no lane-change framing
@@ -452,7 +487,7 @@ def _ttc_merge(phase_name):
     # Relative velocity: ego approaching leader (positive = closing)
     t_ph = t_gaps[phase_col.isin([phase_name]).values]
     vx_leader = None
-    for name, df in platoon.items():
+    for _name, df in platoon.items():
         vx_leader = np.interp(t_ph, df['Time'].values, df['vx'].values)
         break   # use first platoon vehicle (Car1) as leader proxy
     if vx_leader is None:
