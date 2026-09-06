@@ -246,7 +246,7 @@ namespace NashPlatoon
             double[] P1 = BuildPMatrix((double)W.R1_lat, 1.0);
             var (P1d, P1i, P1p) = MatrixOps.DenseSymToUpperCsc(P1, Nu);
             double[] l1 = new double[_mCon], u1 = new double[_mCon];
-            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxSystem, 22f, _Bc1, _Bc3), 0f);
+            FillBounds(l1, u1, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxSystem, _vxCache, _Bc1, _Bc3), 0f);
             _s1 = new OsqpSolver(SolverSettings());
             _s1.Setup(Nu, _mCon, P1d, P1i, P1p, q0, _Adata, _Ai, _Ap, l1, u1);
 
@@ -258,7 +258,7 @@ namespace NashPlatoon
                 var (P2d, P2i, P2p) = MatrixOps.DenseSymToUpperCsc(P2, Nu);
 
                 double[] l2 = new double[_mCon], u2 = new double[_mCon];
-                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxHuman, 22f, _Bc1, _Bc3), 0f);
+                FillBounds(l2, u2, W.DeltaMin, W.DeltaMax, DDeltaFromJerk(W.LatJerkMaxHuman, _vxCache, _Bc1, _Bc3), 0f);
 
                 _s2[i] = new OsqpSolver(SolverSettings());
                 _s2[i].Setup(Nu, _mCon, P2d, P2i, P2p, q0, _Adata, _Ai, _Ap, l2, u2);
@@ -443,8 +443,8 @@ namespace NashPlatoon
             return q;
         }
 
-        // Convert lateral jerk limit → per-step Δδ, using the full analytical derivation
-        // from the continuous-time dynamic-bicycle Jacobian (Ac, Bc).
+        // Convert lateral jerk limit → per-step Δδ per player, using the full analytical
+        // derivation from the continuous-time dynamic-bicycle Jacobian (Ac, Bc).
         //
         // Occupant-felt lateral acceleration (world frame):
         //   a_lat = ẏ_body + vx·ψ̇        (body-to-world rotation, vx ≈ const per tick)
@@ -452,22 +452,14 @@ namespace NashPlatoon
         // Time derivative:
         //   d(a_lat)/dt = ÿ_body + vx·ψ̈
         //               = ẋ[1] + vx·ẋ[3]              (from state-space)
-        //               = (Ac[1,·]·x + Bc[1]·δ) + vx·(Ac[3,·]·x + Bc[3]·δ)
         //               = f(states) + [Bc[1] + vx·Bc[3]]·δ                (analytical)
         //
         // For a zero-order-hold step Δδ over one tick dt, the induced Δa_lat is:
-        //   Δa_lat = Bc[1]·Δδ                          (immediate a_lat_body jump)
-        //          + vx·Bc[3]·Δδ·dt                    (integrated ψ̇ growth over dt)
+        //   Δa_lat = Bc[1]·Δδ + vx·Bc[3]·Δδ·dt
         //   jerk   = Δa_lat/dt = (Bc[1]/dt + vx·Bc[3])·Δδ
         //
-        //   →  Δδ_max = jerk_max / (Bc[1]/dt + vx·Bc[3])
-        //             = jerk_max·dt / (Bc[1] + vx·Bc[3]·dt)
+        //   →  Δδ_max = jerk_max·dt / (Bc[1] + vx·Bc[3]·dt)
         //
-        // Both continuous-time coefficients come directly from GetLatJacobian, so the
-        // limit reflects the exact linearisation the solver is using.  Empirically the
-        // realised jerk is ~1.8× the analytical value because of tire-slip state feedback
-        // outside the linear Jacobian — treated in ISO reporting rather than by tighter
-        // clamping to avoid starving the solver of authority.
         float DDeltaFromJerk(float jerkMax, float vx, float Bc1, float Bc3)
         {
             float coeff = Mathf.Max(Bc1 + vx * Bc3 * T.NashDtLat, 1e-3f);
