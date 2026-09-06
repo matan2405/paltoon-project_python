@@ -55,6 +55,12 @@ simulator_unity/Assets/_Recovery.meta
 Thumbs.db
 simulator_unity/sim.slnx
 
+# --- Research Documents (PDFs, images, binaries not tracked) ---
+וועדת אתיקה/*.pdf
+וועדת אתיקה/Protocol_Form-reference_images/
+וועדת אתיקה/Protocol_Form_images/
+דוח התקדמות/
+
 # --- Media (Handled by LFS) ---
 # למרות שהגדרת LFS, מומלץ לא להתעלם מהם ב-gitignore כדי ש-Git ידע לעקוב אחריהם כ-Pointers
 # *.png  <-- שים לב: מחקתי את החסימה על PNG כדי שתוכל להעלות טקסטורות דרך LFS
