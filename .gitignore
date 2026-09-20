@@ -55,6 +55,11 @@ simulator_unity/Assets/_Recovery.meta
 Thumbs.db
 simulator_unity/sim.slnx
 
+# --- Document Build Scripts ---
+build_meeting_brief.py
+build_proposal.py
+build_questionnaires.py
+
 # --- Research Documents (PDFs, images, binaries not tracked) ---
 וועדת אתיקה/*.pdf
 וועדת אתיקה/Protocol_Form-reference_images/
