@@ -55,6 +55,9 @@ simulator_unity/Assets/_Recovery.meta
 Thumbs.db
 simulator_unity/sim.slnx
 
+# --- Unity Build Output ---
+unity-build/
+
 # --- Document Build Scripts ---
 build_meeting_brief.py
 build_proposal.py
