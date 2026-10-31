@@ -57,7 +57,9 @@ namespace NashPlatoon
         float _r2Current = -1f;
 
         // ── Linearisation cache ───────────────────────────────────────────────
-        float _vxCache = -1f;
+        float _vxCache  = -1f;
+        float _psiCache =  0f;
+        float _vyCache  =  0f;
 
         // Continuous-time B vector from vehicle.GetLatJacobian(), used by DDeltaFromJerk
         // to convert lateral jerk limits into per-step δ-rate bounds.
@@ -120,14 +122,35 @@ namespace NashPlatoon
         // ── Public API ────────────────────────────────────────────────────────
 
         /// Rebuild Ac/Bc from vehicle.GetLatJacobian() and refresh all prediction/cost/OSQP
-        /// matrices. Returns true if a rebuild was triggered (vx drifted > 2 m/s).
+        /// matrices. Returns true if a rebuild was triggered.
+        ///
+        /// Three triggers (any one fires a rebuild):
+        ///   1. vx drift > 2.0 m/s  — Coriolis/centripetal terms scale with vx; at highway
+        ///      speed a 2 m/s band keeps warm-start consistent while catching tyre-force shifts.
+        ///   2. |psi| > 0.05 rad (≈3°) from the last linearisation point  — at Np=20, dt=0.05s
+        ///      (1s horizon) a heading of 0.05 rad projects vx·psi·T = 34·0.05·1 = 1.7m lateral
+        ///      drift that zFree cannot represent with a straight-driving A matrix.  The 0.05 rad
+        ///      threshold is intentionally tighter than the longitudinal 2 m/s band because lateral
+        ///      dynamics are far more sensitive to heading errors.
+        ///   3. |vy| > 1.0 m/s  — the Jacobian is linearised at vy=0 (zero body-slip). Beyond
+        ///      1 m/s the lateral tyre slip angle (vy/vx ≈ 0.03 rad at vx=34) starts to push the
+        ///      tyre force curve into its nonlinear region, and zFree accumulates prediction error
+        ///      that can make OSQP infeasible.
         public bool UpdateLinearization(AdvancedBicycleModel vehicle)
         {
-            float vx = vehicle.GetVx();
-            // 2.0 m/s threshold: at high speed vx oscillates ±0.5 m/s between Nash steps →
-            // frequent SetupSolvers calls broke warm-start consistency → oscillation.
-            if (Mathf.Abs(vx - _vxCache) < 2.0f && _vxCache > 0f) return false;
-            _vxCache = vx;
+            float vx  = vehicle.GetVx();
+            float psi = vehicle.GetPsi();
+            float vy  = -vehicle.GetYDot();   // solver convention: vy = -GetYDot()
+
+            bool vxChanged  = _vxCache <= 0f || Mathf.Abs(vx  - _vxCache) >= 2.0f;
+            bool psiChanged = Mathf.Abs(psi - _psiCache) >= 0.05f;
+            bool vyChanged  = Mathf.Abs(vy  - _vyCache)  >= 1.0f;
+
+            if (!vxChanged && !psiChanged && !vyChanged) return false;
+
+            _vxCache  = vx;
+            _psiCache = psi;
+            _vyCache  = vy;
 
             var (Ac2d, Bc1d) = vehicle.GetLatJacobian();
             double[] Ac = ToDoubleRowMajor(Ac2d, NxLat);
@@ -136,6 +159,19 @@ namespace NashPlatoon
             _Bc3 = Bc1d[3];   // ∂ψ̈/∂δ = 2·lf·Caf/Iz [rad/s² per rad]
             var (Ad, Bd) = MatrixOps.ZOH(Ac, Bc, NxLat, 1, T.NashDtLat);
             SetupSolvers(Ad, Bd);
+
+            // When psi or vy triggered the rebuild the warm-start sequence was computed
+            // against the old linearisation point and may be infeasible for the new QP.
+            // Re-seed both warm-starts with the last applied steering angle held constant
+            // across the horizon: feasible (inside box constraints), continuous (no δ jump),
+            // and closer to the true solution than the stale multi-step sequence.
+            if (psiChanged || vyChanged)
+            {
+                for (int k = 0; k < _ws1.Length; k++) _ws1[k] = _u1Prev;
+                for (int i = 0; i < _ws2.Length; i++)
+                    for (int k = 0; k < _ws2[i].Length; k++) _ws2[i][k] = _u2Prev;
+            }
+
             return true;
         }
 
@@ -351,6 +387,7 @@ namespace NashPlatoon
         public void Reset()
         {
             _u1Prev = 0; _u2Prev = 0; _aLatPrev = 0f; _highJerkTime = 0f;
+            _vxCache = -1f; _psiCache = 0f; _vyCache = 0f;   // force re-linearise on next tick
             Array.Clear(_ws1, 0, _ws1.Length);
             for (int i = 0; i < _ws2.Length; i++)
                 Array.Clear(_ws2[i], 0, _ws2[i].Length);
