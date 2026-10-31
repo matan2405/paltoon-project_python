@@ -19,6 +19,7 @@ MonoBehaviour:
   LongMinSafeThw: 0.5
   LongMinSafeDistFloor: 5
   LongEmergencyOffset: 1
+  MsdReactionTime: 0.1
   PlatoonTimeGap: 0.5
   StandstillDist: 2
   VehicleLength: 4.177

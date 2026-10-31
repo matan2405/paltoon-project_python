@@ -15,17 +15,41 @@ public class SafetyFieldConfig : ScriptableObject {
     public float LongMaxForce      = 800.0f;  // LONG_SAFETY_MAX_REPULSIVE_FORCE [N]
     public float LongEmaAlpha      = 0.2f;    // LONG_SAFETY_FILTER_ALPHA
 
-    // THW-based safety distance (Wang 2016: critical THW = 1s + critical TTC = 4s).
-    // Replaces the fixed 7m LongMinSafeDist so the safety zone scales with speed.
-    [Header("Long — THW-based safety (Wang 2016)")]
-    public float LongMinSafeThw       = 1.0f;   // critical THW [s]
-    public float LongMinSafeDistFloor = 5.0f;   // floor at low speed [m] (vehicle length + clearance)
-    public float LongEmergencyOffset  = 1.0f;   // emergency zone width above MinSafe [m]
+    // Dynamic minimum safe distance — kinematic worst-case stopping distance.
+    // Derivation (Ioannou & Chien 1993, IEEE Trans. Veh. Technol., Eq. 1 simplified):
+    //   At t=0 the leader begins full braking at ap; the follower system needs τ seconds
+    //   to detect and actuate. During [0, τ]: follower travels vf·τ at constant speed;
+    //   leader travels vp·τ − ½·ap·τ² ≈ vp·τ (τ small). After τ both brake to rest:
+    //     follower braking distance = vf²/(2·af)
+    //     leader  braking distance  = vp²/(2·ap)   (already had τ seconds head-start)
+    //   Collision-free condition: gap ≥ (distance follower travels) − (distance leader travels)
+    //     gap ≥ vf·τ + vf²/(2·af) − vp²/(2·ap)
+    //   → MSD = vf·τ + vf²/(2·af) − vp²/(2·ap)
+    // τ = automated system sensor + actuation delay (not human reaction time).
+    // When af=ap and vf=vp the braking terms cancel → MSD = vf·τ (pure reaction gap).
+    // Floor prevents MSD from going negative when the leader brakes harder than the ego.
+    [Header("Long — Dynamic MSD (Ioannou & Chien 1993)")]
+    public float LongMinSafeThw       = 1.0f;   // critical THW [s] — kept for fallback
+    public float LongMinSafeDistFloor = 5.0f;   // absolute floor at low speed [m]
+    public float LongEmergencyOffset  = 1.0f;   // emergency zone width above MSD [m]
+    public float MsdReactionTime = 0.1f;  // automated system sensor + actuation delay τ [s] (Ioannou & Chien 1993)
 
-    public float ComputeMinSafeDist(float vx)   =>
-        Mathf.Max(LongMinSafeDistFloor, LongMinSafeThw * vx);
-    public float ComputeEmergencyDist(float vx) =>
-        ComputeMinSafeDist(vx) + LongEmergencyOffset;
+    // MSD(vf, vp) = vf·τ + vf²/(2·af) − vp²/(2·ap), floored at LongMinSafeDistFloor.
+    // af and ap come from GetPhysicalAccelBounds_Pred() — the same braking capacity the
+    // controller uses in collision-avoidance (aMinK). Pass |aMinEgo| and |aMinLeader|.
+    // When af = ap and vf = vp the braking terms cancel → MSD = vf·τ (pure reaction gap).
+    public float ComputeMinSafeDist(float vx, float vxLeader = 0f,
+                                    float aEgoBrake = 7.85f, float aLeaderBrake = 7.85f)
+    {
+        float reactionGap = vx * MsdReactionTime;
+        float brakingGap  = vx * vx / (2f * Mathf.Max(aEgoBrake,    0.1f))
+                          - vxLeader * vxLeader / (2f * Mathf.Max(aLeaderBrake, 0.1f));
+        return Mathf.Max(LongMinSafeDistFloor, reactionGap + brakingGap);
+    }
+
+    public float ComputeEmergencyDist(float vx, float vxLeader = 0f,
+                                      float aEgoBrake = 7.85f, float aLeaderBrake = 7.85f) =>
+        ComputeMinSafeDist(vx, vxLeader, aEgoBrake, aLeaderBrake) + LongEmergencyOffset;
 
     // ── Platoon geometry (shared by safety force and reference generators) ────────
     [Header("Platoon geometry")]

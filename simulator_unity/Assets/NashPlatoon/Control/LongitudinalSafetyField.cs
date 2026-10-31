@@ -70,8 +70,8 @@ public class LongitudinalSafetyField
         float gapErr = desGap - gap;
         float vRel   = vx - virt.GetVx();
 
-        float minSafe   = _c.ComputeMinSafeDist(vx);
-        float emergDist = _c.ComputeEmergencyDist(vx);
+        float minSafe   = _c.ComputeMinSafeDist(vx, virt.GetVx());
+        float emergDist = _c.ComputeEmergencyDist(vx, virt.GetVx());
 
         float fLeader;
         if (gap < minSafe)
@@ -208,7 +208,9 @@ public class LongitudinalSafetyField
             // Bypass EMA in emergency zone — filter lag causes the authority allocator
             // to see an attenuated force (0.2×Max on the first step), giving the Nash
             // insufficient authority to brake hard before impact.
-            if (gap < _c.ComputeEmergencyDist(vx))
+            ego.GetPhysicalAccelBounds_Pred(vx, out float aMinBypass, out float _);
+            leader.GetPhysicalAccelBounds_Pred(leader.GetVx(), out float aMinLBypass, out float _aMaxLBypass);
+            if (gap < _c.ComputeEmergencyDist(vx, leader.GetVx(), -aMinBypass, -aMinLBypass))
             {
                 _forceFilt = raw;
                 return _forceFilt;
@@ -280,8 +282,10 @@ public class LongitudinalSafetyField
         if (gap < 0f)
             return Mathf.Clamp(gap / _c.LongDistanceDecay * _c.LongMaxForce, -_c.LongMaxForce, 0f);
 
-        float minSafe   = _c.ComputeMinSafeDist(ego.GetVx());
-        float emergDist = _c.ComputeEmergencyDist(ego.GetVx());
+        ego.GetPhysicalAccelBounds_Pred(ego.GetVx(), out float aMinEgo, out float _aMaxEgo);
+        leader.GetPhysicalAccelBounds_Pred(leader.GetVx(), out float aMinLeader, out float _aMaxLeader);
+        float minSafe   = _c.ComputeMinSafeDist(ego.GetVx(), leader.GetVx(), -aMinEgo, -aMinLeader);
+        float emergDist = _c.ComputeEmergencyDist(ego.GetVx(), leader.GetVx(), -aMinEgo, -aMinLeader);
 
         // Hard safety zones (inner = MIN_SAFE, outer = EMERGENCY_BRAKE)
         if (gap < minSafe)
@@ -335,8 +339,11 @@ public class LongitudinalSafetyField
         // gapR < 0 means the vehicle is now ahead of ego — no follower force applies.
         if (gapR < 0f) return 0f;
 
-        float minSafeF   = _c.ComputeMinSafeDist(follower.GetVx());
-        float emergDistF = _c.ComputeEmergencyDist(follower.GetVx());
+        // follower is closing on ego: follower=vf, ego=vp (ego is the "leader" from follower's view)
+        follower.GetPhysicalAccelBounds_Pred(follower.GetVx(), out float aMinFoll, out float _aMaxFoll);
+        ego.GetPhysicalAccelBounds_Pred(ego.GetVx(), out float aMinEgoF, out float _aMaxEgoF);
+        float minSafeF   = _c.ComputeMinSafeDist(follower.GetVx(), ego.GetVx(), -aMinFoll, -aMinEgoF);
+        float emergDistF = _c.ComputeEmergencyDist(follower.GetVx(), ego.GetVx(), -aMinFoll, -aMinEgoF);
 
         if (gapR < minSafeF)
             return _c.LongMaxForce;

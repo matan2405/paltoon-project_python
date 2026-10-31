@@ -127,7 +127,7 @@ public class LongitudinalReferenceGen
                 // Routes hard-brake demand through Player 1's reference so the Nash
                 // solver produces a bounded, cooperative deceleration instead of a
                 // discontinuous NashBrake=1 that violates ISO 11270 §5.4 (3 m/s²).
-                float minSafeDynamic = _sf.ComputeMinSafeDist(vx);
+                float minSafeDynamic = _sf.ComputeMinSafeDist(vx, lv, -aMinK);
 
                 if (ttc < _c.TtcThreshold || gap < minCritGap || gap < minSafeDynamic)
                 {
