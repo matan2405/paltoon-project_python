@@ -286,7 +286,9 @@ public class NashCoordinator : MonoBehaviour
             float overrideGap = overrideLeader.GetPosition().z
                               - ego.GetPosition().z
                               - overrideLeader.GetLength() / 2f - ego.GetLength() / 2f;
-            if (overrideGap < settings.SafetyField.ComputeMinSafeDist(ego.GetVx()))
+            ego.GetPhysicalAccelBounds_Pred(ego.GetVx(), out float aMinOvr, out float _aMaxOvr);
+            overrideLeader.GetPhysicalAccelBounds_Pred(overrideLeader.GetVx(), out float aMinLOvr, out float _aMaxLOvr);
+            if (overrideGap < settings.SafetyField.ComputeMinSafeDist(ego.GetVx(), overrideLeader.GetVx(), -aMinOvr, -aMinLOvr))
             {
                 ego.NashBrake      = 1f;
                 ego.NashThrottle   = 0f;
@@ -549,39 +551,26 @@ public class NashCoordinator : MonoBehaviour
     {
         var lat = EnsureLatNash();
 
-        // GapSearch R1/R2 override — applied once after solver is ready.
-        // Reduces effort penalty so Nash can apply enough δ to damp a large entry ψ.
-        // Restored to default on the first Merge tick so lane-change effort is normal.
+        // GapSearch R1/R2: applied at GapSearch entry (EnableNash) and restored at
+        // GapSearch→Merge (UpdatePhase). _latGsRApplied guards against re-application
+        // if the solver is recreated mid-phase.
         if (Phase == MergePhase.GapSearch && !_latGsRApplied)
         {
             lat.UpdateR1(settings.Nash.R1_lat_GapSearch);
             lat.UpdateR2(settings.Nash.R2_lat_GapSearch);
             _latGsRApplied = true;
         }
-        else if (Phase != MergePhase.GapSearch && _latGsRApplied)
-        {
-            lat.UpdateR1(settings.Nash.R1_lat);
-            lat.UpdateR2(settings.Nash.R2_lat);
-            _latGsRApplied = false;
-        }
 
         // Keep HumanRef cubic origin in sync with ego position during GapSearch.
         if (Phase == MergePhase.GapSearch)
-            _latRef.UpdateGapSearchOrigin(-ego.GetY(), -ego.GetYDot());
-
-        // During GAP_SEARCH track the current ego y as the lateral target.
-        // Goal: stabilise ψ→0 and vy→0 wherever the vehicle is, not return to _gsLockedY.
-        // Chasing a fixed entry point when vy≠0 at J-press creates large yErr → large λ_lat
-        // → the solver fights to pull back to a position already passed, amplifying ψ and
-        // causing the vehicle to overshoot far to the opposite side (→ collision with Car3).
-        // Tracking ego.GetY() keeps yErr≈0 so authority stays low and the solver focuses
-        // on zeroing ψ/vy. Once stabilised the vehicle holds its current y naturally.
-        // During MERGE/FOLLOWING use the actual platoon lane target.
-        if (Phase == MergePhase.GapSearch)
+        {
             _gsLockedY = -ego.GetY();
-        float latTarget = (Phase == MergePhase.GapSearch)
-                        ? _gsLockedY
-                        : platoonLaneY;
+            _latRef.UpdateGapSearchOrigin(-ego.GetY(), -ego.GetYDot());
+        }
+
+        // _gsLockedY is snapped to ego.y at every GapSearch tick (above) and at
+        // GapSearch→Merge entry (UpdatePhase). Both Merge and Following use platoonLaneY.
+        float latTarget = (Phase == MergePhase.GapSearch) ? _gsLockedY : platoonLaneY;
 
         float force = _latSafety.Compute(ego, platoon);
         _latForceEma = force;
@@ -606,9 +595,15 @@ public class NashCoordinator : MonoBehaviour
         if (Phase == MergePhase.GapSearch)
         {
             forceForAuth = 0f;
-            // Projected lateral drift over NashDtLat: surrogate yErr that grows with ψ
-            float psiSurrogate = ego.GetVx() * Mathf.Sin(ego.GetPsi()) * settings.Timing.NashDtLat;
-            yErrForAuth = psiSurrogate;
+            // Projected lateral drift over the GapSearch settling horizon.
+            // T_settle matches the reference generator: max(1.0, 4*|vy|/0.8).
+            // Using the full settle time makes the surrogate comparable in scale to
+            // laneHalf (1.75 m), so the authority sigmoid produces meaningful λ even
+            // at small psi — preventing heading build-up before it becomes large.
+            float vy0gs   = -ego.GetYDot();
+            float T_settle = Mathf.Max(1.0f, 4f * Mathf.Abs(vy0gs) / 0.8f);
+            float psiSurrogate = ego.GetVx() * Mathf.Abs(ego.GetPsi()) * T_settle;
+            yErrForAuth = Mathf.Min(psiSurrogate, laneWidth * 0.5f);
         }
         else if (Phase == MergePhase.Following)
         {
@@ -801,15 +796,31 @@ public class NashCoordinator : MonoBehaviour
                                  < settings.Timing.MergeGapThreshold;
                     }
 
-                    if (t - _gapSearchStart >= 2.0f && velReady && gapReady)
+                    bool psiReady = Mathf.Abs(ego.GetPsi()) < settings.Timing.MergePsiThreshold;
+
+                    if (t - _gapSearchStart >= 2.0f && velReady && gapReady && psiReady)
                     {
+                        // ── Longitudinal init ──────────────────────────────────────────
                         _prevGapErr     = 0f;
                         _prevGapErrTime = t;
-                        _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
                         // Switch to Merge R1: vel_err≈0 at this point so R1=75000 gives u1≈0.32 m/s²
                         // (insufficient to close gap_err≈14m). R1_long_Merge=10000 gives u1≈1.36 m/s².
-                        // GapSearch used R1_long=75000 safely: large vel_err clips to aMax regardless of R1.
                         _longNash.UpdateR1(settings.Nash.R1_long_Merge);
+
+                        // ── Lateral init ───────────────────────────────────────────────
+                        // Snap _gsLockedY to the current ego position before Phase changes.
+                        // RunLatNashStep reads _gsLockedY to compute latTarget; if it were
+                        // stale (last written at the previous lat tick, up to NashDtLat ago)
+                        // latTarget would jump immediately to platoonLaneY and inject a full
+                        // 3.5 m yErr step that destabilises psi. The snap here ensures the
+                        // first Merge lat tick sees yErr = 0.
+                        _gsLockedY = -ego.GetY();
+                        _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        // Restore lat R1/R2 from GapSearch overrides to normal Merge values.
+                        EnsureLatNash().UpdateR1(settings.Nash.R1_lat);
+                        EnsureLatNash().UpdateR2(settings.Nash.R2_lat);
+                        _latGsRApplied = false;
+
                         Phase = MergePhase.Merge;
                         Debug.Log($"[NashCoordinator] GAP_SEARCH → MERGE at t={t:F1}s (velErr={gsVelErr:F2} m/s) | " +
                                   $"Calibrator end-of-GapSearch: {_driverCalib.GetStatusString()}");
@@ -870,7 +881,10 @@ public class NashCoordinator : MonoBehaviour
                         _prevGapErrTime    = t;
                         _followingDivTimer = 0f;
                         _phaseHoldTimer    = 0f;
+                        _gsLockedY = -ego.GetY();
                         _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        EnsureLatNash().UpdateR1(settings.Nash.R1_lat);
+                        EnsureLatNash().UpdateR2(settings.Nash.R2_lat);
                         Phase = MergePhase.Merge;
                         Debug.Log($"[NashCoordinator] FOLLOWING → MERGE (lateral) at t={t:F1}s yErr={fYErr:F3}m > quarterLane={quarterLane:F3}m");
                         break;
@@ -891,7 +905,10 @@ public class NashCoordinator : MonoBehaviour
                         _prevGapErrTime    = t;
                         _followingDivTimer = 0f;
                         _phaseHoldTimer    = 0f;
+                        _gsLockedY = -ego.GetY();
                         _latRef.OnMergeEntry(-ego.GetY(), -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), ego.GetVx(), platoonLaneY, t);
+                        EnsureLatNash().UpdateR1(settings.Nash.R1_lat);
+                        EnsureLatNash().UpdateR2(settings.Nash.R2_lat);
                         Phase = MergePhase.Merge;
                         Debug.Log($"[NashCoordinator] FOLLOWING → MERGE (longitudinal) at t={t:F1}s " +
                                   $"gapFrac={fGapFrac:F2} divRate={gapDivRate:F2} " +

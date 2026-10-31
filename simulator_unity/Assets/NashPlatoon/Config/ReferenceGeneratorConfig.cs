@@ -46,6 +46,16 @@ public class ReferenceGeneratorConfig : ScriptableObject {
     public float MaxHeadingDeg     = 4.0f;    // max heading angle for sys trajectory shaping [deg]
     public float SysTlcMultiplier  = 1.5f;    // sys T_lc = human TLC × this
 
+    // Adaptive re-anchor threshold for Merge polynomial (LateralReferenceGen).
+    // When |y_actual - y_polynomial(τ)| > max(ReanchorFrac × |dy_remaining|, ReanchorMinDist),
+    // the polynomial is re-anchored to the current state.
+    // ReanchorFrac scales with remaining distance (permissive far, tight near target).
+    // ReanchorMinDist is a floor that prevents excessive re-anchoring when dy_remaining is
+    // small (e.g. near target or overshoot): without it, threshold→0 and every small
+    // oscillation triggers a re-anchor, feeding instability.
+    public float ReanchorFrac    = 0.3f;
+    public float ReanchorMinDist = 0.4f;  // floor [m] — no re-anchor for deviations below this
+
     // ── R2 Human Lateral — Lee & Olsen 2004 (~97 km/h, 8,667 lane changes) ───
     [Header("R2 Human Lateral — Lee & Olsen 2004 (~97 km/h)")]
     public float R2MaxHeadingDeg   = 2.6f;    // empirical max heading at lane change [deg]

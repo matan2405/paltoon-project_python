@@ -18,6 +18,7 @@ public class SimTimingConfig : ScriptableObject {
     // GapSearch → Merge
     public float MergeVelThreshold       = 1.5f;   // max |velErr| before lateral merge starts [m/s]
     public float MergeGapThreshold       = 0.40f;  // max |gap-desGap|/desGap before merge [–]
+    public float MergePsiThreshold       = 0.08f;  // max |psi| before lateral merge starts [rad] (~4.6°)
     // Merge → Following
     public float MergeGapTolerance       = 0.15f;  // max |gap-desGap|/desGap to enter Following [–]
     public float MergeVelTolerance       = 0.5f;   // max |velErr| to enter Following [m/s]

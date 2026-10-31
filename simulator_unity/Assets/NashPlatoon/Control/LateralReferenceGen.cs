@@ -209,11 +209,61 @@ public class LateralReferenceGen
             // Time-based polynomial locked to entry state.
             // Uses quintic Hermite with non-zero entry yDot so the polynomial
             // matches the vehicle's actual lateral velocity at merge entry.
+            //
+            // Adaptive re-anchor: if the vehicle has drifted far from where the polynomial
+            // predicts (e.g. due to u1/u2 conflict or overshoot), re-anchor the polynomial
+            // to the current state. The threshold scales with remaining lateral distance so
+            // it is permissive far from the target (large dy → large tolerance) and tight
+            // near the target (small dy → sensitive to overshoot).
+            //   threshold = ReanchorFrac × |dy_remaining|
+            // where ReanchorFrac ≈ 0.3 (30% of remaining distance).
+            if (_mergeTlcSys < 0f)
+                OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), vx, targetY, wallTime);  // fallback init
+
+            {
+                float tElapsedCheck = wallTime - _mergeEntryTime;
+                float tauCheck      = _mergeTlcSys > 0f ? tElapsedCheck / _mergeTlcSys : 1f;
+                float dyRemaining   = targetY - y0;
+
+                float yPolyNow;
+                if (tauCheck >= 1f)
+                {
+                    yPolyNow = targetY;
+                }
+                else
+                {
+                    float vT_c  = _mergeEntryYDot * _mergeTlcSys;
+                    float dyM_c = targetY - _mergeEntryY;
+                    float c3_c  = 10f * dyM_c - 6f * vT_c;
+                    float c4_c  = -15f * dyM_c + 8f * vT_c;
+                    float c5_c  = 6f * dyM_c - 3f * vT_c;
+                    float tc2 = tauCheck * tauCheck;
+                    float tc3 = tc2 * tauCheck;
+                    float tc4 = tc3 * tauCheck;
+                    float tc5 = tc4 * tauCheck;
+                    yPolyNow = _mergeEntryY + vT_c * tauCheck + c3_c * tc3 + c4_c * tc4 + c5_c * tc5;
+                }
+
+                float polyDeviation = Mathf.Abs(y0 - yPolyNow);
+                float threshold     = Mathf.Max(_c.ReanchorFrac * Mathf.Abs(dyRemaining),
+                                                _c.ReanchorMinDist);
+
+                // Only re-anchor when the vehicle is moving AWAY from the target.
+                // When vy is toward the target (vyTowardTarget > 0), the vehicle is
+                // converging naturally — tau≥1 just means the polynomial is "done" while
+                // the vehicle hasn't yet arrived.  Triggering re-anchor here would always
+                // fire (|dyRemaining| > 0.3*|dyRemaining|) and cause oscillation loops.
+                float vyNow            = -ego.GetYDot();   // solver convention
+                float vyTowardTarget   = vyNow * Mathf.Sign(dyRemaining);
+                bool  movingAwayOrOvershot = vyTowardTarget < 0f || Mathf.Sign(dyRemaining) != Mathf.Sign(targetY - _mergeEntryY);
+
+                if (movingAwayOrOvershot && polyDeviation > threshold)
+                    OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), vx, targetY, wallTime);
+            }
+
             float yStart   = _mergeEntryY;
             float vy0      = _mergeEntryYDot;   // solver-convention yDot at entry
             float dyMerge  = targetY - yStart;
-            if (_mergeTlcSys < 0f)
-                OnMergeEntry(y0, -ego.GetYDot(), ego.GetPsi(), ego.GetPsiDot(), vx, targetY, wallTime);  // fallback init
 
             float T_lc     = _mergeTlcSys;
             float tElapsed = wallTime - _mergeEntryTime;
