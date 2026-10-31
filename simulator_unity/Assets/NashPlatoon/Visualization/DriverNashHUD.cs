@@ -57,7 +57,6 @@ public class DriverNashHUD : MonoBehaviour
     const float CentreW =  340f;
     const float PW      = CentreW + GaugeW;    // 580 px total
     const int   NSeg    =  14;
-    const int   BarSegs =   8;
 
     // ── Runtime refs ─────────────────────────────────────────────────────────
     Image[]  _rpmSegs;
@@ -90,9 +89,9 @@ public class DriverNashHUD : MonoBehaviour
     Image    _statusBg;
     TMP_Text _statusLbl;
 
-    // Authority bar
-    Image[]  _barSegs;
-    Image    _barThumb;
+    // Assist dots (5 circles replacing old authority bar)
+    const int DotCount = 5;
+    Image[]  _assistDots;
     TMP_Text _authLbl;
 
     RectTransform _panelRt;
@@ -343,41 +342,61 @@ public class DriverNashHUD : MonoBehaviour
 
     void RefreshWheelDial()
     {
-        if (_barSegs == null) return;
-
-        // ds = driver share [0=system, 1=driver]
-        float ds  = 1f - _smAuth;
-        // filled segments from RIGHT (driver side)
-        float lit = ds * BarSegs;
-        Color sysCol    = new Color(0.25f, 0.55f, 1f);   // blue  = system
-        Color drvCol    = new Color(0.3f,  0.9f,  0.4f); // green = driver
-        Color dimCol    = new Color(0.12f, 0.14f, 0.18f);
-        for (int i = 0; i < BarSegs; i++)
-        {
-            // i=0 leftmost (system), i=BarSegs-1 rightmost (driver)
-            float t = (float)i / (BarSegs - 1);
-            Color fullCol = Color.Lerp(sysCol, drvCol, t);
-            float fill = Mathf.Clamp01(lit - (BarSegs - 1 - i));
-            _barSegs[i].color = Color.Lerp(dimCol, fullCol, fill);
-        }
-        // thumb position
-        if (_barThumb != null)
-        {
-            float thumbX = Mathf.Lerp(0f, 1f, ds);
-            _barThumb.rectTransform.anchorMin = new Vector2(thumbX, 0f);
-            _barThumb.rectTransform.anchorMax = new Vector2(thumbX, 1f);
-            _barThumb.color = Color.Lerp(sysCol, drvCol, ds);
-        }
+        if (_assistDots == null) return;
 
         bool nash = coordinator != null && coordinator.NashActive;
+        // ds = driver share: 0 = full system assist, 1 = driver fully in control
+        float ds = 1f - _smAuth;
+
+        // How many dots to light: ds maps [0..1] → [0..DotCount]
+        float litCount = nash ? ds * DotCount : 0f;
+
+        for (int i = 0; i < DotCount; i++)
+        {
+            float fill = Mathf.Clamp01(litCount - i);
+            if (nash && fill > 0.5f)
+            {
+                // Colour gradient: blue (low ds) → amber (mid) → green (high ds)
+                Color dotCol = DotColor(ds);
+                _assistDots[i].color = new Color(dotCol.r, dotCol.g, dotCol.b,
+                                                 Mathf.Lerp(0.55f, 1f, fill));
+            }
+            else
+            {
+                _assistDots[i].color = new Color(0.12f, 0.14f, 0.18f, 0.6f);
+            }
+        }
+
+        // Label
         if (!nash)
-        { _authLbl.text = "Manual";        _authLbl.color = new Color(0.45f, 0.45f, 0.45f); }
+        { _authLbl.text = "Manual";         _authLbl.color = new Color(0.45f, 0.45f, 0.45f); }
         else if (ds > 0.75f)
-        { _authLbl.text = "You're driving"; _authLbl.color = drvCol; }
-        else if (ds > 0.4f)
-        { _authLbl.text = "Shared";         _authLbl.color = new Color(1f, 0.82f, 0.2f); }
+        { _authLbl.text = "You're driving"; _authLbl.color = new Color(0.3f,  0.9f,  0.4f); }
+        else if (ds > 0.35f)
+        { _authLbl.text = "Shared";         _authLbl.color = new Color(1f,    0.82f, 0.2f); }
         else
-        { _authLbl.text = "System";         _authLbl.color = sysCol; }
+        { _authLbl.text = "Assist Active";  _authLbl.color = new Color(0.5f,  0.7f,  1f); }
+    }
+
+    // blue(0.35,0.62,1) → amber(0.91,0.66,0.19) → green(0.3,0.9,0.4)
+    static Color DotColor(float ds)
+    {
+        if (ds < 0.5f)
+        {
+            float t = ds / 0.5f;
+            return new Color(
+                Mathf.Lerp(0.35f, 0.91f, t),
+                Mathf.Lerp(0.62f, 0.66f, t),
+                Mathf.Lerp(1.00f, 0.19f, t));
+        }
+        else
+        {
+            float t = (ds - 0.5f) / 0.5f;
+            return new Color(
+                Mathf.Lerp(0.91f, 0.30f, t),
+                Mathf.Lerp(0.66f, 0.90f, t),
+                Mathf.Lerp(0.19f, 0.40f, t));
+        }
     }
 
     void RefreshSpeedLines(float vxMs)
@@ -650,14 +669,13 @@ public class DriverNashHUD : MonoBehaviour
            new Vector2(cx, (cyM + cyB) * 0.5f),
            new Vector2(3f, Mathf.Abs(cyB - cyM) - 22f));
 
-        // Leader car shape — top, gap label above it
-        // ProxH=212: cyT=-42, cyM=-106, cyB=-170
+        // Leader car shape — rotated 90° so the original horizontal silhouette reads as portrait
         _leaderShape = VehicleShape(_proxRoot, "Leader", false);
         CA(_leaderShape.rectTransform, new Vector2(cx, cyT), new Vector2(100f, 36f));
 
         _leaderGapLbl = ChildTxt(_proxRoot, "LGap", "—", 14, true);
         _leaderGapLbl.alignment = TextAlignmentOptions.Center;
-        CA(_leaderGapLbl.rectTransform, new Vector2(cx, cyT + 28f), new Vector2(90f, 20f));
+        CA(_leaderGapLbl.rectTransform, new Vector2(cx, cyT + 42f), new Vector2(90f, 20f));
 
         _selfShape = VehicleShape(_proxRoot, "Self", true);
         CA(_selfShape.rectTransform, new Vector2(cx, cyM), new Vector2(112f, 42f));
@@ -665,14 +683,14 @@ public class DriverNashHUD : MonoBehaviour
         var youLbl = ChildTxt(_proxRoot, "YouLbl", "YOU", 11, true);
         youLbl.alignment = TextAlignmentOptions.Center;
         youLbl.color = new Color(0.75f, 0.75f, 0.75f);
-        CA(youLbl.rectTransform, new Vector2(cx, cyM - 28f), new Vector2(50f, 16f));
+        CA(youLbl.rectTransform, new Vector2(cx, cyM - 42f), new Vector2(50f, 16f));
 
         _followerShape = VehicleShape(_proxRoot, "Follower", false);
         CA(_followerShape.rectTransform, new Vector2(cx, cyB), new Vector2(100f, 36f));
 
         _followerGapLbl = ChildTxt(_proxRoot, "FGap", "—", 14, true);
         _followerGapLbl.alignment = TextAlignmentOptions.Center;
-        CA(_followerGapLbl.rectTransform, new Vector2(cx, cyB - 26f), new Vector2(90f, 20f));
+        CA(_followerGapLbl.rectTransform, new Vector2(cx, cyB - 42f), new Vector2(90f, 20f));
 
         // Speed lines flanking the YOU icon
         if (speedLineTexture != null)
@@ -765,69 +783,55 @@ public class DriverNashHUD : MonoBehaviour
 
     void BuildStatusBar(GameObject root)
     {
-        float yTop  = -ProxH;
-        float barH  = StatusH - 18f;
-        float barW  = 180f;
-        // Layout of right portion: [SYS 32px][bar 180px][YOU 32px][state 90px]
-        // Total right block = 334px, place it starting at PW-334
-        float rightBlockW = 32f + barW + 32f + 90f;
-        float barX  = PW - rightBlockW + 32f;  // bar starts after SYS label
-        float segY  = yTop - (StatusH - barH) * 0.5f;
+        float yTop = -ProxH;
+        // Right block: [5 dots × 14px + 4 gaps × 7px] + 10px + [label 110px] = 214px
+        const float DotSize  = 14f;
+        const float DotGap   =  7f;
+        const float LabelW   = 110f;
+        float dotsBlockW = DotCount * DotSize + (DotCount - 1) * DotGap;
+        float rightBlockW = dotsBlockW + 10f + LabelW;
 
         _statusBg = ChildImg(root, "StatusBg");
         TL(_statusBg.rectTransform, new Vector2(0f, yTop), new Vector2(PW, StatusH));
         _statusBg.color = new Color(0.04f, 0.05f, 0.07f, 0.96f);
 
-        // Phase label — left, stops before right block
+        // Phase label — fills left portion up to right block
         _statusLbl = ChildTxt(root, "StatusTxt",
             "  MANUAL MODE  —  press J to join platoon", 16, true);
         TL(_statusLbl.rectTransform,
            new Vector2(6f, yTop - 4f),
-           new Vector2(PW - rightBlockW - 10f, StatusH - 8f));
+           new Vector2(PW - rightBlockW - 16f, StatusH - 8f));
         _statusLbl.alignment = TextAlignmentOptions.MidlineLeft;
         _statusLbl.color = new Color(0.5f, 0.5f, 0.5f);
 
-        // ── Authority bar: SYS [░░░░████] YOU  State ─────────────────────────
-        var sysLbl = ChildTxt(root, "SysLbl", "SYS", 11, false);
-        sysLbl.alignment = TextAlignmentOptions.MidlineRight;
-        sysLbl.color = new Color(0.25f, 0.55f, 1f);
-        TL(sysLbl.rectTransform,
-           new Vector2(PW - rightBlockW, yTop - 4f), new Vector2(30f, StatusH - 8f));
+        // Vertical divider
+        var divLine = ChildImg(root, "DotDivider");
+        TL(divLine.rectTransform,
+           new Vector2(PW - rightBlockW - 12f, yTop - 10f),
+           new Vector2(1f, StatusH - 20f));
+        divLine.color = new Color(1f, 1f, 1f, 0.1f);
 
-        var barBg = ChildImg(root, "BarBg");
-        barBg.color = new Color(0.08f, 0.09f, 0.12f);
-        TL(barBg.rectTransform, new Vector2(barX, segY), new Vector2(barW, barH));
-
-        float segW = (barW - (BarSegs + 1) * 2f) / BarSegs;
-        _barSegs = new Image[BarSegs];
-        for (int i = 0; i < BarSegs; i++)
+        // 5 assist dots — centred vertically in status bar
+        float dotStartX = PW - rightBlockW;
+        float dotCY     = yTop - StatusH * 0.5f;
+        _assistDots = new Image[DotCount];
+        for (int i = 0; i < DotCount; i++)
         {
-            var seg = ChildImg(root, $"Bar{i}");
-            float sx = barX + 2f + i * (segW + 2f);
-            TL(seg.rectTransform, new Vector2(sx, segY - 2f), new Vector2(segW, barH - 4f));
-            seg.color = new Color(0.12f, 0.14f, 0.18f);
-            _barSegs[i] = seg;
+            var dot = ChildImg(root, $"AssistDot{i}");
+            float dx = dotStartX + i * (DotSize + DotGap) + DotSize * 0.5f;
+            CA(dot.rectTransform, new Vector2(dx, dotCY), new Vector2(DotSize, DotSize));
+            // Make the image a circle by using full corner radius via a round sprite approach —
+            // Unity UI Image defaults to a square; we tint it and rely on the small size reading as round.
+            dot.color = new Color(0.12f, 0.14f, 0.18f);
+            _assistDots[i] = dot;
         }
 
-        _barThumb = ChildImg(root, "BarThumb");
-        var trt = _barThumb.rectTransform;
-        trt.SetParent(barBg.rectTransform, false);
-        trt.anchorMin = new Vector2(0f, 0f);
-        trt.anchorMax = new Vector2(0f, 1f);
-        trt.pivot = new Vector2(0.5f, 0.5f);
-        trt.sizeDelta = new Vector2(3f, 0f);
-        trt.anchoredPosition = Vector2.zero;
-        _barThumb.color = new Color(0.3f, 0.9f, 0.4f);
-
-        var youLbl2 = ChildTxt(root, "YouLbl2", "YOU", 11, false);
-        youLbl2.alignment = TextAlignmentOptions.MidlineLeft;
-        youLbl2.color = new Color(0.3f, 0.9f, 0.4f);
-        TL(youLbl2.rectTransform,
-           new Vector2(barX + barW + 2f, yTop - 4f), new Vector2(30f, StatusH - 8f));
-
+        // Auth label — right of dots
+        float lblX = dotStartX + dotsBlockW + 10f;
         _authLbl = ChildTxt(root, "AuthLbl", "Manual", 13, true);
         TL(_authLbl.rectTransform,
-           new Vector2(barX + barW + 34f, yTop - 4f), new Vector2(88f, StatusH - 8f));
+           new Vector2(lblX, yTop - 4f),
+           new Vector2(LabelW, StatusH - 8f));
         _authLbl.alignment = TextAlignmentOptions.MidlineLeft;
         _authLbl.color = new Color(0.4f, 0.4f, 0.4f);
     }
