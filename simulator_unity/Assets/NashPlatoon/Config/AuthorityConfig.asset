@@ -14,7 +14,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::AuthorityConfig
   LongLambdaMin: 0.1
   LongLambdaMax: 50
-  LongForceMidpoint: 800
+  LongForceMidpoint: 1200
   LongSteepness: 0.015
   LongAlphaBase: 0.05
   LongAlphaFast: 0.12
@@ -30,7 +30,7 @@ MonoBehaviour:
   LatAlphaFast: 0.08
   LatAlphaFastThr: 1.5
   LatAlphaBaseThr: 0.5
-  LongLambdaMaxFollowing: 20
-  LongAlphaFollowing: 0.05
+  LongLambdaMaxFollowing: 5
+  LongAlphaFollowing: 0.2
   AuthVelErrorMaxNoLeader: 15
   LongLambdaMaxNoLeader: 2
