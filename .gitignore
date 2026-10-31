@@ -72,3 +72,7 @@ build_questionnaires.py
 # --- Media (Handled by LFS) ---
 # למרות שהגדרת LFS, מומלץ לא להתעלם מהם ב-gitignore כדי ש-Git ידע לעקוב אחריהם כ-Pointers
 # *.png  <-- שים לב: מחקתי את החסימה על PNG כדי שתוכל להעלות טקסטורות דרך LFS
+# Copilot tooling and run data
+.github/copilot/
+.skills.json
+simulator_unity/VehicleData/data_*/
